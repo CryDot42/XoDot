@@ -744,6 +744,68 @@ float RendererEnvironmentStorage::environment_get_ssao_ao_channel_affect(RID p_e
 	return env->ssao_ao_channel_affect;
 }
 
+// Atmosphere
+
+void RendererEnvironmentStorage::environment_set_atmosphere(RID p_env, bool p_enable, float p_planet_radius, float p_height, const Color &p_ground_albedo, float p_multiscattering_factor, const Color &p_sky_luminance_factor, float p_aerial_perspective_distance_scale, float p_aerial_perspective_start_depth, bool p_affect_directional_lights) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+#ifdef DEBUG_ENABLED
+	if (OS::get_singleton()->get_current_rendering_method() == "gl_compatibility" && p_enable) {
+		WARN_PRINT_ONCE_ED("The atmosphere is only available when using the Forward+ or Mobile renderers.");
+	}
+#endif
+	AtmosphereParams &atmosphere = env->atmosphere;
+	atmosphere.enabled = p_enable;
+	atmosphere.planet_radius = MAX(1.0f, p_planet_radius);
+	atmosphere.height = MAX(0.1f, p_height);
+	atmosphere.ground_albedo = p_ground_albedo;
+	atmosphere.multiscattering_factor = MAX(0.0f, p_multiscattering_factor);
+	atmosphere.sky_luminance_factor = p_sky_luminance_factor;
+	atmosphere.aerial_perspective_distance_scale = MAX(0.0f, p_aerial_perspective_distance_scale);
+	atmosphere.aerial_perspective_start_depth = MAX(0.0f, p_aerial_perspective_start_depth);
+	atmosphere.affect_directional_lights = p_affect_directional_lights;
+}
+
+void RendererEnvironmentStorage::environment_set_atmosphere_rayleigh(RID p_env, const Color &p_scattering, float p_scattering_scale, float p_exponential_distribution) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	env->atmosphere.rayleigh_scattering = p_scattering;
+	env->atmosphere.rayleigh_scattering_scale = MAX(0.0f, p_scattering_scale);
+	env->atmosphere.rayleigh_exponential_distribution = MAX(0.01f, p_exponential_distribution);
+}
+
+void RendererEnvironmentStorage::environment_set_atmosphere_mie(RID p_env, const Color &p_scattering, float p_scattering_scale, const Color &p_absorption, float p_absorption_scale, float p_anisotropy, float p_exponential_distribution) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	env->atmosphere.mie_scattering = p_scattering;
+	env->atmosphere.mie_scattering_scale = MAX(0.0f, p_scattering_scale);
+	env->atmosphere.mie_absorption = p_absorption;
+	env->atmosphere.mie_absorption_scale = MAX(0.0f, p_absorption_scale);
+	env->atmosphere.mie_anisotropy = CLAMP(p_anisotropy, -0.999f, 0.999f);
+	env->atmosphere.mie_exponential_distribution = MAX(0.01f, p_exponential_distribution);
+}
+
+void RendererEnvironmentStorage::environment_set_atmosphere_ozone(RID p_env, const Color &p_absorption, float p_absorption_scale, float p_tip_altitude, float p_width) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	env->atmosphere.ozone_absorption = p_absorption;
+	env->atmosphere.ozone_absorption_scale = MAX(0.0f, p_absorption_scale);
+	env->atmosphere.ozone_tip_altitude = MAX(0.0f, p_tip_altitude);
+	env->atmosphere.ozone_width = MAX(0.01f, p_width);
+}
+
+bool RendererEnvironmentStorage::environment_get_atmosphere_enabled(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, false);
+	return env->atmosphere.enabled;
+}
+
+RendererEnvironmentStorage::AtmosphereParams RendererEnvironmentStorage::environment_get_atmosphere(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, AtmosphereParams());
+	return env->atmosphere;
+}
+
 // SSIL
 
 void RendererEnvironmentStorage::environment_set_ssil(RID p_env, bool p_enable, float p_radius, float p_intensity, float p_sharpness, float p_normal_rejection) {

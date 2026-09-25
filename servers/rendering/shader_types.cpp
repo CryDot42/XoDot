@@ -500,6 +500,15 @@ ShaderTypes::ShaderTypes() {
 	shader_modes[RSE::SHADER_SKY].functions["sky"].built_ins["FOG"] = ShaderLanguage::TYPE_VEC4;
 	shader_modes[RSE::SHADER_SKY].functions["sky"].main_function = true;
 
+	{
+		// The atmosphere of the Environment, where there is one.
+		ShaderLanguage::StageFunctionInfo func;
+		func.arguments.push_back(ShaderLanguage::StageFunctionInfo::Argument("dir", ShaderLanguage::TYPE_VEC3));
+		func.return_type = ShaderLanguage::TYPE_VEC3;
+		shader_modes[RSE::SHADER_SKY].functions["sky"].stage_functions["atmosphere_sky"] = func;
+		shader_modes[RSE::SHADER_SKY].functions["sky"].stage_functions["atmosphere_transmittance"] = func;
+	}
+
 	// sky render modes
 	{
 		shader_modes[RSE::SHADER_SKY].modes.push_back({ PNAME("use_half_res_pass") });

@@ -1385,6 +1385,12 @@ public:
 
 	PASS3(environment_set_ssao_quality, RSE::EnvironmentSSAOQuality, int, bool)
 
+	// Atmosphere
+	PASS10(environment_set_atmosphere, RID, bool, float, float, const Color &, float, const Color &, float, float, bool)
+	PASS4(environment_set_atmosphere_rayleigh, RID, const Color &, float, float)
+	PASS7(environment_set_atmosphere_mie, RID, const Color &, float, const Color &, float, float, float)
+	PASS5(environment_set_atmosphere_ozone, RID, const Color &, float, float, float)
+
 	// SSIL
 	PASS6(environment_set_ssil, RID, bool, float, float, float, float)
 

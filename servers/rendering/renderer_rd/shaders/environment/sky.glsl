@@ -116,6 +116,49 @@ layout(set = 2, binding = 2) uniform texture2D quarter_res;
 
 layout(set = 3, binding = 0) uniform texture3D volumetric_fog_texture;
 
+/* Atmosphere */
+
+#include "atmosphere_data_inc.glsl"
+
+layout(set = 4, binding = 0, std140) uniform AtmosphereBlock {
+	AtmosphereData atmosphere;
+};
+layout(set = 4, binding = 1) uniform texture2D atmosphere_transmittance_lut;
+layout(set = 4, binding = 2) uniform texture2D atmosphere_multiscattering_lut;
+layout(set = 4, binding = 3) uniform texture2D atmosphere_sky_view_lut;
+layout(set = 4, binding = 4) uniform texture3D atmosphere_aerial_perspective_volume;
+
+#define ATMOSPHERE_TRANSMITTANCE_LUT(m_uv) textureLod(sampler2D(atmosphere_transmittance_lut, SAMPLER_LINEAR_CLAMP), m_uv, 0.0)
+#define ATMOSPHERE_MULTISCATTERING_LUT(m_uv) textureLod(sampler2D(atmosphere_multiscattering_lut, SAMPLER_LINEAR_CLAMP), m_uv, 0.0)
+
+#include "atmosphere_inc.glsl"
+
+// Built-in functions of sky shaders.
+
+// The sky's luminance towards p_dir, from the eye: every order of scattering
+// of every light, but not the lights' own disks.
+vec3 atmosphere_sky(vec3 p_dir) {
+	if (atmosphere.enabled == 0) {
+		return vec3(0.0);
+	}
+	vec2 uv = atmosphere_sky_view_dir_to_uv(atmosphere.camera_position, normalize(p_dir));
+	return textureLod(sampler2D(atmosphere_sky_view_lut, SAMPLER_LINEAR_CLAMP), uv, 0.0).rgb * atmosphere.sky_luminance_factor;
+}
+
+// What is left of light coming from far away along p_dir once it has crossed
+// the atmosphere to the eye, such as the sun's or the stars'. Nothing is left
+// of what the planet hides.
+vec3 atmosphere_transmittance(vec3 p_dir) {
+	if (atmosphere.enabled == 0) {
+		return vec3(1.0);
+	}
+	vec3 dir = normalize(p_dir);
+	if (atmosphere_ray_sphere_nearest(atmosphere.camera_position, dir, atmosphere.bottom_radius) >= 0.0) {
+		return vec3(0.0);
+	}
+	return atmosphere_transmittance_to_top(atmosphere.camera_position, dir);
+}
+
 #ifdef USE_CUBEMAP_PASS
 #define AT_CUBEMAP_PASS true
 #else

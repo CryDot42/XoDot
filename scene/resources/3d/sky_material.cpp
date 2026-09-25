@@ -840,3 +840,192 @@ PhysicalSkyMaterial::PhysicalSkyMaterial() {
 
 PhysicalSkyMaterial::~PhysicalSkyMaterial() {
 }
+
+/////////////////////////////////////////
+/* AtmosphereSkyMaterial */
+
+void AtmosphereSkyMaterial::set_sun_disk_scale(float p_scale) {
+	sun_disk_scale = p_scale;
+	RS::get_singleton()->material_set_param(_get_material(), "sun_disk_scale", sun_disk_scale);
+}
+
+float AtmosphereSkyMaterial::get_sun_disk_scale() const {
+	return sun_disk_scale;
+}
+
+void AtmosphereSkyMaterial::set_sun_disk_intensity(float p_intensity) {
+	sun_disk_intensity = p_intensity;
+	RS::get_singleton()->material_set_param(_get_material(), "sun_disk_intensity", sun_disk_intensity);
+}
+
+float AtmosphereSkyMaterial::get_sun_disk_intensity() const {
+	return sun_disk_intensity;
+}
+
+void AtmosphereSkyMaterial::set_night_sky(const Ref<Texture2D> &p_night_sky) {
+	night_sky = p_night_sky;
+	RS::get_singleton()->material_set_param(_get_material(), "night_sky", night_sky.is_valid() ? Variant(night_sky->get_rid()) : Variant());
+}
+
+Ref<Texture2D> AtmosphereSkyMaterial::get_night_sky() const {
+	return night_sky;
+}
+
+void AtmosphereSkyMaterial::set_night_sky_energy(float p_energy) {
+	night_sky_energy = p_energy;
+	RS::get_singleton()->material_set_param(_get_material(), "night_sky_energy", night_sky_energy);
+}
+
+float AtmosphereSkyMaterial::get_night_sky_energy() const {
+	return night_sky_energy;
+}
+
+void AtmosphereSkyMaterial::set_energy_multiplier(float p_multiplier) {
+	energy_multiplier = p_multiplier;
+	RS::get_singleton()->material_set_param(_get_material(), "exposure", energy_multiplier);
+}
+
+float AtmosphereSkyMaterial::get_energy_multiplier() const {
+	return energy_multiplier;
+}
+
+void AtmosphereSkyMaterial::set_use_debanding(bool p_use_debanding) {
+	use_debanding = p_use_debanding;
+	_update_shader(use_debanding);
+	if (shader_set) {
+		RS::get_singleton()->material_set_shader(_get_material(), get_shader_cache());
+	}
+}
+
+bool AtmosphereSkyMaterial::get_use_debanding() const {
+	return use_debanding;
+}
+
+Shader::Mode AtmosphereSkyMaterial::get_shader_mode() const {
+	return Shader::MODE_SKY;
+}
+
+RID AtmosphereSkyMaterial::get_shader_cache() const {
+	return shader_cache[int(use_debanding)];
+}
+
+RID AtmosphereSkyMaterial::get_rid() const {
+	_update_shader(use_debanding);
+	if (!shader_set) {
+		RS::get_singleton()->material_set_shader(_get_material(), get_shader_cache());
+		shader_set = true;
+	}
+	return _get_material();
+}
+
+RID AtmosphereSkyMaterial::get_shader_rid() const {
+	_update_shader(use_debanding);
+	return get_shader_cache();
+}
+
+Mutex AtmosphereSkyMaterial::shader_mutex;
+RID AtmosphereSkyMaterial::shader_cache[2];
+
+void AtmosphereSkyMaterial::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("set_sun_disk_scale", "scale"), &AtmosphereSkyMaterial::set_sun_disk_scale);
+	ClassDB::bind_method(D_METHOD("get_sun_disk_scale"), &AtmosphereSkyMaterial::get_sun_disk_scale);
+	ClassDB::bind_method(D_METHOD("set_sun_disk_intensity", "intensity"), &AtmosphereSkyMaterial::set_sun_disk_intensity);
+	ClassDB::bind_method(D_METHOD("get_sun_disk_intensity"), &AtmosphereSkyMaterial::get_sun_disk_intensity);
+	ClassDB::bind_method(D_METHOD("set_night_sky", "night_sky"), &AtmosphereSkyMaterial::set_night_sky);
+	ClassDB::bind_method(D_METHOD("get_night_sky"), &AtmosphereSkyMaterial::get_night_sky);
+	ClassDB::bind_method(D_METHOD("set_night_sky_energy", "energy"), &AtmosphereSkyMaterial::set_night_sky_energy);
+	ClassDB::bind_method(D_METHOD("get_night_sky_energy"), &AtmosphereSkyMaterial::get_night_sky_energy);
+	ClassDB::bind_method(D_METHOD("set_energy_multiplier", "multiplier"), &AtmosphereSkyMaterial::set_energy_multiplier);
+	ClassDB::bind_method(D_METHOD("get_energy_multiplier"), &AtmosphereSkyMaterial::get_energy_multiplier);
+	ClassDB::bind_method(D_METHOD("set_use_debanding", "use_debanding"), &AtmosphereSkyMaterial::set_use_debanding);
+	ClassDB::bind_method(D_METHOD("get_use_debanding"), &AtmosphereSkyMaterial::get_use_debanding);
+
+	ADD_GROUP("Sun", "sun_disk_");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sun_disk_scale", PROPERTY_HINT_RANGE, "0,20,0.01,or_greater"), "set_sun_disk_scale", "get_sun_disk_scale");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sun_disk_intensity", PROPERTY_HINT_RANGE, "0,4,0.01,or_greater"), "set_sun_disk_intensity", "get_sun_disk_intensity");
+	ADD_GROUP("Night Sky", "night_sky");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "night_sky", PROPERTY_HINT_RESOURCE_TYPE, Texture2D::get_class_static()), "set_night_sky", "get_night_sky");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "night_sky_energy", PROPERTY_HINT_RANGE, "0,16,0.001,or_greater"), "set_night_sky_energy", "get_night_sky_energy");
+	ADD_GROUP("", "");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "energy_multiplier", PROPERTY_HINT_RANGE, "0,128,0.01"), "set_energy_multiplier", "get_energy_multiplier");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "use_debanding"), "set_use_debanding", "get_use_debanding");
+}
+
+void AtmosphereSkyMaterial::cleanup_shader() {
+	for (int i = 0; i < 2; i++) {
+		if (shader_cache[i].is_valid()) {
+			RS::get_singleton()->free_rid(shader_cache[i]);
+		}
+	}
+}
+
+void AtmosphereSkyMaterial::_update_shader(bool p_use_debanding) {
+	MutexLock shader_lock(shader_mutex);
+	int index = int(p_use_debanding);
+	if (shader_cache[index].is_valid()) {
+		return;
+	}
+	shader_cache[index] = RS::get_singleton()->shader_create();
+
+	RS::get_singleton()->shader_set_code(shader_cache[index], vformat(R"(
+// NOTE: Shader automatically converted from )" GODOT_VERSION_NAME " " GODOT_VERSION_FULL_CONFIG R"('s AtmosphereSkyMaterial.
+
+shader_type sky;
+%s
+
+uniform float sun_disk_scale : hint_range(0, 20) = 1.0;
+uniform float sun_disk_intensity : hint_range(0, 4) = 1.0;
+uniform sampler2D night_sky : filter_linear, source_color, hint_default_black;
+uniform float night_sky_energy : hint_range(0, 16) = 1.0;
+uniform float exposure : hint_range(0, 128) = 1.0;
+
+// The sun's angular radius, for a light that doesn't set its own size.
+const float SUN_ANGULAR_RADIUS = 0.004651;
+
+// A light's disk: its illuminance spread over the solid angle it covers, so
+// that it is as bright as the light it casts, darkening towards its limb.
+vec3 light_disk(vec3 eyedir, vec3 direction, vec3 color, float energy, float angular_diameter) {
+	float radius = max(angular_diameter * 0.5, SUN_ANGULAR_RADIUS) * sun_disk_scale;
+	float cos_angle = dot(eyedir, normalize(direction));
+	float cos_radius = cos(radius);
+	if (radius <= 0.0 || cos_angle < cos_radius) {
+		return vec3(0.0);
+	}
+	float r = clamp(acos(clamp(cos_angle, -1.0, 1.0)) / radius, 0.0, 1.0);
+	float limb = 1.0 - 0.6 * (1.0 - sqrt(max(0.0, 1.0 - r * r)));
+	float solid_angle = 2.0 * PI * (1.0 - cos_radius);
+	return color * energy / max(solid_angle, 1e-7) * limb * sun_disk_intensity;
+}
+
+void sky() {
+	vec3 transmittance = atmosphere_transmittance(EYEDIR);
+	vec3 color = atmosphere_sky(EYEDIR);
+
+	// Reflections get the lights' own specular highlights already.
+	if (!AT_CUBEMAP_PASS) {
+		vec3 disks = vec3(0.0);
+		if (LIGHT0_ENABLED) {
+			disks += light_disk(EYEDIR, LIGHT0_DIRECTION, LIGHT0_COLOR, LIGHT0_ENERGY, LIGHT0_SIZE);
+		}
+		if (LIGHT1_ENABLED) {
+			disks += light_disk(EYEDIR, LIGHT1_DIRECTION, LIGHT1_COLOR, LIGHT1_ENERGY, LIGHT1_SIZE);
+		}
+		color += disks * transmittance;
+	}
+
+	color += texture(night_sky, SKY_COORDS).rgb * night_sky_energy * transmittance;
+
+	COLOR = color * exposure;
+}
+)",
+																		  p_use_debanding ? "render_mode use_debanding;" : ""));
+}
+
+AtmosphereSkyMaterial::AtmosphereSkyMaterial() {
+	_set_material(RS::get_singleton()->material_create());
+	set_sun_disk_scale(1.0);
+	set_sun_disk_intensity(1.0);
+	set_night_sky_energy(1.0);
+	set_energy_multiplier(1.0);
+	set_use_debanding(true);
+}

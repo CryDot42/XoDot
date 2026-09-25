@@ -382,6 +382,214 @@ void Environment::_update_ssao() {
 			ssao_ao_channel_affect);
 }
 
+// Atmosphere
+
+void Environment::set_atmosphere_enabled(bool p_enabled) {
+	atmosphere_enabled = p_enabled;
+	_update_atmosphere();
+	notify_property_list_changed();
+}
+
+bool Environment::is_atmosphere_enabled() const {
+	return atmosphere_enabled;
+}
+
+void Environment::set_atmosphere_planet_radius(float p_planet_radius) {
+	atmosphere_planet_radius = p_planet_radius;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_planet_radius() const {
+	return atmosphere_planet_radius;
+}
+
+void Environment::set_atmosphere_height(float p_height) {
+	atmosphere_height = p_height;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_height() const {
+	return atmosphere_height;
+}
+
+void Environment::set_atmosphere_ground_albedo(const Color &p_ground_albedo) {
+	atmosphere_ground_albedo = p_ground_albedo;
+	_update_atmosphere();
+}
+
+Color Environment::get_atmosphere_ground_albedo() const {
+	return atmosphere_ground_albedo;
+}
+
+void Environment::set_atmosphere_multiscattering_factor(float p_multiscattering_factor) {
+	atmosphere_multiscattering_factor = p_multiscattering_factor;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_multiscattering_factor() const {
+	return atmosphere_multiscattering_factor;
+}
+
+void Environment::set_atmosphere_sky_luminance_factor(const Color &p_sky_luminance_factor) {
+	atmosphere_sky_luminance_factor = p_sky_luminance_factor;
+	_update_atmosphere();
+}
+
+Color Environment::get_atmosphere_sky_luminance_factor() const {
+	return atmosphere_sky_luminance_factor;
+}
+
+void Environment::set_atmosphere_affect_directional_lights(bool p_affect_directional_lights) {
+	atmosphere_affect_directional_lights = p_affect_directional_lights;
+	_update_atmosphere();
+}
+
+bool Environment::is_atmosphere_affecting_directional_lights() const {
+	return atmosphere_affect_directional_lights;
+}
+
+void Environment::set_atmosphere_rayleigh_scattering(const Color &p_rayleigh_scattering) {
+	atmosphere_rayleigh_scattering = p_rayleigh_scattering;
+	_update_atmosphere();
+}
+
+Color Environment::get_atmosphere_rayleigh_scattering() const {
+	return atmosphere_rayleigh_scattering;
+}
+
+void Environment::set_atmosphere_rayleigh_scattering_scale(float p_rayleigh_scattering_scale) {
+	atmosphere_rayleigh_scattering_scale = p_rayleigh_scattering_scale;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_rayleigh_scattering_scale() const {
+	return atmosphere_rayleigh_scattering_scale;
+}
+
+void Environment::set_atmosphere_rayleigh_exponential_distribution(float p_rayleigh_exponential_distribution) {
+	atmosphere_rayleigh_exponential_distribution = p_rayleigh_exponential_distribution;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_rayleigh_exponential_distribution() const {
+	return atmosphere_rayleigh_exponential_distribution;
+}
+
+void Environment::set_atmosphere_mie_scattering(const Color &p_mie_scattering) {
+	atmosphere_mie_scattering = p_mie_scattering;
+	_update_atmosphere();
+}
+
+Color Environment::get_atmosphere_mie_scattering() const {
+	return atmosphere_mie_scattering;
+}
+
+void Environment::set_atmosphere_mie_scattering_scale(float p_mie_scattering_scale) {
+	atmosphere_mie_scattering_scale = p_mie_scattering_scale;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_mie_scattering_scale() const {
+	return atmosphere_mie_scattering_scale;
+}
+
+void Environment::set_atmosphere_mie_absorption(const Color &p_mie_absorption) {
+	atmosphere_mie_absorption = p_mie_absorption;
+	_update_atmosphere();
+}
+
+Color Environment::get_atmosphere_mie_absorption() const {
+	return atmosphere_mie_absorption;
+}
+
+void Environment::set_atmosphere_mie_absorption_scale(float p_mie_absorption_scale) {
+	atmosphere_mie_absorption_scale = p_mie_absorption_scale;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_mie_absorption_scale() const {
+	return atmosphere_mie_absorption_scale;
+}
+
+void Environment::set_atmosphere_mie_anisotropy(float p_mie_anisotropy) {
+	atmosphere_mie_anisotropy = p_mie_anisotropy;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_mie_anisotropy() const {
+	return atmosphere_mie_anisotropy;
+}
+
+void Environment::set_atmosphere_mie_exponential_distribution(float p_mie_exponential_distribution) {
+	atmosphere_mie_exponential_distribution = p_mie_exponential_distribution;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_mie_exponential_distribution() const {
+	return atmosphere_mie_exponential_distribution;
+}
+
+void Environment::set_atmosphere_ozone_absorption(const Color &p_ozone_absorption) {
+	atmosphere_ozone_absorption = p_ozone_absorption;
+	_update_atmosphere();
+}
+
+Color Environment::get_atmosphere_ozone_absorption() const {
+	return atmosphere_ozone_absorption;
+}
+
+void Environment::set_atmosphere_ozone_absorption_scale(float p_ozone_absorption_scale) {
+	atmosphere_ozone_absorption_scale = p_ozone_absorption_scale;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_ozone_absorption_scale() const {
+	return atmosphere_ozone_absorption_scale;
+}
+
+void Environment::set_atmosphere_ozone_tip_altitude(float p_ozone_tip_altitude) {
+	atmosphere_ozone_tip_altitude = p_ozone_tip_altitude;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_ozone_tip_altitude() const {
+	return atmosphere_ozone_tip_altitude;
+}
+
+void Environment::set_atmosphere_ozone_width(float p_ozone_width) {
+	atmosphere_ozone_width = p_ozone_width;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_ozone_width() const {
+	return atmosphere_ozone_width;
+}
+
+void Environment::set_atmosphere_aerial_perspective_distance_scale(float p_aerial_perspective_distance_scale) {
+	atmosphere_aerial_perspective_distance_scale = p_aerial_perspective_distance_scale;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_aerial_perspective_distance_scale() const {
+	return atmosphere_aerial_perspective_distance_scale;
+}
+
+void Environment::set_atmosphere_aerial_perspective_start_depth(float p_aerial_perspective_start_depth) {
+	atmosphere_aerial_perspective_start_depth = p_aerial_perspective_start_depth;
+	_update_atmosphere();
+}
+
+float Environment::get_atmosphere_aerial_perspective_start_depth() const {
+	return atmosphere_aerial_perspective_start_depth;
+}
+
+void Environment::_update_atmosphere() {
+	RS::get_singleton()->environment_set_atmosphere(environment, atmosphere_enabled, atmosphere_planet_radius, atmosphere_height, atmosphere_ground_albedo, atmosphere_multiscattering_factor, atmosphere_sky_luminance_factor, atmosphere_aerial_perspective_distance_scale, atmosphere_aerial_perspective_start_depth, atmosphere_affect_directional_lights);
+	RS::get_singleton()->environment_set_atmosphere_rayleigh(environment, atmosphere_rayleigh_scattering, atmosphere_rayleigh_scattering_scale, atmosphere_rayleigh_exponential_distribution);
+	RS::get_singleton()->environment_set_atmosphere_mie(environment, atmosphere_mie_scattering, atmosphere_mie_scattering_scale, atmosphere_mie_absorption, atmosphere_mie_absorption_scale, atmosphere_mie_anisotropy, atmosphere_mie_exponential_distribution);
+	RS::get_singleton()->environment_set_atmosphere_ozone(environment, atmosphere_ozone_absorption, atmosphere_ozone_absorption_scale, atmosphere_ozone_tip_altitude, atmosphere_ozone_width);
+}
+
 // SSIL
 
 void Environment::set_ssil_enabled(bool p_enabled) {
@@ -1154,6 +1362,12 @@ void Environment::_validate_property(PropertyInfo &p_property) const {
 		}
 	}
 
+	// The atmosphere is computed with compute shaders, which GL Compatibility has none of.
+	if (OS::get_singleton()->get_current_rendering_method() == "gl_compatibility" && p_property.name.begins_with("atmosphere_")) {
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+		return;
+	}
+
 	if (OS::get_singleton()->get_current_rendering_method() != "forward_plus") {
 		// Hide SSAO properties that only work in Forward+.
 		if (p_property.name.begins_with("ssao_")) {
@@ -1328,6 +1542,81 @@ void Environment::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_thin_occluder_compensation", PROPERTY_HINT_RANGE, "0,0.7,0.01"), "set_ssao_thin_occluder_compensation", "get_ssao_thin_occluder_compensation");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_light_affect", PROPERTY_HINT_RANGE, "0.00,1,0.01"), "set_ssao_direct_light_affect", "get_ssao_direct_light_affect");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_ao_channel_affect", PROPERTY_HINT_RANGE, "0.00,1,0.01"), "set_ssao_ao_channel_affect", "get_ssao_ao_channel_affect");
+
+	// Atmosphere
+	ClassDB::bind_method(D_METHOD("set_atmosphere_enabled", "enabled"), &Environment::set_atmosphere_enabled);
+	ClassDB::bind_method(D_METHOD("is_atmosphere_enabled"), &Environment::is_atmosphere_enabled);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_planet_radius", "value"), &Environment::set_atmosphere_planet_radius);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_planet_radius"), &Environment::get_atmosphere_planet_radius);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_height", "value"), &Environment::set_atmosphere_height);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_height"), &Environment::get_atmosphere_height);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_ground_albedo", "value"), &Environment::set_atmosphere_ground_albedo);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_ground_albedo"), &Environment::get_atmosphere_ground_albedo);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_multiscattering_factor", "value"), &Environment::set_atmosphere_multiscattering_factor);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_multiscattering_factor"), &Environment::get_atmosphere_multiscattering_factor);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_sky_luminance_factor", "value"), &Environment::set_atmosphere_sky_luminance_factor);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_sky_luminance_factor"), &Environment::get_atmosphere_sky_luminance_factor);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_affect_directional_lights", "enabled"), &Environment::set_atmosphere_affect_directional_lights);
+	ClassDB::bind_method(D_METHOD("is_atmosphere_affecting_directional_lights"), &Environment::is_atmosphere_affecting_directional_lights);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_rayleigh_scattering", "value"), &Environment::set_atmosphere_rayleigh_scattering);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_rayleigh_scattering"), &Environment::get_atmosphere_rayleigh_scattering);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_rayleigh_scattering_scale", "value"), &Environment::set_atmosphere_rayleigh_scattering_scale);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_rayleigh_scattering_scale"), &Environment::get_atmosphere_rayleigh_scattering_scale);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_rayleigh_exponential_distribution", "value"), &Environment::set_atmosphere_rayleigh_exponential_distribution);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_rayleigh_exponential_distribution"), &Environment::get_atmosphere_rayleigh_exponential_distribution);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_mie_scattering", "value"), &Environment::set_atmosphere_mie_scattering);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_mie_scattering"), &Environment::get_atmosphere_mie_scattering);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_mie_scattering_scale", "value"), &Environment::set_atmosphere_mie_scattering_scale);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_mie_scattering_scale"), &Environment::get_atmosphere_mie_scattering_scale);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_mie_absorption", "value"), &Environment::set_atmosphere_mie_absorption);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_mie_absorption"), &Environment::get_atmosphere_mie_absorption);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_mie_absorption_scale", "value"), &Environment::set_atmosphere_mie_absorption_scale);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_mie_absorption_scale"), &Environment::get_atmosphere_mie_absorption_scale);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_mie_anisotropy", "value"), &Environment::set_atmosphere_mie_anisotropy);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_mie_anisotropy"), &Environment::get_atmosphere_mie_anisotropy);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_mie_exponential_distribution", "value"), &Environment::set_atmosphere_mie_exponential_distribution);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_mie_exponential_distribution"), &Environment::get_atmosphere_mie_exponential_distribution);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_ozone_absorption", "value"), &Environment::set_atmosphere_ozone_absorption);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_ozone_absorption"), &Environment::get_atmosphere_ozone_absorption);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_ozone_absorption_scale", "value"), &Environment::set_atmosphere_ozone_absorption_scale);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_ozone_absorption_scale"), &Environment::get_atmosphere_ozone_absorption_scale);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_ozone_tip_altitude", "value"), &Environment::set_atmosphere_ozone_tip_altitude);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_ozone_tip_altitude"), &Environment::get_atmosphere_ozone_tip_altitude);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_ozone_width", "value"), &Environment::set_atmosphere_ozone_width);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_ozone_width"), &Environment::get_atmosphere_ozone_width);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_aerial_perspective_distance_scale", "value"), &Environment::set_atmosphere_aerial_perspective_distance_scale);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_aerial_perspective_distance_scale"), &Environment::get_atmosphere_aerial_perspective_distance_scale);
+	ClassDB::bind_method(D_METHOD("set_atmosphere_aerial_perspective_start_depth", "value"), &Environment::set_atmosphere_aerial_perspective_start_depth);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_aerial_perspective_start_depth"), &Environment::get_atmosphere_aerial_perspective_start_depth);
+
+	ADD_GROUP("Atmosphere", "atmosphere_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "atmosphere_enabled", PROPERTY_HINT_GROUP_ENABLE, ""), "set_atmosphere_enabled", "is_atmosphere_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_planet_radius", PROPERTY_HINT_RANGE, "1,100000,1,or_greater,exp,suffix:km"), "set_atmosphere_planet_radius", "get_atmosphere_planet_radius");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_height", PROPERTY_HINT_RANGE, "1,1000,0.1,or_greater,suffix:km"), "set_atmosphere_height", "get_atmosphere_height");
+	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "atmosphere_ground_albedo", PROPERTY_HINT_COLOR_NO_ALPHA, ""), "set_atmosphere_ground_albedo", "get_atmosphere_ground_albedo");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_multiscattering_factor", PROPERTY_HINT_RANGE, "0,2,0.01"), "set_atmosphere_multiscattering_factor", "get_atmosphere_multiscattering_factor");
+	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "atmosphere_sky_luminance_factor", PROPERTY_HINT_COLOR_NO_ALPHA, ""), "set_atmosphere_sky_luminance_factor", "get_atmosphere_sky_luminance_factor");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "atmosphere_affect_directional_lights", PROPERTY_HINT_NONE, ""), "set_atmosphere_affect_directional_lights", "is_atmosphere_affecting_directional_lights");
+	ADD_SUBGROUP("Rayleigh", "atmosphere_rayleigh_");
+	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "atmosphere_rayleigh_scattering", PROPERTY_HINT_COLOR_NO_ALPHA, ""), "set_atmosphere_rayleigh_scattering", "get_atmosphere_rayleigh_scattering");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_rayleigh_scattering_scale", PROPERTY_HINT_RANGE, "0,1,0.0001,or_greater,suffix:1/km"), "set_atmosphere_rayleigh_scattering_scale", "get_atmosphere_rayleigh_scattering_scale");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_rayleigh_exponential_distribution", PROPERTY_HINT_RANGE, "0.01,50,0.01,or_greater,suffix:km"), "set_atmosphere_rayleigh_exponential_distribution", "get_atmosphere_rayleigh_exponential_distribution");
+	ADD_SUBGROUP("Mie", "atmosphere_mie_");
+	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "atmosphere_mie_scattering", PROPERTY_HINT_COLOR_NO_ALPHA, ""), "set_atmosphere_mie_scattering", "get_atmosphere_mie_scattering");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_mie_scattering_scale", PROPERTY_HINT_RANGE, "0,1,0.00001,or_greater,suffix:1/km"), "set_atmosphere_mie_scattering_scale", "get_atmosphere_mie_scattering_scale");
+	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "atmosphere_mie_absorption", PROPERTY_HINT_COLOR_NO_ALPHA, ""), "set_atmosphere_mie_absorption", "get_atmosphere_mie_absorption");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_mie_absorption_scale", PROPERTY_HINT_RANGE, "0,1,0.00001,or_greater,suffix:1/km"), "set_atmosphere_mie_absorption_scale", "get_atmosphere_mie_absorption_scale");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_mie_anisotropy", PROPERTY_HINT_RANGE, "0,0.999,0.001"), "set_atmosphere_mie_anisotropy", "get_atmosphere_mie_anisotropy");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_mie_exponential_distribution", PROPERTY_HINT_RANGE, "0.01,50,0.01,or_greater,suffix:km"), "set_atmosphere_mie_exponential_distribution", "get_atmosphere_mie_exponential_distribution");
+	ADD_SUBGROUP("Ozone", "atmosphere_ozone_");
+	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "atmosphere_ozone_absorption", PROPERTY_HINT_COLOR_NO_ALPHA, ""), "set_atmosphere_ozone_absorption", "get_atmosphere_ozone_absorption");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_ozone_absorption_scale", PROPERTY_HINT_RANGE, "0,1,0.00001,or_greater,suffix:1/km"), "set_atmosphere_ozone_absorption_scale", "get_atmosphere_ozone_absorption_scale");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_ozone_tip_altitude", PROPERTY_HINT_RANGE, "0,100,0.1,or_greater,suffix:km"), "set_atmosphere_ozone_tip_altitude", "get_atmosphere_ozone_tip_altitude");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_ozone_width", PROPERTY_HINT_RANGE, "0.01,100,0.1,or_greater,suffix:km"), "set_atmosphere_ozone_width", "get_atmosphere_ozone_width");
+	ADD_SUBGROUP("Aerial Perspective", "atmosphere_aerial_perspective_");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_aerial_perspective_distance_scale", PROPERTY_HINT_RANGE, "0,10,0.01,or_greater"), "set_atmosphere_aerial_perspective_distance_scale", "get_atmosphere_aerial_perspective_distance_scale");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "atmosphere_aerial_perspective_start_depth", PROPERTY_HINT_RANGE, "0,10,0.01,or_greater,suffix:km"), "set_atmosphere_aerial_perspective_start_depth", "get_atmosphere_aerial_perspective_start_depth");
+	ADD_SUBGROUP("", "");
 
 	// SSIL
 	ClassDB::bind_method(D_METHOD("set_ssil_enabled", "enabled"), &Environment::set_ssil_enabled);
@@ -1614,6 +1903,7 @@ Environment::Environment() {
 	_update_ssr();
 	_update_ssao();
 	_update_ssil();
+	_update_atmosphere();
 	_update_sdfgi();
 	_update_glow();
 	_update_fog();

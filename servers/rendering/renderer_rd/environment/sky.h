@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/templates/rid_owner.h"
+#include "servers/rendering/renderer_rd/environment/atmosphere.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/sky.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -53,6 +54,7 @@ public:
 		SKY_SET_MATERIAL,
 		SKY_SET_TEXTURES,
 		SKY_SET_FOG,
+		SKY_SET_ATMOSPHERE,
 	};
 
 	const int SAMPLERS_BINDING_FIRST_INDEX = 4;
@@ -295,6 +297,7 @@ public:
 		float prev_fog_density = 0.0;
 		float prev_fog_sky_affect = 0.0;
 		float prev_fog_light_energy = 0.0;
+		uint32_t prev_atmosphere_hash = 0;
 
 		void free_radiance();
 
@@ -310,6 +313,12 @@ public:
 
 	uint32_t sky_ggx_samples_quality;
 	bool sky_use_octmap_array;
+
+	// The atmosphere's lookup tables, rebuilt by setup_sky() for every render
+	// whose environment has one, and bound to every sky shader as the
+	// SKY_SET_ATMOSPHERE set.
+	AtmosphereRD atmosphere;
+	RID get_atmosphere_uniform_set();
 
 	Sky *dirty_sky_list = nullptr;
 	mutable RID_Owner<Sky, true> sky_owner;

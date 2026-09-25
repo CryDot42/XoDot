@@ -328,7 +328,7 @@ private:
 			uint32_t volumetric_fog_enabled;
 			float volumetric_fog_inv_length;
 			float volumetric_fog_detail_spread;
-			uint32_t volumetric_fog_pad;
+			float atmosphere_aerial_perspective_scale;
 		};
 
 		struct PushConstantUbershader {

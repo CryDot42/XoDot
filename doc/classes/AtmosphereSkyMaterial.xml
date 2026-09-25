@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="AtmosphereSkyMaterial" inherits="Material" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		A sky drawn from the environment's atmosphere, with the sun, the moon and the stars.
+	</brief_description>
+	<description>
+		[AtmosphereSkyMaterial] draws the sky of an [Environment] with [member Environment.atmosphere_enabled]: the light the atmosphere scatters towards the camera from up to two directional lights, the disks of those lights seen through the air, and an optional night sky texture that the air dims near the horizon. The sky's colors, sunrises and sunsets all follow from the atmosphere's parameters and the lights' directions, so nothing needs to be animated for a day and night cycle other than the lights themselves.
+		The disks are only drawn in the sky itself, not in its reflections, where the lights' own specular highlights already stand for them.
+		[b]Note:[/b] Without an atmosphere in the environment, this material draws only the lights' disks and the night sky. It needs the Forward+ or Mobile renderer.
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="energy_multiplier" type="float" setter="set_energy_multiplier" getter="get_energy_multiplier" default="1.0">
+			Scales the brightness of the whole sky.
+		</member>
+		<member name="night_sky" type="Texture2D" setter="set_night_sky" getter="get_night_sky">
+			A panorama texture of the stars, added behind the atmosphere and dimmed by it towards the horizon.
+		</member>
+		<member name="night_sky_energy" type="float" setter="set_night_sky_energy" getter="get_night_sky_energy" default="1.0">
+			Scales the brightness of [member night_sky].
+		</member>
+		<member name="sun_disk_intensity" type="float" setter="set_sun_disk_intensity" getter="get_sun_disk_intensity" default="1.0">
+			Scales the brightness of the lights' disks. At [code]1.0[/code], a disk is exactly as bright as the light it casts spread over the solid angle it covers.
+		</member>
+		<member name="sun_disk_scale" type="float" setter="set_sun_disk_scale" getter="get_sun_disk_scale" default="1.0">
+			Scales the angular size of every light's disk. A light's disk is as large as its [member Light3D.light_angular_distance], or as the real sun (0.53 degrees across) if that is [code]0.0[/code].
+		</member>
+		<member name="use_debanding" type="bool" setter="set_use_debanding" getter="get_use_debanding" default="true">
+			If [code]true[/code], enables debanding, which adds a little noise to hide the banding of smooth gradients.
+		</member>
+	</members>
+</class>

@@ -64,6 +64,74 @@
 		<member name="ambient_light_source" type="int" setter="set_ambient_source" getter="get_ambient_source" enum="Environment.AmbientSource" default="0">
 			The ambient light source to use for rendering materials and global illumination.
 		</member>
+		<member name="atmosphere_aerial_perspective_distance_scale" type="float" setter="set_atmosphere_aerial_perspective_distance_scale" getter="get_atmosphere_aerial_perspective_distance_scale" default="1.0">
+			Scales distances in the scene for the aerial perspective: values above [code]1.0[/code] make the scene look larger, and further away through more air.
+		</member>
+		<member name="atmosphere_aerial_perspective_start_depth" type="float" setter="set_atmosphere_aerial_perspective_start_depth" getter="get_atmosphere_aerial_perspective_start_depth" default="0.1">
+			The distance from the camera, in kilometers, before which the scene is seen without aerial perspective.
+		</member>
+		<member name="atmosphere_affect_directional_lights" type="bool" setter="set_atmosphere_affect_directional_lights" getter="is_atmosphere_affecting_directional_lights" default="true">
+			If [code]true[/code], directional lights are tinted by what of them gets through the atmosphere to the camera: the sun reddens as it sets, and stops lighting the scene once the planet hides it, while it keeps lighting the sky through twilight.
+		</member>
+		<member name="atmosphere_enabled" type="bool" setter="set_atmosphere_enabled" getter="is_atmosphere_enabled" default="false">
+			If [code]true[/code], the environment has a planet's atmosphere, rendered in real time the way Unreal Engine's Sky Atmosphere is (Sébastien Hillaire, "A Scalable and Production Ready Sky and Atmosphere Rendering Technique", after Bruneton's precomputed atmospheric scattering). It scatters the light of up to two directional lights, typically the sun and the moon, across the sky and into what the camera sees of the scene (aerial perspective), and with [member atmosphere_affect_directional_lights], tints the lights themselves.
+			Draw the sky with an [AtmosphereSkyMaterial], or with a sky shader that calls [code]atmosphere_sky()[/code] and [code]atmosphere_transmittance()[/code]. The planet's surface is at [code]y = 0[/code], and one unit is one meter.
+			[b]Note:[/b] Only available in the Forward+ and Mobile renderers. Aerial perspective on the scene is Forward+ only.
+		</member>
+		<member name="atmosphere_ground_albedo" type="Color" setter="set_atmosphere_ground_albedo" getter="get_atmosphere_ground_albedo" default="Color(0.401978, 0.401978, 0.401978, 1)">
+			How much light the planet's ground reflects back into the atmosphere, which brightens the sky from below.
+		</member>
+		<member name="atmosphere_height" type="float" setter="set_atmosphere_height" getter="get_atmosphere_height" default="100.0">
+			How far above the ground the atmosphere reaches, in kilometers.
+		</member>
+		<member name="atmosphere_mie_absorption" type="Color" setter="set_atmosphere_mie_absorption" getter="get_atmosphere_mie_absorption" default="Color(1, 1, 1, 1)">
+			The color of the light aerosols absorb. Multiplied by [member atmosphere_mie_absorption_scale].
+		</member>
+		<member name="atmosphere_mie_absorption_scale" type="float" setter="set_atmosphere_mie_absorption_scale" getter="get_atmosphere_mie_absorption_scale" default="0.000444">
+			The absorption coefficient of aerosols at sea level, per kilometer.
+		</member>
+		<member name="atmosphere_mie_anisotropy" type="float" setter="set_atmosphere_mie_anisotropy" getter="get_atmosphere_mie_anisotropy" default="0.8">
+			How much aerosols scatter light forward, from [code]0.0[/code] (evenly in every direction) towards [code]1.0[/code]. Higher values tighten the glow around the sun.
+		</member>
+		<member name="atmosphere_mie_exponential_distribution" type="float" setter="set_atmosphere_mie_exponential_distribution" getter="get_atmosphere_mie_exponential_distribution" default="1.2">
+			The altitude, in kilometers, over which the density of aerosols drops by a factor of e.
+		</member>
+		<member name="atmosphere_mie_scattering" type="Color" setter="set_atmosphere_mie_scattering" getter="get_atmosphere_mie_scattering" default="Color(1, 1, 1, 1)">
+			The color of the scattering by aerosols (dust, water droplets), which makes the haze and the glow around the sun. Multiplied by [member atmosphere_mie_scattering_scale].
+		</member>
+		<member name="atmosphere_mie_scattering_scale" type="float" setter="set_atmosphere_mie_scattering_scale" getter="get_atmosphere_mie_scattering_scale" default="0.003996">
+			The scattering coefficient of aerosols at sea level, per kilometer. Raise it for a hazier, more polluted or more humid sky.
+		</member>
+		<member name="atmosphere_multiscattering_factor" type="float" setter="set_atmosphere_multiscattering_factor" getter="get_atmosphere_multiscattering_factor" default="1.0">
+			Scales the light scattered more than once. [code]1.0[/code] is physically based; lower values darken the sky and its shadows, higher ones brighten them.
+		</member>
+		<member name="atmosphere_ozone_absorption" type="Color" setter="set_atmosphere_ozone_absorption" getter="get_atmosphere_ozone_absorption" default="Color(0.345561, 1, 0.045189, 1)">
+			The color of the light the ozone layer absorbs, which keeps the sky blue at twilight. Multiplied by [member atmosphere_ozone_absorption_scale].
+		</member>
+		<member name="atmosphere_ozone_absorption_scale" type="float" setter="set_atmosphere_ozone_absorption_scale" getter="get_atmosphere_ozone_absorption_scale" default="0.001881">
+			The absorption coefficient of ozone at its densest, per kilometer.
+		</member>
+		<member name="atmosphere_ozone_tip_altitude" type="float" setter="set_atmosphere_ozone_tip_altitude" getter="get_atmosphere_ozone_tip_altitude" default="25.0">
+			The altitude, in kilometers, where the ozone layer is densest.
+		</member>
+		<member name="atmosphere_ozone_width" type="float" setter="set_atmosphere_ozone_width" getter="get_atmosphere_ozone_width" default="30.0">
+			The thickness of the ozone layer, in kilometers.
+		</member>
+		<member name="atmosphere_planet_radius" type="float" setter="set_atmosphere_planet_radius" getter="get_atmosphere_planet_radius" default="6360.0">
+			The planet's radius, in kilometers. The Earth's is 6360 km.
+		</member>
+		<member name="atmosphere_rayleigh_exponential_distribution" type="float" setter="set_atmosphere_rayleigh_exponential_distribution" getter="get_atmosphere_rayleigh_exponential_distribution" default="8.0">
+			The altitude, in kilometers, over which the density of air molecules drops by a factor of e.
+		</member>
+		<member name="atmosphere_rayleigh_scattering" type="Color" setter="set_atmosphere_rayleigh_scattering" getter="get_atmosphere_rayleigh_scattering" default="Color(0.175287, 0.409607, 1, 1)">
+			The color of the scattering by air molecules, which makes the sky blue. Multiplied by [member atmosphere_rayleigh_scattering_scale].
+		</member>
+		<member name="atmosphere_rayleigh_scattering_scale" type="float" setter="set_atmosphere_rayleigh_scattering_scale" getter="get_atmosphere_rayleigh_scattering_scale" default="0.0331">
+			The scattering coefficient of air molecules at sea level, per kilometer.
+		</member>
+		<member name="atmosphere_sky_luminance_factor" type="Color" setter="set_atmosphere_sky_luminance_factor" getter="get_atmosphere_sky_luminance_factor" default="Color(1, 1, 1, 1)">
+			Tints and scales the sky's luminance, for art direction. It does not affect the aerial perspective or the lights.
+		</member>
 		<member name="background_camera_feed_id" type="int" setter="set_camera_feed_id" getter="get_camera_feed_id" default="1">
 			The ID of the camera feed to show in the background.
 		</member>

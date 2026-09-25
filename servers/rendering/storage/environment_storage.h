@@ -58,6 +58,38 @@ public:
 		};
 	};
 
+	// A planet's atmosphere, in the parameterization of Hillaire's "A Scalable
+	// and Production Ready Sky and Atmosphere Rendering Technique" (EGSR 2020),
+	// itself Bruneton's: every distance is in kilometers, and every coefficient
+	// per kilometer. The defaults are the Earth's.
+	struct AtmosphereParams {
+		bool enabled = false;
+		float planet_radius = 6360.0;
+		float height = 100.0;
+		Color ground_albedo = Color(0.401978, 0.401978, 0.401978);
+		float multiscattering_factor = 1.0;
+		Color sky_luminance_factor = Color(1.0, 1.0, 1.0);
+		float aerial_perspective_distance_scale = 1.0;
+		float aerial_perspective_start_depth = 0.1;
+		bool affect_directional_lights = true;
+
+		Color rayleigh_scattering = Color(0.175287, 0.409607, 1.0);
+		float rayleigh_scattering_scale = 0.0331;
+		float rayleigh_exponential_distribution = 8.0;
+
+		Color mie_scattering = Color(1.0, 1.0, 1.0);
+		float mie_scattering_scale = 0.003996;
+		Color mie_absorption = Color(1.0, 1.0, 1.0);
+		float mie_absorption_scale = 0.000444;
+		float mie_anisotropy = 0.8;
+		float mie_exponential_distribution = 1.2;
+
+		Color ozone_absorption = Color(0.345561, 1.0, 0.045189);
+		float ozone_absorption_scale = 0.001881;
+		float ozone_tip_altitude = 25.0;
+		float ozone_width = 30.0;
+	};
+
 private:
 	static RendererEnvironmentStorage *singleton;
 
@@ -149,6 +181,8 @@ private:
 		float ssao_thin_occluder_compensation = 0.0;
 		float ssao_direct_light_affect = 0.0;
 		float ssao_ao_channel_affect = 0.0;
+
+		AtmosphereParams atmosphere;
 
 		// SSIL
 		bool ssil_enabled = false;
@@ -296,6 +330,14 @@ public:
 	float environment_get_ssao_thin_occluder_compensation(RID p_env) const;
 	float environment_get_ssao_direct_light_affect(RID p_env) const;
 	float environment_get_ssao_ao_channel_affect(RID p_env) const;
+
+	// Atmosphere
+	void environment_set_atmosphere(RID p_env, bool p_enable, float p_planet_radius, float p_height, const Color &p_ground_albedo, float p_multiscattering_factor, const Color &p_sky_luminance_factor, float p_aerial_perspective_distance_scale, float p_aerial_perspective_start_depth, bool p_affect_directional_lights);
+	void environment_set_atmosphere_rayleigh(RID p_env, const Color &p_scattering, float p_scattering_scale, float p_exponential_distribution);
+	void environment_set_atmosphere_mie(RID p_env, const Color &p_scattering, float p_scattering_scale, const Color &p_absorption, float p_absorption_scale, float p_anisotropy, float p_exponential_distribution);
+	void environment_set_atmosphere_ozone(RID p_env, const Color &p_absorption, float p_absorption_scale, float p_tip_altitude, float p_width);
+	bool environment_get_atmosphere_enabled(RID p_env) const;
+	AtmosphereParams environment_get_atmosphere(RID p_env) const;
 
 	// SSIL
 	void environment_set_ssil(RID p_env, bool p_enable, float p_radius, float p_intensity, float p_sharpness, float p_normal_rejection);

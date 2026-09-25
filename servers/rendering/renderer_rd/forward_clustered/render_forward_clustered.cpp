@@ -734,6 +734,12 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 
 	scene_state.ubo.gi_upscale_for_msaa = false;
 	scene_state.ubo.volumetric_fog_enabled = false;
+	scene_state.ubo.atmosphere_aerial_perspective_scale = 0.0;
+	if (sky.atmosphere.is_active() && is_environment(p_render_data->environment)) {
+		// Kilometers the volume spans, over the square of its depth coordinate.
+		const RendererEnvironmentStorage::AtmosphereParams atmosphere = environment_get_atmosphere(p_render_data->environment);
+		scene_state.ubo.atmosphere_aerial_perspective_scale = 0.001 * atmosphere.aerial_perspective_distance_scale / 32.0;
+	}
 
 	if (rd.is_valid()) {
 		if (rd->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED) {
@@ -2169,6 +2175,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			default: {
 			}
 		}
+
+		// A render without a sky of its own must not see the previous render's atmosphere.
+		sky.atmosphere.deactivate();
 
 		// setup sky if used for ambient, reflections, or background
 		if (draw_sky || draw_sky_fog_only || (reflection_source == RSE::ENV_REFLECTION_SOURCE_BG && bg_mode == RSE::ENV_BG_SKY) || reflection_source == RSE::ENV_REFLECTION_SOURCE_SKY || environment_get_ambient_source(p_render_data->environment) == RSE::ENV_AMBIENT_SOURCE_SKY) {
@@ -3920,6 +3929,13 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		uniforms.push_back(u);
 	}
 #endif // MODULE_TEXTURE_STREAMING_ENABLED
+	{
+		RD::Uniform u;
+		u.binding = 40;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.append_id(sky.atmosphere.get_aerial_perspective_volume());
+		uniforms.push_back(u);
+	}
 
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.get_default_shader_rd(is_multiview), RENDER_PASS_UNIFORM_SET, uniforms);
 }

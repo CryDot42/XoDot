@@ -234,3 +234,55 @@ public:
 	PhysicalSkyMaterial();
 	~PhysicalSkyMaterial();
 };
+
+// A sky drawn from the Environment's atmosphere (see Environment.atmosphere_enabled):
+// the scattered light of every directional light, their disks seen through
+// the air, and optionally the stars behind them.
+class AtmosphereSkyMaterial : public Material {
+	GDCLASS(AtmosphereSkyMaterial, Material);
+
+private:
+	static Mutex shader_mutex;
+	static RID shader_cache[2];
+
+	float sun_disk_scale = 1.0f;
+	float sun_disk_intensity = 1.0f;
+	Ref<Texture2D> night_sky;
+	float night_sky_energy = 1.0f;
+	float energy_multiplier = 1.0f;
+	bool use_debanding = true;
+	mutable bool shader_set = false;
+
+	RID get_shader_cache() const;
+	static void _update_shader(bool p_use_debanding);
+
+protected:
+	static void _bind_methods();
+
+public:
+	void set_sun_disk_scale(float p_scale);
+	float get_sun_disk_scale() const;
+
+	void set_sun_disk_intensity(float p_intensity);
+	float get_sun_disk_intensity() const;
+
+	void set_night_sky(const Ref<Texture2D> &p_night_sky);
+	Ref<Texture2D> get_night_sky() const;
+
+	void set_night_sky_energy(float p_energy);
+	float get_night_sky_energy() const;
+
+	void set_energy_multiplier(float p_multiplier);
+	float get_energy_multiplier() const;
+
+	void set_use_debanding(bool p_use_debanding);
+	bool get_use_debanding() const;
+
+	virtual Shader::Mode get_shader_mode() const override;
+	virtual RID get_shader_rid() const override;
+	virtual RID get_rid() const override;
+
+	static void cleanup_shader();
+
+	AtmosphereSkyMaterial();
+};

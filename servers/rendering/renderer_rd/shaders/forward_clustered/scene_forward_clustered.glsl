@@ -1063,6 +1063,16 @@ vec4 volumetric_fog_process(vec2 screen_uv, float z) {
 	return texture(sampler3D(volumetric_fog_texture, SAMPLER_LINEAR_CLAMP), fog_pos);
 }
 
+// The light the atmosphere scatters towards the eye in front of a surface p_distance
+// away, premultiplied, with what it lets through of the surface in alpha.
+vec4 atmosphere_aerial_perspective_process(vec2 p_screen_uv, float p_distance) {
+	float w = sqrt(p_distance * implementation_data.atmosphere_aerial_perspective_scale);
+	vec4 aerial_perspective = textureLod(sampler3D(atmosphere_aerial_perspective_volume, SAMPLER_LINEAR_CLAMP), vec3(p_screen_uv, w), 0.0);
+	// Nothing is stored in front of the first slice: fade in towards it.
+	float slice = w * 32.0;
+	return mix(vec4(0.0, 0.0, 0.0, 1.0), aerial_perspective, clamp(slice * 2.0, 0.0, 1.0));
+}
+
 vec4 fog_process(vec3 vertex) {
 	vec3 fog_color = scene_data_block.data.fog_light_color;
 
@@ -1528,6 +1538,17 @@ void fragment_shader(in SceneData scene_data) {
 			}
 		}
 		fog = res;
+	}
+
+	if (implementation_data.atmosphere_aerial_perspective_scale > 0.0) {
+#ifdef USE_MULTIVIEW
+		vec4 aerial_perspective = atmosphere_aerial_perspective_process(combined_uv, length(vertex));
+#else
+		vec4 aerial_perspective = atmosphere_aerial_perspective_process(screen_uv, length(vertex));
+#endif
+		// The fog is the nearer medium: what reaches the eye through it is the
+		// air's light, dimmed by the fog.
+		fog = vec4(fog.rgb + fog.a * aerial_perspective.rgb, fog.a * aerial_perspective.a);
 	}
 #else
 	// Premultiply by opacity and convert opacity to transmittance to match volumetric fog.

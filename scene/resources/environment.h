@@ -137,6 +137,31 @@ private:
 	float ssao_ao_channel_affect = 0.0;
 	void _update_ssao();
 
+	// Atmosphere
+	bool atmosphere_enabled = false;
+	float atmosphere_planet_radius = 6360.0;
+	float atmosphere_height = 100.0;
+	Color atmosphere_ground_albedo = Color(0.401978, 0.401978, 0.401978);
+	float atmosphere_multiscattering_factor = 1.0;
+	Color atmosphere_sky_luminance_factor = Color(1, 1, 1);
+	bool atmosphere_affect_directional_lights = true;
+	Color atmosphere_rayleigh_scattering = Color(0.175287, 0.409607, 1.0);
+	float atmosphere_rayleigh_scattering_scale = 0.0331;
+	float atmosphere_rayleigh_exponential_distribution = 8.0;
+	Color atmosphere_mie_scattering = Color(1, 1, 1);
+	float atmosphere_mie_scattering_scale = 0.003996;
+	Color atmosphere_mie_absorption = Color(1, 1, 1);
+	float atmosphere_mie_absorption_scale = 0.000444;
+	float atmosphere_mie_anisotropy = 0.8;
+	float atmosphere_mie_exponential_distribution = 1.2;
+	Color atmosphere_ozone_absorption = Color(0.345561, 1.0, 0.045189);
+	float atmosphere_ozone_absorption_scale = 0.001881;
+	float atmosphere_ozone_tip_altitude = 25.0;
+	float atmosphere_ozone_width = 30.0;
+	float atmosphere_aerial_perspective_distance_scale = 1.0;
+	float atmosphere_aerial_perspective_start_depth = 0.1;
+	void _update_atmosphere();
+
 	// SSIL
 	bool ssil_enabled = false;
 	float ssil_radius = 5.0;
@@ -301,6 +326,52 @@ public:
 	float get_ssao_direct_light_affect() const;
 	void set_ssao_ao_channel_affect(float p_ao_channel_affect);
 	float get_ssao_ao_channel_affect() const;
+
+	// Atmosphere
+	void set_atmosphere_enabled(bool p_enabled);
+	bool is_atmosphere_enabled() const;
+	void set_atmosphere_planet_radius(float p_planet_radius);
+	float get_atmosphere_planet_radius() const;
+	void set_atmosphere_height(float p_height);
+	float get_atmosphere_height() const;
+	void set_atmosphere_ground_albedo(const Color &p_ground_albedo);
+	Color get_atmosphere_ground_albedo() const;
+	void set_atmosphere_multiscattering_factor(float p_multiscattering_factor);
+	float get_atmosphere_multiscattering_factor() const;
+	void set_atmosphere_sky_luminance_factor(const Color &p_sky_luminance_factor);
+	Color get_atmosphere_sky_luminance_factor() const;
+	void set_atmosphere_affect_directional_lights(bool p_affect_directional_lights);
+	bool is_atmosphere_affecting_directional_lights() const;
+	void set_atmosphere_rayleigh_scattering(const Color &p_rayleigh_scattering);
+	Color get_atmosphere_rayleigh_scattering() const;
+	void set_atmosphere_rayleigh_scattering_scale(float p_rayleigh_scattering_scale);
+	float get_atmosphere_rayleigh_scattering_scale() const;
+	void set_atmosphere_rayleigh_exponential_distribution(float p_rayleigh_exponential_distribution);
+	float get_atmosphere_rayleigh_exponential_distribution() const;
+	void set_atmosphere_mie_scattering(const Color &p_mie_scattering);
+	Color get_atmosphere_mie_scattering() const;
+	void set_atmosphere_mie_scattering_scale(float p_mie_scattering_scale);
+	float get_atmosphere_mie_scattering_scale() const;
+	void set_atmosphere_mie_absorption(const Color &p_mie_absorption);
+	Color get_atmosphere_mie_absorption() const;
+	void set_atmosphere_mie_absorption_scale(float p_mie_absorption_scale);
+	float get_atmosphere_mie_absorption_scale() const;
+	void set_atmosphere_mie_anisotropy(float p_mie_anisotropy);
+	float get_atmosphere_mie_anisotropy() const;
+	void set_atmosphere_mie_exponential_distribution(float p_mie_exponential_distribution);
+	float get_atmosphere_mie_exponential_distribution() const;
+	void set_atmosphere_ozone_absorption(const Color &p_ozone_absorption);
+	Color get_atmosphere_ozone_absorption() const;
+	void set_atmosphere_ozone_absorption_scale(float p_ozone_absorption_scale);
+	float get_atmosphere_ozone_absorption_scale() const;
+	void set_atmosphere_ozone_tip_altitude(float p_ozone_tip_altitude);
+	float get_atmosphere_ozone_tip_altitude() const;
+	void set_atmosphere_ozone_width(float p_ozone_width);
+	float get_atmosphere_ozone_width() const;
+	void set_atmosphere_aerial_perspective_distance_scale(float p_aerial_perspective_distance_scale);
+	float get_atmosphere_aerial_perspective_distance_scale() const;
+	void set_atmosphere_aerial_perspective_start_depth(float p_aerial_perspective_start_depth);
+	float get_atmosphere_aerial_perspective_start_depth() const;
 
 	// SSIL
 	void set_ssil_enabled(bool p_enabled);

@@ -98,6 +98,16 @@ layout(std140) uniform MaterialUniforms{ //ubo:3
 };
 #endif
 /* clang-format on */
+// The atmosphere needs compute shaders, which the Compatibility renderer has
+// none of. Sky shaders that use it still compile, and see no atmosphere.
+vec3 atmosphere_sky(vec3 p_dir) {
+	return vec3(0.0);
+}
+
+vec3 atmosphere_transmittance(vec3 p_dir) {
+	return vec3(1.0);
+}
+
 #GLOBALS
 
 #ifdef USE_CUBEMAP_PASS
