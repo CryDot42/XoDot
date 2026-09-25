@@ -1558,6 +1558,8 @@ MaterialStorage::MaterialStorage() {
 		actions.renames["LIGHT3_SIZE"] = "directional_lights.data[3].color_size.w";
 		actions.renames["atmosphere_sky"] = "atmosphere_sky";
 		actions.renames["atmosphere_transmittance"] = "atmosphere_transmittance";
+		actions.renames["atmosphere_light_direction"] = "atmosphere_light_direction";
+		actions.renames["atmosphere_light_at"] = "atmosphere_light_at";
 		actions.renames["AT_CUBEMAP_PASS"] = "AT_CUBEMAP_PASS";
 		actions.renames["AT_HALF_RES_PASS"] = "AT_HALF_RES_PASS";
 		actions.renames["AT_QUARTER_RES_PASS"] = "AT_QUARTER_RES_PASS";

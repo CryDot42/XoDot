@@ -108,6 +108,14 @@ vec3 atmosphere_transmittance(vec3 p_dir) {
 	return vec3(1.0);
 }
 
+vec3 atmosphere_light_direction(int p_light) {
+	return vec3(0.0);
+}
+
+vec3 atmosphere_light_at(vec3 p_position, int p_light) {
+	return vec3(0.0);
+}
+
 #GLOBALS
 
 #ifdef USE_CUBEMAP_PASS

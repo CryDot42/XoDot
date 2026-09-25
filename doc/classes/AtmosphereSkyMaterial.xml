@@ -1,16 +1,100 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="AtmosphereSkyMaterial" inherits="Material" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 	<brief_description>
-		A sky drawn from the environment's atmosphere, with the sun, the moon and the stars.
+		A sky drawn from the environment's atmosphere, with the sun, the moon, the stars and volumetric clouds.
 	</brief_description>
 	<description>
 		[AtmosphereSkyMaterial] draws the sky of an [Environment] with [member Environment.atmosphere_enabled]: the light the atmosphere scatters towards the camera from up to two directional lights, the disks of those lights seen through the air, and an optional night sky texture that the air dims near the horizon. The sky's colors, sunrises and sunsets all follow from the atmosphere's parameters and the lights' directions, so nothing needs to be animated for a day and night cycle other than the lights themselves.
+		It also draws a layer of volumetric clouds, ray marched through two tiling 3D noise textures and lit by the same lights through the same air, so that they turn golden at sunset and grey at dusk along with the sky. They are drawn at half the screen's resolution. By default, the textures are [NoiseTexture3D]s shared by every material, generated in the background when the first one is created; [member clouds_shape_texture] and [member clouds_detail_texture] take any [Texture3D] instead. [member clouds_storm] turns them into a storm, with lightning. Like every other property, it can be driven by a [TimeOfDay] weather profile.
 		The disks are only drawn in the sky itself, not in its reflections, where the lights' own specular highlights already stand for them.
-		[b]Note:[/b] Without an atmosphere in the environment, this material draws only the lights' disks and the night sky. It needs the Forward+ or Mobile renderer.
+		[b]Note:[/b] Without an atmosphere in the environment, this material draws only the lights' disks and the night sky, and the clouds are black. The clouds' wind uses [code]TIME[/code], which updates the sky's reflections every frame; see [member Sky.process_mode]. It needs the Forward+ or Mobile renderer.
 	</description>
 	<tutorials>
 	</tutorials>
+	<methods>
+		<method name="make_default_clouds_detail_texture" qualifiers="static">
+			<return type="Texture3D" />
+			<description>
+				Returns a new copy of the noise used when [member clouds_detail_texture] is not set: a seamless, inverted, 32×32×32 cellular [NoiseTexture3D]. Returns [code]null[/code] if the noise module is not available.
+			</description>
+		</method>
+		<method name="make_default_clouds_shape_texture" qualifiers="static">
+			<return type="Texture3D" />
+			<description>
+				Returns a new copy of the noise used when [member clouds_shape_texture] is not set: a seamless, inverted, 128×128×128 cellular [NoiseTexture3D] with about four billows across. Change its settings and assign it to [member clouds_shape_texture] to make clouds of your own. Returns [code]null[/code] if the noise module is not available.
+			</description>
+		</method>
+	</methods>
 	<members>
+		<member name="clouds_ambient_strength" type="float" setter="set_clouds_ambient_strength" getter="get_clouds_ambient_strength" default="1.0">
+			Scales the light the clouds get from the sky above them and the lit ground below them.
+		</member>
+		<member name="clouds_anisotropy" type="float" setter="set_clouds_anisotropy" getter="get_clouds_anisotropy" default="0.6">
+			How much of the light the clouds scatter keeps going forward, which makes their edges shine when seen against the sun.
+		</member>
+		<member name="clouds_bottom_altitude" type="float" setter="set_clouds_bottom_altitude" getter="get_clouds_bottom_altitude" default="1500.0">
+			The altitude of the bottom of the cloud layer, in meters above the ground. The layer follows the planet's curvature (with the default planet radius of 6360 km).
+		</member>
+		<member name="clouds_coverage" type="float" setter="set_clouds_coverage" getter="get_clouds_coverage" default="0.45">
+			How much of the sky is covered by clouds, from none at [code]0.0[/code] to overcast at [code]1.0[/code].
+		</member>
+		<member name="clouds_coverage_scale" type="float" setter="set_clouds_coverage_scale" getter="get_clouds_coverage_scale" default="60000.0">
+			The size of the pattern that decides where the sky is cloudy, in meters. It is [member clouds_shape_texture], stretched this wide.
+		</member>
+		<member name="clouds_density" type="float" setter="set_clouds_density" getter="get_clouds_density" default="1.0">
+			Scales the density of the clouds: denser clouds are more opaque and darker underneath.
+		</member>
+		<member name="clouds_detail_scale" type="float" setter="set_clouds_detail_scale" getter="get_clouds_detail_scale" default="1800.0">
+			The size of one repetition of [member clouds_detail_texture], in meters.
+		</member>
+		<member name="clouds_detail_strength" type="float" setter="set_clouds_detail_strength" getter="get_clouds_detail_strength" default="0.35">
+			How much [member clouds_detail_texture] erodes the edges of the clouds, into wisps at their bottom and billows higher up.
+		</member>
+		<member name="clouds_detail_texture" type="Texture3D" setter="set_clouds_detail_texture" getter="get_clouds_detail_texture">
+			The fine noise that erodes the edges of the clouds. It should tile seamlessly; only its red channel is used. When [code]null[/code], a default noise is used (see [method make_default_clouds_detail_texture]).
+		</member>
+		<member name="clouds_enabled" type="bool" setter="set_clouds_enabled" getter="is_clouds_enabled" default="true">
+			If [code]true[/code], draws the volumetric clouds.
+		</member>
+		<member name="clouds_extinction" type="float" setter="set_clouds_extinction" getter="get_clouds_extinction" default="0.04">
+			How much light a cloud of density [code]1.0[/code] stops per meter.
+		</member>
+		<member name="clouds_fade_distance" type="float" setter="set_clouds_fade_distance" getter="get_clouds_fade_distance" default="40000.0">
+			The distance over which the clouds fade into the air in front of them, in meters. Shorter distances hide the far clouds sooner.
+		</member>
+		<member name="clouds_light_samples" type="int" setter="set_clouds_light_samples" getter="get_clouds_light_samples" default="6">
+			How many times the clouds are sampled towards each light, to shade them. Reflections use at most 3.
+		</member>
+		<member name="clouds_lightning_color" type="Color" setter="set_clouds_lightning_color" getter="get_clouds_lightning_color" default="Color(0.75, 0.8, 1, 1)">
+			The color of the lightning flashes.
+		</member>
+		<member name="clouds_lightning_frequency" type="float" setter="set_clouds_lightning_frequency" getter="get_clouds_lightning_frequency" default="0.3">
+			How many lightning flashes there are per second, on average, in a full storm. There are none while [member clouds_storm] is below [code]0.5[/code].
+		</member>
+		<member name="clouds_lightning_intensity" type="float" setter="set_clouds_lightning_intensity" getter="get_clouds_lightning_intensity" default="1.0">
+			The brightness of the lightning flashes that light the clouds from inside during a storm. [code]0.0[/code] disables them.
+		</member>
+		<member name="clouds_samples" type="int" setter="set_clouds_samples" getter="get_clouds_samples" default="48">
+			How many times the clouds are sampled along each view ray. Higher values are smoother and slower. Reflections use half as many.
+		</member>
+		<member name="clouds_shape_scale" type="float" setter="set_clouds_shape_scale" getter="get_clouds_shape_scale" default="12000.0">
+			The size of one repetition of [member clouds_shape_texture], in meters.
+		</member>
+		<member name="clouds_shape_texture" type="Texture3D" setter="set_clouds_shape_texture" getter="get_clouds_shape_texture">
+			The coarse noise that the clouds are shaped from. It should tile seamlessly; only its red channel is used. When [code]null[/code], a default noise is used (see [method make_default_clouds_shape_texture]).
+		</member>
+		<member name="clouds_storm" type="float" setter="set_clouds_storm" getter="get_clouds_storm" default="0.0">
+			Turns the clouds into a storm, from none at [code]0.0[/code] to a full one at [code]1.0[/code]: the clouds cover the whole sky, hang lower, tower higher, grow denser and darker, and move faster, and past [code]0.5[/code], lightning flashes inside them (see [member clouds_lightning_intensity]). The scene's own lighting is left as it is: dim the sun and raise the fog with a [TimeOfDay] weather profile that also drives this property.
+		</member>
+		<member name="clouds_thickness" type="float" setter="set_clouds_thickness" getter="get_clouds_thickness" default="2500.0">
+			The thickness of the cloud layer, in meters.
+		</member>
+		<member name="clouds_wind_direction" type="Vector2" setter="set_clouds_wind_direction" getter="get_clouds_wind_direction" default="Vector2(1, 0)">
+			The direction the wind blows the clouds in, on the ground plane ([code]x[/code] is the X axis, [code]y[/code] the Z axis).
+		</member>
+		<member name="clouds_wind_speed" type="float" setter="set_clouds_wind_speed" getter="get_clouds_wind_speed" default="10.0">
+			The speed at which the wind blows the clouds, in meters per second.
+		</member>
 		<member name="energy_multiplier" type="float" setter="set_energy_multiplier" getter="get_energy_multiplier" default="1.0">
 			Scales the brightness of the whole sky.
 		</member>

@@ -75,7 +75,7 @@
 		</member>
 		<member name="atmosphere_enabled" type="bool" setter="set_atmosphere_enabled" getter="is_atmosphere_enabled" default="false">
 			If [code]true[/code], the environment has a planet's atmosphere, rendered in real time the way Unreal Engine's Sky Atmosphere is (Sébastien Hillaire, "A Scalable and Production Ready Sky and Atmosphere Rendering Technique", after Bruneton's precomputed atmospheric scattering). It scatters the light of up to two directional lights, typically the sun and the moon, across the sky and into what the camera sees of the scene (aerial perspective), and with [member atmosphere_affect_directional_lights], tints the lights themselves.
-			Draw the sky with an [AtmosphereSkyMaterial], or with a sky shader that calls [code]atmosphere_sky()[/code] and [code]atmosphere_transmittance()[/code]. The planet's surface is at [code]y = 0[/code], and one unit is one meter.
+			Draw the sky with an [AtmosphereSkyMaterial], or with a sky shader that calls [code]atmosphere_sky()[/code] and [code]atmosphere_transmittance()[/code]. Sky shaders can also light what they draw inside the air, such as clouds, with [code]atmosphere_light_direction(int light)[/code] and [code]atmosphere_light_at(vec3 position, int light)[/code], the illuminance a light brings to a point of the world through the air above it. The planet's surface is at [code]y = 0[/code], and one unit is one meter.
 			[b]Note:[/b] Only available in the Forward+ and Mobile renderers. Aerial perspective on the scene is Forward+ only.
 		</member>
 		<member name="atmosphere_ground_albedo" type="Color" setter="set_atmosphere_ground_albedo" getter="get_atmosphere_ground_albedo" default="Color(0.401978, 0.401978, 0.401978, 1)">

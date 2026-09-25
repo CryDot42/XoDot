@@ -32,6 +32,7 @@
 
 TEST_FORCE_LINK(test_atmosphere)
 
+#include "core/object/class_db.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/node_3d.h"
 #include "scene/3d/world_environment.h"
@@ -40,6 +41,7 @@ TEST_FORCE_LINK(test_atmosphere)
 #include "scene/resources/3d/sky_material.h"
 #include "scene/resources/environment.h"
 #include "scene/resources/sky.h"
+#include "scene/resources/texture.h"
 #ifdef RD_ENABLED
 #include "servers/rendering/renderer_rd/environment/atmosphere.h"
 #endif
@@ -98,6 +100,45 @@ TEST_CASE("[Atmosphere] Environment parameters") {
 	environment->set_atmosphere_mie_scattering_scale(0.02);
 	CHECK(environment->get_atmosphere_mie_scattering_scale() == doctest::Approx(0.02));
 	CHECK(double(environment->get("atmosphere_mie_scattering_scale")) == doctest::Approx(0.02));
+}
+
+TEST_CASE("[Atmosphere] Volumetric clouds of the sky material") {
+	Ref<AtmosphereSkyMaterial> material;
+	material.instantiate();
+
+	SUBCASE("On by default, and switched off by a shader of their own") {
+		CHECK(material->is_clouds_enabled());
+		CHECK(material->get_clouds_storm() == doctest::Approx(0.0));
+		const RID with_clouds = material->get_shader_rid();
+		material->set_clouds_enabled(false);
+		const RID without_clouds = material->get_shader_rid();
+		CHECK(with_clouds.is_valid());
+		CHECK(without_clouds.is_valid());
+		CHECK(with_clouds != without_clouds);
+		material->set_clouds_enabled(true);
+		CHECK(material->get_shader_rid() == with_clouds);
+	}
+
+	SUBCASE("Their parameters are properties a TimeOfDay track can drive") {
+		material->set("clouds_storm", 0.75);
+		CHECK(material->get_clouds_storm() == doctest::Approx(0.75));
+		material->set_clouds_samples(0);
+		CHECK(material->get_clouds_samples() == 1);
+	}
+
+	SUBCASE("Without textures of their own, they use the default noise") {
+		CHECK(material->get_clouds_shape_texture().is_null());
+		const Ref<Texture3D> shape = AtmosphereSkyMaterial::make_default_clouds_shape_texture();
+		if (ClassDB::class_exists("NoiseTexture3D")) {
+			REQUIRE(shape.is_valid());
+			CHECK(shape->is_class("NoiseTexture3D"));
+			CHECK(int(shape->get("width")) == 128);
+			CHECK(bool(shape->get("seamless")));
+			const Ref<Texture3D> detail = AtmosphereSkyMaterial::make_default_clouds_detail_texture();
+			REQUIRE(detail.is_valid());
+			CHECK(int(detail->get("width")) == 32);
+		}
+	}
 }
 
 } // namespace TestAtmosphere

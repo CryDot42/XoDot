@@ -159,6 +159,30 @@ vec3 atmosphere_transmittance(vec3 p_dir) {
 	return atmosphere_transmittance_to_top(atmosphere.camera_position, dir);
 }
 
+// The direction towards one of the lights the atmosphere is lit by (the sun
+// is 0), or zero if there are fewer.
+vec3 atmosphere_light_direction(int p_light) {
+	if (atmosphere.enabled == 0 || p_light < 0 || p_light >= int(atmosphere.light_count)) {
+		return vec3(0.0);
+	}
+	return atmosphere.light_direction[p_light].xyz;
+}
+
+// The illuminance that light brings to any point of the world (in meters,
+// like the scene) through the air above it, in the units the scene is lit
+// with: what lights a cloud, for one.
+vec3 atmosphere_light_at(vec3 p_position, int p_light) {
+	if (atmosphere.enabled == 0 || p_light < 0 || p_light >= int(atmosphere.light_count)) {
+		return vec3(0.0);
+	}
+	vec3 position = atmosphere_world_to_planet(p_position);
+	vec3 dir = atmosphere.light_direction[p_light].xyz;
+	if (atmosphere_ray_sphere_nearest(position, dir, atmosphere.bottom_radius) >= 0.0) {
+		return vec3(0.0);
+	}
+	return atmosphere.light_illuminance[p_light].rgb * atmosphere_transmittance_to_top(position, dir);
+}
+
 #ifdef USE_CUBEMAP_PASS
 #define AT_CUBEMAP_PASS true
 #else
@@ -316,10 +340,16 @@ void main() {
 	frag_color.rgb = color;
 	frag_color.a = alpha;
 
+	// Half and quarter resolution passes only fill buffers that the full pass
+	// reads through HALF_RES_COLOR and QUARTER_RES_COLOR, and which it then
+	// brightens and fogs with the rest of the sky: doing it here too would do
+	// it twice.
+#if !defined(USE_HALF_RES_PASS) && !defined(USE_QUARTER_RES_PASS)
 	// Apply environment 'brightness' setting separately before fog to ensure consistent luminance.
 	frag_color.rgb = frag_color.rgb * params.brightness_multiplier;
+#endif
 
-#if !defined(DISABLE_FOG)
+#if !defined(DISABLE_FOG) && !defined(USE_HALF_RES_PASS) && !defined(USE_QUARTER_RES_PASS)
 
 	// Draw "fixed" fog before volumetric fog to ensure volumetric fog can appear in front of the sky.
 	if (sky_scene_data.fog_enabled) {
