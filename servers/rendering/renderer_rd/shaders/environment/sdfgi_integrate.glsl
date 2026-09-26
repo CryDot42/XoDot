@@ -79,19 +79,28 @@ layout(push_constant, std430) uniform Params {
 
 	vec2 sky_irradiance_border_size;
 	bool store_ambient_texture;
-	uint pad;
+	uint flags;
 }
 params;
+
+// MODE_SCROLL: probes that cannot be seeded from a parent cascade start from zero instead of
+// keeping what their texel held, which after a full rebuild belongs somewhere else entirely.
+#define INTEGRATE_FLAG_RESET 1
 
 const float PI = 3.14159265f;
 const float GOLDEN_ANGLE = PI * (3.0 - sqrt(5.0));
 
-vec3 vogel_hemisphere(uint p_index, uint p_count, float p_offset) {
-	float r = sqrt(float(p_index) + 0.5f) / sqrt(float(p_count));
-	float theta = float(p_index) * GOLDEN_ANGLE + p_offset;
-	float y = cos(r * PI * 0.5);
-	float l = sin(r * PI * 0.5);
-	return vec3(l * cos(theta), l * sin(theta), y * (float(p_index & 1) * 2.0 - 1.0));
+// Point p_index of a p_count point spherical Fibonacci set, turned by p_offset around the pole.
+// z falls linearly with the index, so the set is equal-area, and so is any strided subset of it:
+// each frame traces indices history_index + i * history_size, which spread over the whole sphere.
+// (The Vogel disk this replaces was bent onto a hemisphere, which crowded the samples towards
+// its rim, and picked the hemisphere from the index parity, so with an even history size every
+// ray of a frame went into the same half of the sphere, alternating from frame to frame.)
+vec3 spherical_fibonacci(uint p_index, uint p_count, float p_offset) {
+	float z = 1.0 - (2.0 * float(p_index) + 1.0) / float(p_count);
+	float r = sqrt(max(0.0, 1.0 - z * z));
+	float phi = float(p_index) * GOLDEN_ANGLE + p_offset;
+	return vec3(r * cos(phi), r * sin(phi), z);
 }
 
 uvec3 hash3(uvec3 x) {
@@ -177,17 +186,18 @@ void main() {
 		sh_accum[probe_index].c[i] = 0.0;
 	}
 
-	// quickly ensure each probe has a different "offset" for the vogel function, based on integer world position
+	// quickly ensure each probe has a different "offset" for the ray set, based on integer world position
 	uvec3 h3 = hash3(uvec3(params.world_offset + probe_cell));
 	float offset = hashf3(vec3(h3 & uvec3(0xFFFFF)));
 
-	//for a more homogeneous hemisphere, alternate based on history frames
+	// Each frame traces a different strided subset of one set spanning all history frames, so the
+	// frames the history averages together cover the sphere evenly between them.
 	uint ray_offset = params.history_index;
 	uint ray_mult = params.history_size;
 	uint ray_total = ray_mult * params.ray_count;
 
 	for (uint i = 0; i < params.ray_count; i++) {
-		vec3 ray_dir = vogel_hemisphere(ray_offset + i * ray_mult, ray_total, offset);
+		vec3 ray_dir = spherical_fibonacci(ray_offset + i * ray_mult, ray_total, offset * 2.0 * PI);
 		ray_dir.y *= params.y_mult;
 		ray_dir = normalize(ray_dir);
 
@@ -511,8 +521,14 @@ void main() {
 		//to global coords
 		float cell_to_probe = float(params.grid_size.x / float(params.probe_axis_size - 1));
 
+		// Not from cascades.data[params.cascade].offset: region updates, which scroll probes, run
+		// before the cascade UBO is refreshed for the frame, so that offset is still the one from
+		// before this very scroll, one step off the grid being written. world_offset, the
+		// cascade's center in probes, already has the new position. The parent's UBO offset is
+		// right as it is: when it scrolls this frame too, that happens later in the same loop,
+		// so for now its probes still sit where the old offset puts them.
 		float probe_cell_size = cell_to_probe / cascades.data[params.cascade].to_cell;
-		vec3 probe_pos = cascades.data[params.cascade].offset + vec3(probe_cell) * probe_cell_size;
+		vec3 probe_pos = (vec3(params.world_offset) - vec3(float(params.probe_axis_size - 1) * 0.5) + vec3(probe_cell)) * probe_cell_size;
 
 		//to parent local coords
 		float probe_cell_size_next = cell_to_probe / cascades.data[params.cascade + 1].to_cell;
@@ -569,6 +585,17 @@ void main() {
 			imageStore(lightprobe_average_scroll_texture, dst_pos.xy, ivalue);
 		}
 
+	} else if (bool(params.flags & INTEGRATE_FLAG_RESET)) {
+		// The cascade was rebuilt from scratch and nothing above it can seed it: whatever this
+		// texel holds belongs to wherever the cascade was before, so start over.
+		for (int i = 0; i < SH_SIZE; i++) {
+			ivec3 dst_pos = ivec3(pos.x, pos.y * SH_SIZE + i, 0);
+			for (uint j = 0; j < params.history_size; j++) {
+				dst_pos.z = int(j);
+				imageStore(lightprobe_history_scroll_texture, dst_pos, ivec4(0));
+			}
+			imageStore(lightprobe_average_scroll_texture, dst_pos.xy, ivec4(0));
+		}
 	} else {
 		//scroll at the edge of the highest cascade, just copy what is there,
 		//since its the closest we have anyway

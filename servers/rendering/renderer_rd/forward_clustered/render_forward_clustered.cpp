@@ -1306,6 +1306,9 @@ void RenderForwardClustered::_update_sdfgi(RenderDataRD *p_render_data) {
 		for (int i = 0; i < p_render_data->render_sdfgi_region_count; i++) {
 			sdfgi->render_region(rb, p_render_data->render_sdfgi_regions[i].region, p_render_data->render_sdfgi_regions[i].instances, exposure_normalization);
 		}
+		if (p_render_data->render_sdfgi_region_count > 0) {
+			sdfgi->reinit_rebuilt_probes();
+		}
 		if (p_render_data->sdfgi_update_data->update_static) {
 			sdfgi->render_static_lights(p_render_data, rb, p_render_data->sdfgi_update_data->static_cascade_count, p_render_data->sdfgi_update_data->static_cascade_indices, p_render_data->sdfgi_update_data->static_positional_lights);
 		}

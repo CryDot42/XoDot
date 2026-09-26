@@ -1358,6 +1358,7 @@ void GI::SDFGI::update_probes(RID p_env, SkyRD::Sky *p_sky) {
 	push_constant.image_size[0] = probe_axis_count * probe_axis_count;
 	push_constant.image_size[1] = probe_axis_count;
 	push_constant.store_ambient_texture = RendererSceneRenderRD::get_singleton()->environment_get_volumetric_fog_enabled(p_env);
+	push_constant.flags = 0;
 
 	const float sky_irradiance_border_size = p_sky != nullptr ? p_sky->uv_border_size : 0.0f;
 	push_constant.sky_irradiance_border_size[0] = sky_irradiance_border_size;
@@ -1461,6 +1462,7 @@ void GI::SDFGI::store_probes() {
 	push_constant.image_size[0] = probe_axis_count * probe_axis_count;
 	push_constant.image_size[1] = probe_axis_count;
 	push_constant.store_ambient_texture = false;
+	push_constant.flags = 0;
 
 	push_constant.sky_flags = 0;
 	push_constant.y_mult = y_mult;
@@ -1563,6 +1565,99 @@ void GI::SDFGI::update_cascades() {
 	}
 
 	RD::get_singleton()->buffer_update(cascades_ubo, 0, sizeof(SDFGI::Cascade::UBO) * SDFGI::MAX_CASCADES, cascade_data);
+}
+
+void GI::SDFGI::_scroll_probes(RD::ComputeListID p_compute_list, uint32_t p_cascade, const Vector3i &p_probe_scroll, uint32_t p_flags) {
+	SDFGIShader::IntegratePushConstant ipush_constant;
+	memset(&ipush_constant, 0, sizeof(SDFGIShader::IntegratePushConstant));
+	ipush_constant.grid_size[0] = cascade_size;
+	ipush_constant.grid_size[1] = cascade_size;
+	ipush_constant.grid_size[2] = cascade_size;
+	ipush_constant.max_cascades = cascades.size();
+	ipush_constant.probe_axis_size = probe_axis_count;
+	ipush_constant.history_size = history_size;
+	ipush_constant.y_mult = y_mult;
+	ipush_constant.flags = p_flags;
+
+	ipush_constant.image_size[0] = probe_axis_count * probe_axis_count;
+	ipush_constant.image_size[1] = probe_axis_count;
+
+	int32_t probe_divisor = cascade_size / SDFGI::PROBE_DIVISOR;
+	ipush_constant.cascade = p_cascade;
+	ipush_constant.world_offset[0] = cascades[p_cascade].position.x / probe_divisor;
+	ipush_constant.world_offset[1] = cascades[p_cascade].position.y / probe_divisor;
+	ipush_constant.world_offset[2] = cascades[p_cascade].position.z / probe_divisor;
+
+	ipush_constant.scroll[0] = p_probe_scroll.x;
+	ipush_constant.scroll[1] = p_probe_scroll.y;
+	ipush_constant.scroll[2] = p_probe_scroll.z;
+
+	RD::get_singleton()->compute_list_bind_compute_pipeline(p_compute_list, gi->sdfgi_shader.integrate_pipeline[SDFGIShader::INTEGRATE_MODE_SCROLL].get_rid());
+	RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, cascades[p_cascade].integrate_uniform_set, 0);
+	RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, gi->sdfgi_shader.integrate_default_sky_uniform_set, 1);
+	RD::get_singleton()->compute_list_set_push_constant(p_compute_list, &ipush_constant, sizeof(SDFGIShader::IntegratePushConstant));
+	RD::get_singleton()->compute_list_dispatch_threads(p_compute_list, probe_axis_count * probe_axis_count, probe_axis_count, 1);
+
+	RD::get_singleton()->compute_list_add_barrier(p_compute_list);
+
+	RD::get_singleton()->compute_list_bind_compute_pipeline(p_compute_list, gi->sdfgi_shader.integrate_pipeline[SDFGIShader::INTEGRATE_MODE_SCROLL_STORE].get_rid());
+	RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, cascades[p_cascade].integrate_uniform_set, 0);
+	RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, gi->sdfgi_shader.integrate_default_sky_uniform_set, 1);
+	RD::get_singleton()->compute_list_set_push_constant(p_compute_list, &ipush_constant, sizeof(SDFGIShader::IntegratePushConstant));
+	RD::get_singleton()->compute_list_dispatch_threads(p_compute_list, probe_axis_count * probe_axis_count, probe_axis_count, 1);
+
+	RD::get_singleton()->compute_list_add_barrier(p_compute_list);
+
+	if (bounce_feedback > 0.0) {
+		//multibounce requires this to be stored so direct light can read from it
+
+		RD::get_singleton()->compute_list_bind_compute_pipeline(p_compute_list, gi->sdfgi_shader.integrate_pipeline[SDFGIShader::INTEGRATE_MODE_STORE].get_rid());
+
+		//convert to octahedral to store
+		ipush_constant.image_size[0] *= SDFGI::LIGHTPROBE_OCT_SIZE;
+		ipush_constant.image_size[1] *= SDFGI::LIGHTPROBE_OCT_SIZE;
+
+		RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, cascades[p_cascade].integrate_uniform_set, 0);
+		RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, gi->sdfgi_shader.integrate_default_sky_uniform_set, 1);
+		RD::get_singleton()->compute_list_set_push_constant(p_compute_list, &ipush_constant, sizeof(SDFGIShader::IntegratePushConstant));
+		RD::get_singleton()->compute_list_dispatch_threads(p_compute_list, probe_axis_count * probe_axis_count * SDFGI::LIGHTPROBE_OCT_SIZE, probe_axis_count * SDFGI::LIGHTPROBE_OCT_SIZE, 1);
+	}
+}
+
+void GI::SDFGI::reinit_rebuilt_probes() {
+	// A cascade that moved too far in one frame to be scrolled (a teleport, or a jump across
+	// a good part of its size) has been revoxelized from scratch by render_region(), but its
+	// probes were left as they were, still holding the light of wherever the cascade used to
+	// be, and kept showing it until the history turned over. Re-seed them the way scrolled-in
+	// probes are, from the cascade above, working downwards so that cascade is either one that
+	// just scrolled normally or one this has already re-seeded.
+	bool any_rebuilt = false;
+	for (const Cascade &c : cascades) {
+		if (c.dirty_regions == Cascade::DIRTY_ALL) {
+			any_rebuilt = true;
+			break;
+		}
+	}
+	if (!any_rebuilt) {
+		return;
+	}
+
+	// Every region has been processed by now, so all cascades and their probe textures agree
+	// with the new positions; bring the UBO the seeding reads from up to date with them too.
+	update_cascades();
+
+	RD::get_singleton()->draw_command_begin_label("SDFGI Reseed Rebuilt Probes");
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	for (int i = int(cascades.size()) - 1; i >= 0; i--) {
+		if (cascades[i].dirty_regions != Cascade::DIRTY_ALL) {
+			continue;
+		}
+		// Scrolling by a whole grid leaves no probe in range, so every one of them is re-seeded.
+		_scroll_probes(compute_list, i, Vector3i(probe_axis_count, 0, 0), SDFGIShader::IntegratePushConstant::FLAG_RESET);
+		RD::get_singleton()->compute_list_add_barrier(compute_list);
+	}
+	RD::get_singleton()->compute_list_end();
+	RD::get_singleton()->draw_command_end_label();
 }
 
 void GI::SDFGI::debug_draw(uint32_t p_view_count, const Projection *p_projections, const Transform3D &p_transform, int p_width, int p_height, RID p_render_target, RID p_texture, const Vector<RID> &p_texture_views) {
@@ -2173,71 +2268,8 @@ void GI::SDFGI::render_region(Ref<RenderSceneBuffersRD> p_render_buffers, int p_
 
 			//no barrier, continue together
 
-			{
-				//scroll probes and their history also
-
-				SDFGIShader::IntegratePushConstant ipush_constant;
-				ipush_constant.grid_size[1] = cascade_size;
-				ipush_constant.grid_size[2] = cascade_size;
-				ipush_constant.grid_size[0] = cascade_size;
-				ipush_constant.max_cascades = cascades.size();
-				ipush_constant.probe_axis_size = probe_axis_count;
-				ipush_constant.history_index = 0;
-				ipush_constant.history_size = history_size;
-				ipush_constant.ray_count = 0;
-				ipush_constant.ray_bias = 0;
-				ipush_constant.sky_flags = 0;
-				ipush_constant.sky_energy = 0;
-				ipush_constant.sky_color_or_orientation[0] = 0;
-				ipush_constant.sky_color_or_orientation[1] = 0;
-				ipush_constant.sky_color_or_orientation[2] = 0;
-				ipush_constant.y_mult = y_mult;
-				ipush_constant.store_ambient_texture = false;
-
-				ipush_constant.image_size[0] = probe_axis_count * probe_axis_count;
-				ipush_constant.image_size[1] = probe_axis_count;
-
-				int32_t probe_divisor = cascade_size / SDFGI::PROBE_DIVISOR;
-				ipush_constant.cascade = cascade;
-				ipush_constant.world_offset[0] = cascades[cascade].position.x / probe_divisor;
-				ipush_constant.world_offset[1] = cascades[cascade].position.y / probe_divisor;
-				ipush_constant.world_offset[2] = cascades[cascade].position.z / probe_divisor;
-
-				ipush_constant.scroll[0] = dirty.x / probe_divisor;
-				ipush_constant.scroll[1] = dirty.y / probe_divisor;
-				ipush_constant.scroll[2] = dirty.z / probe_divisor;
-
-				RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->sdfgi_shader.integrate_pipeline[SDFGIShader::INTEGRATE_MODE_SCROLL].get_rid());
-				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, cascades[cascade].integrate_uniform_set, 0);
-				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, gi->sdfgi_shader.integrate_default_sky_uniform_set, 1);
-				RD::get_singleton()->compute_list_set_push_constant(compute_list, &ipush_constant, sizeof(SDFGIShader::IntegratePushConstant));
-				RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_axis_count * probe_axis_count, probe_axis_count, 1);
-
-				RD::get_singleton()->compute_list_add_barrier(compute_list);
-
-				RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->sdfgi_shader.integrate_pipeline[SDFGIShader::INTEGRATE_MODE_SCROLL_STORE].get_rid());
-				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, cascades[cascade].integrate_uniform_set, 0);
-				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, gi->sdfgi_shader.integrate_default_sky_uniform_set, 1);
-				RD::get_singleton()->compute_list_set_push_constant(compute_list, &ipush_constant, sizeof(SDFGIShader::IntegratePushConstant));
-				RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_axis_count * probe_axis_count, probe_axis_count, 1);
-
-				RD::get_singleton()->compute_list_add_barrier(compute_list);
-
-				if (bounce_feedback > 0.0) {
-					//multibounce requires this to be stored so direct light can read from it
-
-					RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->sdfgi_shader.integrate_pipeline[SDFGIShader::INTEGRATE_MODE_STORE].get_rid());
-
-					//convert to octahedral to store
-					ipush_constant.image_size[0] *= SDFGI::LIGHTPROBE_OCT_SIZE;
-					ipush_constant.image_size[1] *= SDFGI::LIGHTPROBE_OCT_SIZE;
-
-					RD::get_singleton()->compute_list_bind_uniform_set(compute_list, cascades[cascade].integrate_uniform_set, 0);
-					RD::get_singleton()->compute_list_bind_uniform_set(compute_list, gi->sdfgi_shader.integrate_default_sky_uniform_set, 1);
-					RD::get_singleton()->compute_list_set_push_constant(compute_list, &ipush_constant, sizeof(SDFGIShader::IntegratePushConstant));
-					RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_axis_count * probe_axis_count * SDFGI::LIGHTPROBE_OCT_SIZE, probe_axis_count * SDFGI::LIGHTPROBE_OCT_SIZE, 1);
-				}
-			}
+			//scroll probes and their history also
+			_scroll_probes(compute_list, cascade, dirty / int32_t(cascade_size / SDFGI::PROBE_DIVISOR), 0);
 
 			//ok finally barrier
 			RD::get_singleton()->compute_list_end();

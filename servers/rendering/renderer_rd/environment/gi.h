@@ -526,6 +526,10 @@ private:
 				SKY_FLAGS_ORIENTATION_SIGN = 0x04,
 			};
 
+			enum {
+				FLAG_RESET = 0x01, // INTEGRATE_FLAG_RESET in sdfgi_integrate.glsl.
+			};
+
 			float grid_size[3];
 			uint32_t max_cascades;
 
@@ -549,7 +553,7 @@ private:
 
 			float sky_irradiance_border_size[2];
 			uint32_t store_ambient_texture;
-			uint32_t pad;
+			uint32_t flags;
 		};
 
 		SdfgiIntegrateShaderRD integrate;
@@ -828,6 +832,9 @@ public:
 		void store_probes();
 		int get_pending_region_data(int p_region, Vector3i &r_local_offset, Vector3i &r_local_size, AABB &r_bounds) const;
 		void update_cascades();
+		// Call after this frame's render_region() calls: re-seeds the probes of cascades those rebuilt from scratch.
+		void reinit_rebuilt_probes();
+		void _scroll_probes(RD::ComputeListID p_compute_list, uint32_t p_cascade, const Vector3i &p_probe_scroll, uint32_t p_flags);
 
 		void debug_draw(uint32_t p_view_count, const Projection *p_projections, const Transform3D &p_transform, int p_width, int p_height, RID p_render_target, RID p_texture, const Vector<RID> &p_texture_views);
 		void debug_probes(RID p_framebuffer, const uint32_t p_view_count, const Projection *p_camera_with_transforms);
