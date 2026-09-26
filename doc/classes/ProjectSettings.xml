@@ -3109,6 +3109,10 @@
 			The number of rays to throw per frame when computing signed distance field global illumination. Higher values lead to a less noisy result, at the cost of performance. See also [member rendering/global_illumination/sdfgi/frames_to_converge] and [member rendering/global_illumination/sdfgi/frames_to_update_lights].
 			[b]Note:[/b] This property is only read when the project starts. To control SDFGI quality at runtime, call [method RenderingServer.environment_set_sdfgi_ray_count] instead.
 		</member>
+		<member name="rendering/global_illumination/sdfgi/probe_relocation" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], signed distance field global illumination probes that land inside geometry, or so close to a surface that their rays would start past it, are moved (by up to about half the probe spacing) to a nearby spot outside it, and those that cannot be moved anywhere usable are left out of the lighting altogether. This removes the dark or overbright blotches such probes cause on nearby walls and floors, and the light they would otherwise pick up from the other side of thin geometry. Probes are only placed when a cascade's geometry is voxelized, so this has no per-frame cost. Enable the [b]SDFGI Probes[/b] debug draw mode to see where probes ended up; the ones left out are drawn in red.
+			[b]Note:[/b] This property is only read when the project starts.
+		</member>
 		<member name="rendering/global_illumination/voxel_gi/anisotropic_mipmaps" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], [VoxelGI] keeps a second set of mipmaps that stores light separately for each of the 6 axis directions, only counting voxels whose surfaces face the direction light travels in. Narrow cones (screen probes and glossy reflections) then see less light through thin walls. Wide diffuse cones mostly keep using the regular mipmaps, as their footprint reaches behind the surface they start from.
 			This roughly doubles the video memory used by the 3D texture of each [VoxelGI]. This setting can be changed at run-time.

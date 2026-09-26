@@ -88,6 +88,9 @@ lights;
 
 layout(set = 0, binding = 11) uniform texture2DArray lightprobe_texture;
 layout(set = 0, binding = 12) uniform texture3D occlusion_texture;
+// Where each probe was placed (see MODE_PROBE_PLACEMENT in sdfgi_preprocess.glsl): xyz its
+// offset from the grid in voxels, w whether it is usable.
+layout(set = 0, binding = 13) uniform texture2DArray probe_state_texture;
 
 layout(set = 1, binding = 0) uniform texture2D area_light_atlas;
 
@@ -237,9 +240,13 @@ void main() {
 
 			// Compute weight
 
+			// Interpolate on the grid, but take the direction from where the probe was placed,
+			// and none of the light of a probe stuck in geometry (see sdfvoxel_gi_process() in gi.glsl).
+			vec4 probe_state = texelFetch(sampler2DArray(probe_state_texture, linear_sampler), ivec3(probe_posi.x + probe_posi.z * params.probe_axis_size, probe_posi.y, int(params.cascade)), 0);
+
 			vec3 probe_pos = vec3(probe_posi);
 			vec3 probe_to_pos = pos - probe_pos;
-			vec3 probe_dir = normalize(-probe_to_pos);
+			vec3 probe_dir = normalize(probe_pos + probe_state.xyz * float(params.probe_axis_size - 1) / params.grid_size - pos);
 
 			// Compute lightprobe texture position
 
@@ -248,7 +255,7 @@ void main() {
 			for (uint k = 0; k < 6; k++) {
 				if (bool(valid_aniso & (1 << k))) {
 					vec3 n = aniso_dir[k];
-					float weight = trilinear.x * trilinear.y * trilinear.z * max(0, dot(n, probe_dir));
+					float weight = trilinear.x * trilinear.y * trilinear.z * max(0, dot(n, probe_dir)) * probe_state.w;
 
 					if (weight > 0.0 && params.use_occlusion) {
 						ivec3 occ_indexv = abs((cascades.data[params.cascade].probe_world_offset + probe_posi) & ivec3(1, 1, 1)) * ivec3(1, 2, 4);

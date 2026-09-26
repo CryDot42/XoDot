@@ -153,6 +153,8 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 	float visible_weight = 0.0;
 	float total_weight = 0.0;
 
+	float voxels_to_probes = sdfgi.cascade_probe_size.x / sdfgi.grid_size.x;
+
 	for (uint j = 0; j < 8; j++) {
 		ivec3 offset = (ivec3(j) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1);
 		ivec3 probe_posi = probe_base_pos;
@@ -160,13 +162,18 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 
 		// Compute weight
 
+		// Interpolate on the grid, but judge whether the probe is in front of the surface from
+		// where it was placed, and ignore probes stuck in geometry (see sdfvoxel_gi_process() in gi.glsl).
+		vec4 probe_state = texelFetch(sampler2DArray(sdfgi_probe_state, SAMPLER_NEAREST_CLAMP), ivec3(probe_posi.x + probe_posi.z * sdfgi.probe_axis_size, probe_posi.y, int(cascade)), 0);
+
 		vec3 probe_pos = vec3(probe_posi);
 		vec3 probe_to_pos = cascade_pos - probe_pos;
-		vec3 probe_dir = normalize(-probe_to_pos);
+		vec3 probe_dir = normalize(probe_pos + probe_state.xyz * voxels_to_probes - cascade_pos);
 
 		vec3 trilinear = vec3(1.0) - abs(probe_to_pos);
 		float weight = trilinear.x * trilinear.y * trilinear.z * max(0.005, dot(cam_normal, probe_dir));
 		total_weight += weight;
+		weight *= probe_state.w;
 
 		// Compute lightprobe occlusion
 

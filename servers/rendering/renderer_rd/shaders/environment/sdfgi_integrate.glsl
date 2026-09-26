@@ -48,9 +48,14 @@ layout(rgba32i, set = 0, binding = 13) uniform restrict iimage2D lightprobe_aver
 
 layout(rgba16f, set = 0, binding = 14) uniform restrict writeonly image2DArray lightprobe_ambient_texture;
 
+// Where each probe was placed (see MODE_PROBE_PLACEMENT in sdfgi_preprocess.glsl), one layer per
+// cascade: xyz its offset from the grid in voxels, w whether it is usable at all.
+layout(set = 0, binding = 15) uniform texture2DArray probe_state_texture;
+
 // Which coefficient texel's alpha holds each piece of a probe's history state.
 #define STATE_AGE 0 // How many of the history frames are the probe's own, up to history_size.
 #define STATE_SUSPECT 1 // Consecutive frames whose light disagreed with the history's.
+#define STATE_PLACEMENT 2 // Where the probe was placed when its history was traced, to notice it moving.
 
 // A probe that starts from a guess (seeded from the cascade above when it scrolls in) counts
 // that guess as this many history frames: enough to hide its first noisy traces, few enough that
@@ -231,6 +236,15 @@ void main() {
 	vec3 probe_pos = cascades.data[params.cascade].offset + vec3(probe_cell) * probe_cell_size;
 	vec3 pos_to_uvw = 1.0 / params.grid_size;
 
+	vec4 probe_state = texelFetch(sampler2DArray(probe_state_texture, linear_sampler), ivec3(pos, int(params.cascade)), 0);
+	bool probe_valid = probe_state.w > 0.5;
+	probe_pos += probe_state.xyz / cascades.data[params.cascade].to_cell;
+
+	// Identifies the placement to within half a voxel, with 0 standing for "none": a probe stuck
+	// in geometry, or one only just seeded, whose history was not traced from anywhere yet.
+	ivec3 placement_q = clamp(ivec3(round(probe_state.xyz * 2.0)) + ivec3(8), ivec3(0), ivec3(16));
+	float placement_code = probe_valid ? float(1 + placement_q.x + placement_q.y * 17 + placement_q.z * 289) : 0.0;
+
 	for (uint i = 0; i < SH_SIZE * 3; i++) {
 		sh_accum[probe_index].c[i] = 0.0;
 	}
@@ -245,7 +259,10 @@ void main() {
 	uint ray_mult = params.history_size;
 	uint ray_total = ray_mult * params.ray_count;
 
-	for (uint i = 0; i < params.ray_count; i++) {
+	// A probe stuck in geometry is never sampled, so there is no point tracing it.
+	uint ray_count = probe_valid ? params.ray_count : 0;
+
+	for (uint i = 0; i < ray_count; i++) {
 		vec3 ray_dir = spherical_fibonacci(ray_offset + i * ray_mult, ray_total, offset * 2.0 * PI);
 		ray_dir.y *= params.y_mult;
 		ray_dir = normalize(ray_dir);
@@ -426,11 +443,20 @@ void main() {
 		}
 	}
 
+	if (!probe_valid) {
+		keep = 0; // Traces nothing, holds nothing: whatever it becomes once usable, it starts afresh.
+	} else if (get_probe_state(average_pos, STATE_PLACEMENT) != placement_code) {
+		// The probe was moved (its cascade was revoxelized with new geometry in reach) or only
+		// just seeded, so its history was traced from elsewhere: keep a little of it as a guess.
+		keep = min(keep, PRIOR_AGE);
+		suspect = 0.0;
+	}
+
 	// A frame only leaves the sum when a full history of the probe's own frames is there to
 	// drop it from: while the probe is younger than that, the texel about to be overwritten was
 	// never counted.
 	bool rebuild_sum = keep < age;
-	int new_age = min(keep + 1, history_size);
+	int new_age = probe_valid ? min(keep + 1, history_size) : 0;
 	int history_flags = new_age <= ADAPT_SETTLE_FRAMES ? HISTORY_FLAG_UNSETTLED : 0;
 
 	for (int i = 0; i < SH_SIZE; i++) {
@@ -460,6 +486,8 @@ void main() {
 			average.a = floatBitsToInt(float(new_age));
 		} else if (i == STATE_SUSPECT) {
 			average.a = floatBitsToInt(suspect);
+		} else if (i == STATE_PLACEMENT) {
+			average.a = floatBitsToInt(placement_code);
 		}
 
 		imageStore(lightprobe_history_texture, slot_pos, ivec4(ivalue, history_flags));
@@ -682,7 +710,7 @@ void main() {
 				ivec2 parent_pos = ivec2(tex_pos.x, tex_pos.y * SH_SIZE);
 				float parent_age = intBitsToFloat(imageLoad(lightprobe_average_parent_texture, parent_pos + ivec2(0, STATE_AGE)).a);
 				if (parent_age <= 0.0) {
-					continue; // Never traced: nothing to pass on.
+					continue; // Never traced (or stuck in geometry): nothing to pass on.
 				}
 
 				for (int j = 0; j < SH_SIZE; j++) {

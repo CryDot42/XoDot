@@ -581,6 +581,21 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 		occlusion_texture = RD::get_singleton()->texture_create_shared(tv, occlusion_data);
 	}
 
+	{
+		// One texel per probe, laid out like the probe textures, one layer per cascade. Cleared
+		// to "not moved, usable", which is what probes keep when relocation is disabled.
+		RD::TextureFormat tf_probe_state;
+		tf_probe_state.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		tf_probe_state.width = probe_axis_count * probe_axis_count;
+		tf_probe_state.height = probe_axis_count;
+		tf_probe_state.array_layers = cascades.size();
+		tf_probe_state.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
+		tf_probe_state.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		probe_state_texture = RD::get_singleton()->texture_create(tf_probe_state, RD::TextureView());
+		RD::get_singleton()->set_resource_name(probe_state_texture, "SDFGI Probe State");
+		RD::get_singleton()->texture_clear(probe_state_texture, Color(0, 0, 0, 1), 0, 1, 0, tf_probe_state.array_layers);
+	}
+
 	for (SDFGI::Cascade &cascade : cascades) {
 		/* 3D Textures */
 
@@ -867,6 +882,13 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 			u.append_id(occlusion_texture);
 			uniforms.push_back(u);
 		}
+		{
+			RD::Uniform u;
+			u.binding = 13;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			u.append_id(probe_state_texture);
+			uniforms.push_back(u);
+		}
 
 		cascade.sdf_direct_light_static_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.direct_light.version_get_shader(gi->sdfgi_shader.direct_light_shader, SDFGIShader::DIRECT_LIGHT_MODE_STATIC), 0);
 		cascade.sdf_direct_light_dynamic_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.direct_light.version_get_shader(gi->sdfgi_shader.direct_light_shader, SDFGIShader::DIRECT_LIGHT_MODE_DYNAMIC), 0);
@@ -1019,8 +1041,36 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 			u.append_id(render_geom_facing);
 			uniforms.push_back(u);
 		}
+		{
+			RD::Uniform u;
+			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+			u.binding = 4;
+			u.append_id(probe_state_texture);
+			uniforms.push_back(u);
+		}
 
 		occlusion_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.preprocess.version_get_shader(gi->sdfgi_shader.preprocess_shader, SDFGIShader::PRE_PROCESS_OCCLUSION), 0);
+	}
+
+	//probe placement uniform set
+	{
+		Vector<RD::Uniform> uniforms;
+		{
+			RD::Uniform u;
+			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+			u.binding = 1;
+			u.append_id(render_geom_facing);
+			uniforms.push_back(u);
+		}
+		{
+			RD::Uniform u;
+			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+			u.binding = 2;
+			u.append_id(probe_state_texture);
+			uniforms.push_back(u);
+		}
+
+		probe_placement_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.preprocess.version_get_shader(gi->sdfgi_shader.preprocess_shader, SDFGIShader::PRE_PROCESS_PROBE_PLACEMENT), 0);
 	}
 
 	for (uint32_t i = 0; i < cascades.size(); i++) {
@@ -1155,6 +1205,13 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 			u.append_id(ambient_texture);
 			uniforms.push_back(u);
 		}
+		{
+			RD::Uniform u;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			u.binding = 15;
+			u.append_id(probe_state_texture);
+			uniforms.push_back(u);
+		}
 
 		cascades[i].integrate_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.integrate.version_get_shader(gi->sdfgi_shader.integrate_shader, 0), 0);
 	}
@@ -1205,6 +1262,7 @@ GI::SDFGI::~SDFGI() {
 	RD::get_singleton()->free_rid(lightprobe_average_scroll);
 	RD::get_singleton()->free_rid(occlusion_data);
 	RD::get_singleton()->free_rid(ambient_texture);
+	RD::get_singleton()->free_rid(probe_state_texture);
 
 	RD::get_singleton()->free_rid(cascades_ubo);
 
@@ -1882,6 +1940,13 @@ void GI::SDFGI::debug_probes(RID p_framebuffer, const uint32_t p_view_count, con
 			u.append_id(debug_probes_scene_data_ubo);
 			uniforms.push_back(u);
 		}
+		{
+			RD::Uniform u;
+			u.binding = 6;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			u.append_id(probe_state_texture);
+			uniforms.push_back(u);
+		}
 
 		debug_probes_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.debug_probes.version_get_shader(gi->sdfgi_shader.debug_probes_shader, 0), 0);
 	}
@@ -2407,6 +2472,20 @@ void GI::SDFGI::render_region(Ref<RenderSceneBuffersRD> p_render_buffers, int p_
 					jf_us = jf_us == 0 ? 1 : 0;
 				}
 			}
+		}
+
+		if (gi->sdfgi_probe_relocation) {
+			RENDER_TIMESTAMP("SDFGI Probe Placement");
+
+			// Where the probes of this cascade go, now that its geometry is known (see
+			// MODE_PROBE_PLACEMENT). Before occlusion, which works from the probes' final positions.
+			push_constant.cascade = cascade;
+			push_constant.min_distance = probe_bias + 0.5;
+			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->sdfgi_shader.preprocess_pipeline[SDFGIShader::PRE_PROCESS_PROBE_PLACEMENT].get_rid());
+			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, probe_placement_uniform_set, 0);
+			RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SDFGIShader::PreprocessPushConstant));
+			RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_axis_count, probe_axis_count, probe_axis_count);
+			RD::get_singleton()->compute_list_add_barrier(compute_list);
 		}
 
 		RENDER_TIMESTAMP("SDFGI Occlusion");
@@ -4218,6 +4297,7 @@ GI::GI() {
 	sdfgi_frames_to_converge = RSE::EnvironmentSDFGIFramesToConverge(CLAMP(int32_t(GLOBAL_GET("rendering/global_illumination/sdfgi/frames_to_converge")), 0, int32_t(RSE::ENV_SDFGI_CONVERGE_MAX - 1)));
 	sdfgi_frames_to_update_light = RSE::EnvironmentSDFGIFramesToUpdateLight(CLAMP(int32_t(GLOBAL_GET("rendering/global_illumination/sdfgi/frames_to_update_lights")), 0, int32_t(RSE::ENV_SDFGI_UPDATE_LIGHT_MAX - 1)));
 	sdfgi_adaptive_history = GLOBAL_GET("rendering/global_illumination/sdfgi/adaptive_history");
+	sdfgi_probe_relocation = GLOBAL_GET("rendering/global_illumination/sdfgi/probe_relocation");
 }
 
 GI::~GI() {
@@ -4376,6 +4456,7 @@ void GI::init(SkyRD *p_sky) {
 		preprocess_modes.push_back("\n#define MODE_UPSCALE_JUMP_FLOOD\n");
 		preprocess_modes.push_back("\n#define MODE_OCCLUSION\n");
 		preprocess_modes.push_back("\n#define MODE_STORE\n");
+		preprocess_modes.push_back("\n#define MODE_PROBE_PLACEMENT\n");
 		String defines = "\n#define OCCLUSION_SIZE " + itos(SDFGI::CASCADE_SIZE / SDFGI::PROBE_DIVISOR) + "\n";
 		sdfgi_shader.preprocess.initialize(preprocess_modes, defines);
 		sdfgi_shader.preprocess_shader = sdfgi_shader.preprocess.version_create();
@@ -4961,6 +5042,17 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 				u.uniform_type = RD::UNIFORM_TYPE_SAMPLER;
 				u.binding = 7;
 				u.append_id(material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+				u.binding = 8;
+				if (use_sdfgi) {
+					u.append_id(sdfgi->probe_state_texture);
+				} else {
+					u.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE));
+				}
 				uniforms.push_back(u);
 			}
 			{

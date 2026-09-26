@@ -59,6 +59,10 @@ layout(r32ui, set = 0, binding = 3) uniform restrict readonly uimage3D src_facin
 
 #define OCC_REGION_SIZE (OCCLUSION_SIZE * 2)
 
+// Where each probe was placed (see MODE_PROBE_PLACEMENT): xyz its offset from the grid in voxels,
+// w whether it is usable at all.
+layout(rgba16f, set = 0, binding = 4) uniform restrict readonly image2DArray probe_state;
+
 shared uint occlusion_facing[(OCC_REGION_SIZE * OCC_REGION_SIZE * OCC_REGION_SIZE) / 4];
 
 uint get_facing(ivec3 p_pos) {
@@ -191,9 +195,139 @@ layout(push_constant, std430) uniform Params {
 	bool half_size;
 	uint occlusion_index;
 	int cascade;
-	uint pad;
+	float min_distance; // MODE_PROBE_PLACEMENT: clearance to keep probes at, in voxels.
 }
 params;
+
+#ifdef MODE_PROBE_PLACEMENT
+
+layout(r32ui, set = 0, binding = 1) uniform restrict readonly uimage3D src_facing;
+layout(rgba16f, set = 0, binding = 2) uniform restrict writeonly image2DArray dst_probe_state;
+
+// A probe whose rays mostly hit the back of surfaces is inside geometry (DDGI uses the same test).
+#define PLACEMENT_INSIDE_RATIO 0.25
+#define PLACEMENT_RAYS 64
+#define PLACEMENT_CANDIDATE_RAYS 16
+// How far a probe may be moved, as a fraction of the probe spacing (per axis).
+#define PLACEMENT_MAX_OFFSET 0.45
+
+const float PI = 3.14159265f;
+const float GOLDEN_ANGLE = PI * (3.0 - sqrt(5.0));
+
+const ivec3 facing_dirs[6] = ivec3[](ivec3(1, 0, 0), ivec3(0, 1, 0), ivec3(0, 0, 1), ivec3(-1, 0, 0), ivec3(0, -1, 0), ivec3(0, 0, -1));
+
+vec3 spherical_fibonacci(uint p_index, uint p_count) {
+	float z = 1.0 - (2.0 * float(p_index) + 1.0) / float(p_count);
+	float r = sqrt(max(0.0, 1.0 - z * z));
+	float phi = float(p_index) * GOLDEN_ANGLE;
+	return vec3(r * cos(phi), r * sin(phi), z);
+}
+
+uint placement_facing(ivec3 p_cell) {
+	if (any(lessThan(p_cell, ivec3(0))) || any(greaterThanEqual(p_cell, ivec3(params.grid_size)))) {
+		return 0; // Nothing is known outside the cascade.
+	}
+	return imageLoad(src_facing, p_cell).r;
+}
+
+// Walks the voxels along p_dir from p_from (Amanatides & Woo) until p_max_dist, returning the
+// distance at which the first solid voxel is entered (-1 when there is none), and its facing bits.
+float placement_trace(vec3 p_from, vec3 p_dir, float p_max_dist, out uint r_facing) {
+	r_facing = 0;
+	ivec3 cell = ivec3(floor(p_from));
+	ivec3 cell_step = ivec3(sign(p_dir));
+	vec3 t_delta = 1.0 / max(abs(p_dir), vec3(1e-6));
+	vec3 t_max = abs(vec3(cell) + max(vec3(cell_step), vec3(0.0)) - p_from) * t_delta;
+
+	for (int i = 0; i < OCCLUSION_SIZE * 8; i++) {
+		float t = min(t_max.x, min(t_max.y, t_max.z));
+		if (t >= p_max_dist) {
+			return -1.0;
+		}
+		if (t_max.x <= t_max.y && t_max.x <= t_max.z) {
+			cell.x += cell_step.x;
+			t_max.x += t_delta.x;
+		} else if (t_max.y <= t_max.z) {
+			cell.y += cell_step.y;
+			t_max.y += t_delta.y;
+		} else {
+			cell.z += cell_step.z;
+			t_max.z += t_delta.z;
+		}
+		uint facing = placement_facing(cell);
+		if (facing != 0) {
+			r_facing = facing;
+			return t;
+		}
+	}
+	return -1.0;
+}
+
+struct PlacementSample {
+	float backface_ratio; // Share of the rays whose first hit is the back of a surface.
+	float clearance; // How close the nearest hit is, measured the way the probe rays are biased (L-infinity).
+};
+
+// What a probe at p_pos would see of the geometry around it, within the probe's occlusion
+// region: rays stop at its boundary (p_region_min, p_region_max), so the result only depends on
+// geometry that the occlusion pass also looks at for this probe.
+PlacementSample placement_evaluate(vec3 p_pos, vec3 p_region_min, vec3 p_region_max, uint p_ray_count) {
+	PlacementSample s;
+	if (placement_facing(ivec3(floor(p_pos))) != 0) {
+		s.backface_ratio = 1.0; // In a solid voxel: as inside as it gets.
+		s.clearance = 0.0;
+		return s;
+	}
+
+	float backfaces = 0.0;
+	s.clearance = 1e10;
+	for (uint i = 0; i < p_ray_count; i++) {
+		vec3 dir = spherical_fibonacci(i, p_ray_count);
+		vec3 exit = max((p_region_min - p_pos) / dir, (p_region_max - p_pos) / dir);
+		float max_dist = min(exit.x, min(exit.y, exit.z));
+
+		uint facing;
+		float t = placement_trace(p_pos, dir, max_dist, facing);
+		if (t < 0.0) {
+			continue;
+		}
+
+		// A front face has a normal pointing back towards the ray. Thin geometry is marked as
+		// facing both ways, and counts as front from either side.
+		bool front = false;
+		for (int k = 0; k < 6; k++) {
+			if (bool(facing & (1 << k)) && dot(vec3(facing_dirs[k]), dir) < 0.0) {
+				front = true;
+			}
+		}
+		if (!front) {
+			backfaces += 1.0;
+		}
+		s.clearance = min(s.clearance, t * max(abs(dir.x), max(abs(dir.y), abs(dir.z))));
+	}
+	s.backface_ratio = backfaces / float(p_ray_count);
+	return s;
+}
+
+// Whether nothing solid lies on the segment between two points (the voxel p_from is in excluded).
+bool placement_segment_clear(vec3 p_from, vec3 p_to) {
+	vec3 ray = p_to - p_from;
+	float len = length(ray);
+	if (len < 1e-4) {
+		return true;
+	}
+	uint facing;
+	return placement_trace(p_from, ray / len, len, facing) < 0.0 && placement_facing(ivec3(floor(p_to))) == 0;
+}
+
+// Lower is better: never inside, then as few backfaces and as much clearance as possible,
+// and among equals, the least movement.
+float placement_score(PlacementSample p_sample, float p_offset_length) {
+	float inside = p_sample.backface_ratio > PLACEMENT_INSIDE_RATIO ? 100.0 : 0.0;
+	return inside + p_sample.backface_ratio * 4.0 + max(0.0, params.min_distance - p_sample.clearance) * 2.0 + p_offset_length * 0.05;
+}
+
+#endif
 
 void main() {
 #ifdef MODE_SCROLL
@@ -570,8 +704,13 @@ void main() {
 		return;
 	}
 
-	// The probe sits on the corner shared by the region's eight middle voxels.
-	vec3 probe_pos = vec3(OCCLUSION_SIZE);
+	// The probe sits on the corner shared by the region's eight middle voxels, unless the
+	// placement pass moved it. One that could not be placed anywhere usable is seen by nothing.
+	ivec3 probe_cell = region * 2 + params.probe_offset;
+	int probe_axis = params.grid_size / OCCLUSION_SIZE + 1;
+	vec4 state = imageLoad(probe_state, ivec3(probe_cell.x + probe_cell.z * probe_axis, probe_cell.y, params.cascade));
+	vec3 probe_pos = vec3(OCCLUSION_SIZE) + state.xyz;
+	bool probe_valid = state.w > 0.5;
 
 	const ivec3 facing_dirs[6] = ivec3[](ivec3(1, 0, 0), ivec3(0, 1, 0), ivec3(0, 0, 1), ivec3(-1, 0, 0), ivec3(0, -1, 0), ivec3(0, 0, -1));
 
@@ -586,7 +725,9 @@ void main() {
 		float occ = 0.0;
 		uint facing = get_facing(local_offset);
 
-		if (facing == 0) {
+		if (!probe_valid) {
+			// Nothing sees a probe stuck in geometry.
+		} else if (facing == 0) {
 			occ = occlusion_trace(vec3(local_offset) + vec3(0.5), probe_pos);
 		} else {
 			// A surface voxel. Shading points on it look it up (after their normal bias) mostly
@@ -616,6 +757,76 @@ void main() {
 
 		imageStore(dst_occlusion[params.occlusion_index], offset, vec4(occ));
 	}
+
+#endif
+
+#ifdef MODE_PROBE_PLACEMENT
+
+	// Probe relocation and classification. The probe grid knows nothing of the geometry, so plenty
+	// of probes end up inside walls, floors or terrain, or so close to a surface that the bias
+	// their rays start with carries those rays past it. Such probes see the wrong side of the
+	// wall and spread that light onto everything around them. Here each probe is moved, within a
+	// fraction of the grid spacing, to a nearby spot that is outside geometry and clear of it, or
+	// marked unusable when there is none; the probe rays, the occlusion pass and every place that
+	// samples the probes then use the result. SDFGI geometry only changes when a cascade is
+	// revoxelized, so this runs then rather than every frame, and a probe stays where it was put.
+
+	int probe_axis = params.grid_size / OCCLUSION_SIZE + 1;
+	ivec3 probe_cell = ivec3(gl_GlobalInvocationID.xyz);
+	if (any(greaterThanEqual(probe_cell, ivec3(probe_axis)))) {
+		return;
+	}
+
+	vec3 grid_pos = vec3(probe_cell * OCCLUSION_SIZE);
+	vec3 region_min = grid_pos - vec3(OCCLUSION_SIZE);
+	vec3 region_max = grid_pos + vec3(OCCLUSION_SIZE);
+
+	vec3 best_offset = vec3(0.0);
+	bool valid = true;
+
+	PlacementSample here = placement_evaluate(grid_pos, region_min, region_max, PLACEMENT_RAYS);
+	bool inside = here.backface_ratio > PLACEMENT_INSIDE_RATIO;
+
+	if (inside || here.clearance < params.min_distance) {
+		float max_offset = PLACEMENT_MAX_OFFSET * float(OCCLUSION_SIZE);
+		float best_score = inside ? 1e10 : placement_score(here, 0.0);
+
+		for (int m = 0; m < 2; m++) {
+			float magnitude = m == 0 ? max_offset * 0.5 : max_offset;
+			for (int i = 0; i < 27; i++) {
+				ivec3 dir = ivec3(i % 3, (i / 3) % 3, i / 9) - ivec3(1);
+				if (dir == ivec3(0)) {
+					continue;
+				}
+				vec3 offset = vec3(dir) * magnitude;
+				vec3 candidate = grid_pos + offset;
+				// A probe outside geometry may only move where it can see from where it was,
+				// or it could hop through a wall into the next room.
+				if (!inside && !placement_segment_clear(grid_pos, candidate)) {
+					continue;
+				}
+				PlacementSample s = placement_evaluate(candidate, region_min, region_max, PLACEMENT_CANDIDATE_RAYS);
+				float score = placement_score(s, length(offset));
+				if (score < best_score) {
+					best_score = score;
+					best_offset = offset;
+				}
+			}
+		}
+
+		if (best_offset != vec3(0.0)) {
+			// Confirm with the full ray count what the candidate rays only estimated.
+			PlacementSample chosen = placement_evaluate(grid_pos + best_offset, region_min, region_max, PLACEMENT_RAYS);
+			if (chosen.backface_ratio > PLACEMENT_INSIDE_RATIO) {
+				best_offset = vec3(0.0);
+				valid = !inside;
+			}
+		} else if (inside) {
+			valid = false; // Nowhere nearby to go.
+		}
+	}
+
+	imageStore(dst_probe_state, ivec3(probe_cell.x + probe_cell.z * probe_axis, probe_cell.y, params.cascade), vec4(best_offset, valid ? 1.0 : 0.0));
 
 #endif
 

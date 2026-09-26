@@ -1058,6 +1058,14 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 				uniforms.push_back(u);
 			}
 
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+				u.binding = 3;
+				u.append_id(p_settings.sdfgi->probe_state_texture);
+				uniforms.push_back(u);
+			}
+
 			fog->sdfgi_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, volumetric_fog.process_shader.version_get_shader(volumetric_fog.process_shader_version, _get_fog_process_variant(VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY_WITH_SDFGI)), 1);
 		}
 	}

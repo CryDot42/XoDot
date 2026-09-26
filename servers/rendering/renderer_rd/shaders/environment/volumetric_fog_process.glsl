@@ -147,6 +147,9 @@ layout(set = 1, binding = 1) uniform texture2DArray sdfgi_ambient_texture;
 
 layout(set = 1, binding = 2) uniform texture3D sdfgi_occlusion_texture;
 
+// Where each probe was placed (see MODE_PROBE_PLACEMENT in sdfgi_preprocess.glsl): w is whether it is usable.
+layout(set = 1, binding = 3) uniform texture2DArray sdfgi_probe_state;
+
 // Ambient light of one cascade's probes around p_cascade_pos, a point in that cascade's probe
 // grid (see the loop in main()).
 vec3 sdfgi_cascade_ambient(uint p_cascade, vec3 p_cascade_pos) {
@@ -170,6 +173,9 @@ vec3 sdfgi_cascade_ambient(uint p_cascade, vec3 p_cascade_pos) {
 
 		vec3 trilinear = vec3(1.0) - abs(probe_to_pos);
 		float weight = trilinear.x * trilinear.y * trilinear.z;
+
+		// A probe stuck in geometry saw nothing but the inside of it.
+		weight *= texelFetch(sampler2DArray(sdfgi_probe_state, linear_sampler), ivec3(probe_posi.x + probe_posi.z * sdfgi.probe_axis_size, probe_posi.y, int(p_cascade)), 0).w;
 
 		// Compute lightprobe occlusion
 

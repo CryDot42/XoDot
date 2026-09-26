@@ -458,6 +458,8 @@ layout(set = 1, binding = 29) uniform texture2D reflection_buffer;
 #endif
 layout(set = 1, binding = 30) uniform texture2DArray sdfgi_lightprobe_texture;
 layout(set = 1, binding = 31) uniform texture3D sdfgi_occlusion_cascades;
+// Where each SDFGI probe was placed (see MODE_PROBE_PLACEMENT in sdfgi_preprocess.glsl).
+layout(set = 1, binding = 41) uniform texture2DArray sdfgi_probe_state;
 
 struct VoxelGIData {
 	mat4 xform; // 64 - 64

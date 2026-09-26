@@ -396,6 +396,7 @@ private:
 			PRE_PROCESS_JUMP_FLOOD_UPSCALE,
 			PRE_PROCESS_OCCLUSION,
 			PRE_PROCESS_STORE,
+			PRE_PROCESS_PROBE_PLACEMENT,
 			PRE_PROCESS_MAX
 		};
 
@@ -409,7 +410,7 @@ private:
 			int32_t half_size;
 			uint32_t occlusion_index;
 			int32_t cascade;
-			uint32_t pad;
+			float min_distance; // PRE_PROCESS_PROBE_PLACEMENT: clearance to keep probes at, in voxels.
 		};
 
 		SdfgiPreprocessShaderRD preprocess;
@@ -790,6 +791,12 @@ public:
 		RID occlusion_data;
 		RID ambient_texture; //integrates with volumetric fog
 
+		// Where each probe ended up after relocation, one layer per cascade (see
+		// MODE_PROBE_PLACEMENT in sdfgi_preprocess.glsl): xyz its offset from the grid in voxels,
+		// w whether it is usable at all.
+		RID probe_state_texture;
+		RID probe_placement_uniform_set;
+
 		RID lightprobe_history_scroll; //used for scrolling lightprobes
 		RID lightprobe_average_scroll; //used for scrolling lightprobes
 
@@ -849,6 +856,7 @@ public:
 	RSE::EnvironmentSDFGIFramesToConverge sdfgi_frames_to_converge = RSE::ENV_SDFGI_CONVERGE_IN_30_FRAMES;
 	RSE::EnvironmentSDFGIFramesToUpdateLight sdfgi_frames_to_update_light = RSE::ENV_SDFGI_UPDATE_LIGHT_IN_4_FRAMES;
 	bool sdfgi_adaptive_history = true;
+	bool sdfgi_probe_relocation = true;
 
 	float sdfgi_solid_cell_ratio = 0.25;
 	Vector3 sdfgi_debug_probe_pos;

@@ -31,6 +31,10 @@ layout(set = 0, binding = 5) uniform texture3D occlusion_texture;
 layout(set = 0, binding = 6) uniform sampler linear_sampler;
 layout(set = 0, binding = 7) uniform sampler linear_sampler_with_mipmaps;
 
+// Where each SDFGI probe was placed, one layer per cascade (see MODE_PROBE_PLACEMENT in
+// sdfgi_preprocess.glsl): xyz its offset from the grid in voxels, w whether it is usable.
+layout(set = 0, binding = 8) uniform texture2DArray sdfgi_probe_state;
+
 struct ProbeCascadeData {
 	vec3 position;
 	float to_probe;
@@ -246,6 +250,8 @@ void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_
 	float visible_weight = 0.0;
 	float total_weight = 0.0;
 
+	float voxels_to_probes = sdfgi.cascade_probe_size.x / sdfgi.grid_size.x;
+
 	for (uint j = 0; j < 8; j++) {
 		ivec3 offset = (ivec3(j) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1);
 		ivec3 probe_posi = probe_base_pos;
@@ -253,13 +259,20 @@ void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_
 
 		// Compute weight
 
+		// The probe may have been moved off its grid point, out of geometry: interpolation keeps
+		// using the grid (so it stays continuous), but whether the probe is in front of the
+		// surface is judged from where it really is, and one that could not be placed anywhere
+		// usable does not count at all.
+		vec4 probe_state = texelFetch(sampler2DArray(sdfgi_probe_state, linear_sampler), ivec3(probe_posi.x + probe_posi.z * sdfgi.probe_axis_size, probe_posi.y, int(cascade)), 0);
+
 		vec3 probe_pos = vec3(probe_posi);
 		vec3 probe_to_pos = cascade_pos - probe_pos;
-		vec3 probe_dir = normalize(-probe_to_pos);
+		vec3 probe_dir = normalize(probe_pos + probe_state.xyz * voxels_to_probes - cascade_pos);
 
 		vec3 trilinear = vec3(1.0) - abs(probe_to_pos);
 		float weight = trilinear.x * trilinear.y * trilinear.z * max(0.005, dot(cam_normal, probe_dir));
 		total_weight += weight;
+		weight *= probe_state.w;
 
 		// Compute lightprobe occlusion
 
@@ -396,8 +409,9 @@ void sdfgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, o
 		}
 
 		// When the point can see none of this cascade's probes (a space smaller than the probe
-		// spacing, closed off from all of them), the floor weights would hand it whichever hidden
-		// probe happened to be nearest, often lit from the other side of a wall. Lean on the next
+		// spacing, closed off from all of them, or surrounded by probes stuck in geometry), the
+		// floor weights would hand it whichever hidden probe happened to be nearest, often lit
+		// from the other side of a wall. Lean on the next
 		// cascade instead, if it sees the point better. Only then, though: a point that sees just
 		// a few of its probes, or only far ones (next to a wall, with the probes behind it
 		// carrying most of the interpolation weight), is lit right by those alone, and the next

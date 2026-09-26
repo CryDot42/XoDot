@@ -3816,6 +3816,21 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	}
 	{
 		RD::Uniform u;
+		u.binding = 41;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		RID t;
+		if (rb.is_valid() && rb->has_custom_data(RB_SCOPE_SDFGI)) {
+			Ref<RendererRD::GI::SDFGI> sdfgi = rb->get_custom_data(RB_SCOPE_SDFGI);
+			t = sdfgi->probe_state_texture;
+		}
+		if (t.is_null()) {
+			t = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
+		}
+		u.append_id(t);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
 		u.binding = 32;
 		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
 		RID voxel_gi;

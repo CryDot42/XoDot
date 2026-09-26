@@ -50,6 +50,7 @@ vec3 get_sphere_vertex(uint p_vertex_id) {
 
 layout(location = 0) out vec3 normal_interp;
 layout(location = 1) out flat uint probe_index;
+layout(location = 2) out flat float probe_valid;
 
 #endif
 
@@ -74,6 +75,8 @@ cascades;
 
 layout(set = 0, binding = 4) uniform texture3D occlusion_texture;
 layout(set = 0, binding = 3) uniform sampler linear_sampler;
+// Where each probe was placed (see MODE_PROBE_PLACEMENT in sdfgi_preprocess.glsl).
+layout(set = 0, binding = 6) uniform texture2DArray probe_state_texture;
 
 layout(set = 0, binding = 5, std140) uniform SceneData {
 	mat4 projection[MAX_VIEWS];
@@ -95,7 +98,11 @@ void main() {
 	probe_cell.y = int(probe_index / (params.probe_axis_size * params.probe_axis_size));
 	probe_cell.z = int((probe_index / params.probe_axis_size) % params.probe_axis_size);
 
-	vertex += (cascades.data[params.cascade].offset + vec3(probe_cell) * probe_cell_size) / vec3(1.0, params.y_mult, 1.0);
+	// Drawn where the probe was placed, which is where its light was traced from.
+	vec4 probe_state = texelFetch(sampler2DArray(probe_state_texture, linear_sampler), ivec3(probe_cell.x + probe_cell.z * params.probe_axis_size, probe_cell.y, int(params.cascade)), 0);
+	probe_valid = probe_state.w;
+
+	vertex += (cascades.data[params.cascade].offset + vec3(probe_cell) * probe_cell_size + probe_state.xyz / cascades.data[params.cascade].to_cell) / vec3(1.0, params.y_mult, 1.0);
 
 	gl_Position = scene_data.projection[ViewIndex] * vec4(vertex, 1.0);
 #endif
@@ -194,6 +201,7 @@ params;
 
 layout(location = 0) in vec3 normal_interp;
 layout(location = 1) in flat uint probe_index;
+layout(location = 2) in flat float probe_valid;
 
 #endif
 
@@ -233,6 +241,10 @@ void main() {
 	vec4 indirect_light = textureLod(sampler2DArray(lightprobe_texture, linear_sampler), tex_posf, 0.0);
 
 	frag_color = indirect_light;
+	if (probe_valid < 0.5) {
+		// Stuck in geometry, and ignored by everything that samples the probes.
+		frag_color = vec4(0.8, 0.05, 0.05, 1.0);
+	}
 
 #endif
 
