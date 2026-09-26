@@ -78,7 +78,7 @@ layout(set = 0, binding = 15, std140) uniform SDFGI {
 	float view_bias;
 
 	vec3 occlusion_renormalize;
-	uint pad4;
+	uint flags; // SDFGI_FLAG_*
 
 	vec3 cascade_probe_size;
 	uint pad5;
@@ -228,6 +228,43 @@ vec3 reconstruct_position(ivec2 screen_pos) {
 	}
 }
 
+// Probes are occluded by tracing the distance field towards each of them from the pixel, rather
+// than through the occlusion volume (rendering/global_illumination/sdfgi/per_pixel_visibility).
+#define SDFGI_FLAG_PER_PIXEL_VISIBILITY 1
+
+// Distance field samples per probe, at most, in that mode.
+#define SDFGI_VISIBILITY_STEPS 24
+
+// How clear the distance field leaves the segment from p_from to p_to (both in the cascade's
+// voxels): 1 where it stays out of the voxels holding geometry, 0 where it goes through one, and in
+// between where it only clips one, which keeps the edge of what a probe lights soft. The last voxel
+// before the probe is not tested, since probes are only kept clear of geometry by about that much.
+float sdfgi_trace_visibility(uint p_cascade, vec3 p_from, vec3 p_to) {
+	vec3 ray = p_to - p_from;
+	float len = length(ray);
+	float end = len - 1.0;
+	if (end <= 0.0) {
+		return 1.0;
+	}
+
+	vec3 dir = ray / len;
+	float to_uvw = 1.0 / sdfgi.grid_size.x;
+	float visibility = 1.0;
+	float t = 0.5;
+	for (int i = 0; i < SDFGI_VISIBILITY_STEPS && t < end; i++) {
+		// 0 in a voxel with geometry, 1 on its boundary, 2 at the center of a free voxel next to it.
+		float sdf = textureLod(sampler3D(sdf_cascades[p_cascade], linear_sampler), (p_from + dir * t) * to_uvw, 0.0).r * 255.0;
+		visibility = min(visibility, clamp((sdf - 0.75) * 2.0, 0.0, 1.0));
+		if (visibility <= 0.0) {
+			break;
+		}
+		// Geometry is at least about sdf - 2 voxels away. Near it, never step more than half a
+		// voxel, so as not to step over a wall one voxel thick.
+		t += max(sdf - 2.0, 0.5);
+	}
+	return visibility;
+}
+
 // r_visibility is how much of the weight the point would give its probes, before occlusion,
 // goes to probes it can actually see: near zero when every probe around it is hidden from it.
 void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal, vec3 cam_specular_normal, float roughness, out vec3 diffuse_light, out vec3 specular_light, out float r_visibility) {
@@ -259,6 +296,13 @@ void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_
 	float total_weight = 0.0;
 
 	float voxels_to_probes = sdfgi.cascade_probe_size.x / sdfgi.grid_size.x;
+	bool per_pixel_visibility = sdfgi.use_occlusion && bool(sdfgi.flags & SDFGI_FLAG_PER_PIXEL_VISIBILITY);
+	if (per_pixel_visibility) {
+		// Only from a point clear of the geometry. From one inside it (along an edge, where a thin
+		// wall was voxelized a voxel into the room) every probe looks hidden, and the occlusion
+		// volume, which gives surface voxels what their open side sees, is left to handle it.
+		per_pixel_visibility = textureLod(sampler3D(sdf_cascades[cascade], linear_sampler), cascade_pos * sdfgi.probe_to_uvw, 0.0).r * 255.0 >= 1.0;
+	}
 
 	for (uint j = 0; j < 8; j++) {
 		ivec3 offset = (ivec3(j) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1);
@@ -300,6 +344,14 @@ void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_
 			// DDGI does with its weights): next to the geometry hiding a much brighter probe, even
 			// that much of it outweighs the probes the point really sees.
 			occlusion = occlusion < 0.2 ? occlusion * occlusion * occlusion * 25.0 : occlusion;
+
+			if (per_pixel_visibility && occlusion > 0.0) {
+				// The line to the probe, traced, settles what the volume can only tell a voxel at a
+				// time. The volume still has the last word on what it knows to be hidden: a point
+				// next to geometry sees it only a fraction of a voxel away, where the traced line
+				// cannot tell grazing it from going through.
+				occlusion = min(occlusion, sdfgi_trace_visibility(cascade, cascade_pos / voxels_to_probes, (probe_pos + probe_state.xyz * voxels_to_probes) / voxels_to_probes));
+			}
 
 			visible_weight += weight * occlusion;
 			// Occluded probes keep only a token weight, so that a point hidden from all of them

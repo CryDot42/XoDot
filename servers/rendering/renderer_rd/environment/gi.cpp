@@ -2056,6 +2056,7 @@ void GI::SDFGI::pre_process_gi(const Transform3D &p_transform, RenderDataRD *p_r
 	sdfgi_data.occlusion_clamp[2] = occlusion_clamp;
 	sdfgi_data.normal_bias = (normal_bias / csize) * sdfgi_data.cascade_probe_size[0];
 	sdfgi_data.view_bias = (gi->sdfgi_view_bias / csize) * sdfgi_data.cascade_probe_size[0];
+	sdfgi_data.flags = gi->sdfgi_per_pixel_visibility ? SDFGIData::FLAG_PER_PIXEL_VISIBILITY : 0;
 
 	//vec2 tex_pixel_size = 1.0 / vec2(ivec2( (OCT_SIZE+2) * params.probe_axis_size * params.probe_axis_size, (OCT_SIZE+2) * params.probe_axis_size ) );
 	//vec3 probe_uv_offset = (ivec3(OCT_SIZE+2,OCT_SIZE+2,(OCT_SIZE+2) * params.probe_axis_size)) * tex_pixel_size.xyx;
@@ -4300,6 +4301,7 @@ GI::GI() {
 	sdfgi_adaptive_history = GLOBAL_GET("rendering/global_illumination/sdfgi/adaptive_history");
 	sdfgi_probe_relocation = GLOBAL_GET("rendering/global_illumination/sdfgi/probe_relocation");
 	sdfgi_view_bias = MAX(0.0, float(GLOBAL_GET("rendering/global_illumination/sdfgi/view_bias")));
+	sdfgi_per_pixel_visibility = GLOBAL_GET("rendering/global_illumination/sdfgi/per_pixel_visibility");
 }
 
 GI::~GI() {

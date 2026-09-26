@@ -3105,6 +3105,10 @@
 			[b]Note:[/b] This only affects [Light3D] nodes whose [member Light3D.light_bake_mode] is [constant Light3D.BAKE_DYNAMIC] (which is the default). Consider making non-moving lights use the [constant Light3D.BAKE_STATIC] bake mode to improve performance.
 			[b]Note:[/b] This property is only read when the project starts. To control SDFGI light update speed at runtime, call [method RenderingServer.environment_set_sdfgi_frames_to_update_light] instead.
 		</member>
+		<member name="rendering/global_illumination/sdfgi/per_pixel_visibility" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], every pixel lit by signed distance field global illumination also traces the distance field towards each of the probes around it, and leaves out those it finds geometry in the way of, on top of the ones the occlusion volume (computed when the geometry is voxelized) already hides. This follows the actual geometry between the pixel and each probe, where the volume only knows it a cell at a time, at a considerable extra cost for every pixel lit by SDFGI. This has no effect unless [member Environment.sdfgi_use_occlusion] is enabled. Transparent materials use the occlusion volume alone.
+			[b]Note:[/b] This property is only read when the project starts.
+		</member>
 		<member name="rendering/global_illumination/sdfgi/probe_ray_count" type="int" setter="" getter="" default="1">
 			The number of rays to throw per frame when computing signed distance field global illumination. Higher values lead to a less noisy result, at the cost of performance. See also [member rendering/global_illumination/sdfgi/frames_to_converge] and [member rendering/global_illumination/sdfgi/frames_to_update_lights].
 			[b]Note:[/b] This property is only read when the project starts. To control SDFGI quality at runtime, call [method RenderingServer.environment_set_sdfgi_ray_count] instead.

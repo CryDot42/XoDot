@@ -858,6 +858,7 @@ public:
 	bool sdfgi_adaptive_history = true;
 	bool sdfgi_probe_relocation = true;
 	float sdfgi_view_bias = 1.0;
+	bool sdfgi_per_pixel_visibility = false;
 
 	float sdfgi_solid_cell_ratio = 0.25;
 	Vector3 sdfgi_debug_probe_pos;
@@ -873,6 +874,10 @@ public:
 	virtual void sdfgi_reset() override;
 
 	struct SDFGIData {
+		enum { // SDFGI_FLAG_* in gi.glsl.
+			FLAG_PER_PIXEL_VISIBILITY = 0x01,
+		};
+
 		float grid_size[3];
 		uint32_t max_cascades;
 
@@ -891,7 +896,7 @@ public:
 		float view_bias;
 
 		float occlusion_renormalize[3];
-		uint32_t pad4;
+		uint32_t flags;
 
 		float cascade_probe_size[3];
 		uint32_t pad5;
