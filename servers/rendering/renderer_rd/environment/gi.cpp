@@ -2055,6 +2055,7 @@ void GI::SDFGI::pre_process_gi(const Transform3D &p_transform, RenderDataRD *p_r
 	sdfgi_data.occlusion_clamp[1] = occlusion_clamp;
 	sdfgi_data.occlusion_clamp[2] = occlusion_clamp;
 	sdfgi_data.normal_bias = (normal_bias / csize) * sdfgi_data.cascade_probe_size[0];
+	sdfgi_data.view_bias = (gi->sdfgi_view_bias / csize) * sdfgi_data.cascade_probe_size[0];
 
 	//vec2 tex_pixel_size = 1.0 / vec2(ivec2( (OCT_SIZE+2) * params.probe_axis_size * params.probe_axis_size, (OCT_SIZE+2) * params.probe_axis_size ) );
 	//vec3 probe_uv_offset = (ivec3(OCT_SIZE+2,OCT_SIZE+2,(OCT_SIZE+2) * params.probe_axis_size)) * tex_pixel_size.xyx;
@@ -4298,6 +4299,7 @@ GI::GI() {
 	sdfgi_frames_to_update_light = RSE::EnvironmentSDFGIFramesToUpdateLight(CLAMP(int32_t(GLOBAL_GET("rendering/global_illumination/sdfgi/frames_to_update_lights")), 0, int32_t(RSE::ENV_SDFGI_UPDATE_LIGHT_MAX - 1)));
 	sdfgi_adaptive_history = GLOBAL_GET("rendering/global_illumination/sdfgi/adaptive_history");
 	sdfgi_probe_relocation = GLOBAL_GET("rendering/global_illumination/sdfgi/probe_relocation");
+	sdfgi_view_bias = MAX(0.0, float(GLOBAL_GET("rendering/global_illumination/sdfgi/view_bias")));
 }
 
 GI::~GI() {

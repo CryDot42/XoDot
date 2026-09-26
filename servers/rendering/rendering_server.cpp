@@ -3830,6 +3830,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/frames_to_update_lights", PROPERTY_HINT_ENUM, "1 (Slower),2,4,8,16 (Faster)"), 2);
 	GLOBAL_DEF_RST("rendering/global_illumination/sdfgi/adaptive_history", true);
 	GLOBAL_DEF_RST("rendering/global_illumination/sdfgi/probe_relocation", true);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/sdfgi/view_bias", PROPERTY_HINT_RANGE, "0,4,0.01,suffix:cells"), 1.0);
 
 	GLOBAL_DEF_RST("rendering/environment/fog/use_legacy_blending", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/volume_size", PROPERTY_HINT_RANGE, "16,512,1"), 64);

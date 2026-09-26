@@ -69,7 +69,13 @@ layout(set = 0, binding = 15, std140) uniform SDFGI {
 	float y_mult;
 
 	vec3 occlusion_clamp;
-	uint pad3;
+	// Like normal_bias, in probe units, but towards the camera. Where two surfaces meet, the normal
+	// bias runs along the other one, and geometry thinner than a voxel often lands in two of them,
+	// one per face, each looking out its own side (and sometimes a voxel into the room). A point
+	// next to such an edge can then look its probes up in the voxel of the far face, whose
+	// occlusion is what the far side sees, and filtering blends that in: the probes behind the wall
+	// show through along every edge of the room. The camera sees the point, so that side is open.
+	float view_bias;
 
 	vec3 occlusion_renormalize;
 	uint pad4;
@@ -226,6 +232,8 @@ vec3 reconstruct_position(ivec2 screen_pos) {
 // goes to probes it can actually see: near zero when every probe around it is hidden from it.
 void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal, vec3 cam_specular_normal, float roughness, out vec3 diffuse_light, out vec3 specular_light, out float r_visibility) {
 	cascade_pos += cam_normal * sdfgi.normal_bias;
+	// Towards the camera, too: see the view bias in the SDFGI data above.
+	cascade_pos += normalize(-cam_pos) * sdfgi.view_bias;
 
 	vec3 base_pos = floor(cascade_pos);
 	//cascade_pos += mix(vec3(0.0),vec3(0.01),lessThan(abs(cascade_pos-base_pos),vec3(0.01))) * cam_normal;
@@ -288,6 +296,10 @@ void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_
 
 			occ_pos *= sdfgi.occlusion_renormalize;
 			float occlusion = dot(textureLod(sampler3D(occlusion_texture, linear_sampler), occ_pos, 0.0), occ_mask);
+			// Crush the sliver of visibility that filtering gives a probe hidden a voxel away (as
+			// DDGI does with its weights): next to the geometry hiding a much brighter probe, even
+			// that much of it outweighs the probes the point really sees.
+			occlusion = occlusion < 0.2 ? occlusion * occlusion * occlusion * 25.0 : occlusion;
 
 			visible_weight += weight * occlusion;
 			// Occluded probes keep only a token weight, so that a point hidden from all of them

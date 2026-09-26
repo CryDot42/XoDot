@@ -296,7 +296,7 @@ layout(set = 0, binding = 14, std140) uniform SDFGI {
 	float y_mult;
 
 	vec3 occlusion_clamp;
-	uint pad3;
+	float view_bias; // See gi.glsl.
 
 	vec3 occlusion_renormalize;
 	uint pad4;

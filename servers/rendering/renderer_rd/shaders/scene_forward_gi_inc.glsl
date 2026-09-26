@@ -126,6 +126,7 @@ vec2 octahedron_encode(vec3 n) {
 // r_visibility: see sdfvoxel_gi_process() in gi.glsl.
 void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal, vec3 cam_specular_normal, bool use_specular, float roughness, out vec3 diffuse_light, out vec3 specular_light, out float blend, out float r_visibility) {
 	cascade_pos += cam_normal * sdfgi.normal_bias;
+	cascade_pos += normalize(-cam_pos) * sdfgi.view_bias; // See view_bias in gi.glsl.
 
 	vec3 base_pos = floor(cascade_pos);
 	//cascade_pos += mix(vec3(0.0),vec3(0.01),lessThan(abs(cascade_pos-base_pos),vec3(0.01))) * cam_normal;
@@ -189,6 +190,7 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 
 			occ_pos *= sdfgi.occlusion_renormalize;
 			float occlusion = dot(textureLod(sampler3D(sdfgi_occlusion_cascades, SAMPLER_LINEAR_CLAMP), occ_pos, 0.0), occ_mask);
+			occlusion = occlusion < 0.2 ? occlusion * occlusion * occlusion * 25.0 : occlusion; // See sdfvoxel_gi_process() in gi.glsl.
 
 			visible_weight += weight * occlusion;
 			weight *= max(occlusion, 0.0001); // See sdfvoxel_gi_process() in gi.glsl.

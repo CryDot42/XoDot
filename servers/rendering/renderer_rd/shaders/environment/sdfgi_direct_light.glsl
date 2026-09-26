@@ -268,6 +268,7 @@ void main() {
 						}
 						occ_pos *= vec3(0.5, 1.0, 1.0 / float(params.max_cascades)); //renormalize
 						float occlusion = dot(textureLod(sampler3D(occlusion_texture, linear_sampler), occ_pos, 0.0), occ_mask);
+						occlusion = occlusion < 0.2 ? occlusion * occlusion * occlusion * 25.0 : occlusion; // See sdfvoxel_gi_process() in gi.glsl.
 
 						weight *= occlusion;
 					}

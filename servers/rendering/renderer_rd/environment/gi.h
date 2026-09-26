@@ -857,6 +857,7 @@ public:
 	RSE::EnvironmentSDFGIFramesToUpdateLight sdfgi_frames_to_update_light = RSE::ENV_SDFGI_UPDATE_LIGHT_IN_4_FRAMES;
 	bool sdfgi_adaptive_history = true;
 	bool sdfgi_probe_relocation = true;
+	float sdfgi_view_bias = 1.0;
 
 	float sdfgi_solid_cell_ratio = 0.25;
 	Vector3 sdfgi_debug_probe_pos;
@@ -887,7 +888,7 @@ public:
 		float y_mult;
 
 		float occlusion_clamp[3];
-		uint32_t pad3;
+		float view_bias;
 
 		float occlusion_renormalize[3];
 		uint32_t pad4;
