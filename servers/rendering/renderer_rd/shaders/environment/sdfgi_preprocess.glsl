@@ -196,6 +196,12 @@ layout(push_constant, std430) uniform Params {
 	uint occlusion_index;
 	int cascade;
 	float min_distance; // MODE_PROBE_PLACEMENT: clearance to keep probes at, in voxels.
+
+	// Cells voxelized again this frame for dynamic objects (empty when box_from == box_to).
+	ivec3 box_from;
+	uint pad;
+	ivec3 box_to;
+	uint pad2;
 }
 params;
 
@@ -343,6 +349,10 @@ void main() {
 
 	if (any(lessThan(write_pos, ivec3(0))) || any(greaterThanEqual(write_pos, ivec3(params.grid_size)))) {
 		return; // Fits outside the 3D texture, don't do anything.
+	}
+
+	if (all(greaterThanEqual(write_pos, params.box_from)) && all(lessThan(write_pos, params.box_to))) {
+		return; // Voxelized again this frame (a dynamic object moved there): what it held is out of date.
 	}
 
 	uint albedo = ((src_process_voxels.data[index].albedo & 0x7FFF) << 1) | 1; //add solid bit
@@ -661,15 +671,26 @@ void main() {
 
 	bool region_out_of_bounds = false;
 
-	if (params.scroll != ivec3(0)) {
-		//validate scroll region
+	// Only probes whose region holds newly voxelized cells need their occlusion computed again (the
+	// rest was scrolled in by MODE_SCROLL_OCCLUSION), unless the whole cascade is new.
+	bool has_box = any(lessThan(params.box_from, params.box_to));
+	if (params.scroll != ivec3(0) || has_box) {
 		ivec3 region_offset_to = region_offset + ivec3(OCCLUSION_SIZE * 2);
-		uvec3 scroll_mask = uvec3(notEqual(params.scroll, ivec3(0))); //save which axes acre scrolling
-		ivec3 scroll_from = mix(ivec3(0), ivec3(params.grid_size) + params.scroll, lessThan(params.scroll, ivec3(0)));
-		ivec3 scroll_to = mix(ivec3(params.grid_size), params.scroll, greaterThan(params.scroll, ivec3(0)));
+		region_out_of_bounds = true;
 
-		if ((uvec3(lessThanEqual(region_offset_to, scroll_from)) | uvec3(greaterThanEqual(region_offset, scroll_to))) * scroll_mask == scroll_mask) { //all axes that scroll are out, exit
-			region_out_of_bounds = true; //region outside scroll bounds, quit
+		if (params.scroll != ivec3(0)) {
+			//validate scroll region
+			uvec3 scroll_mask = uvec3(notEqual(params.scroll, ivec3(0))); //save which axes acre scrolling
+			ivec3 scroll_from = mix(ivec3(0), ivec3(params.grid_size) + params.scroll, lessThan(params.scroll, ivec3(0)));
+			ivec3 scroll_to = mix(ivec3(params.grid_size), params.scroll, greaterThan(params.scroll, ivec3(0)));
+
+			if ((uvec3(lessThanEqual(region_offset_to, scroll_from)) | uvec3(greaterThanEqual(region_offset, scroll_to))) * scroll_mask != scroll_mask) { //not all axes that scroll are out
+				region_out_of_bounds = false;
+			}
+		}
+
+		if (has_box && all(lessThan(region_offset, params.box_to)) && all(greaterThan(region_offset_to, params.box_from))) {
+			region_out_of_bounds = false; // Around cells voxelized again for dynamic objects.
 		}
 	}
 

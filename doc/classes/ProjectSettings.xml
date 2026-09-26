@@ -3096,6 +3096,16 @@
 			If [code]false[/code], probes always average over the full convergence period.
 			[b]Note:[/b] This property is only read when the project starts.
 		</member>
+		<member name="rendering/global_illumination/sdfgi/dynamic_object_updates_per_frame" type="int" setter="" getter="" default="1">
+			How many signed distance field global illumination cascades may be voxelized again per frame for [member rendering/global_illumination/sdfgi/dynamic_objects]. Each costs about as much as the update a cascade needs when the camera moves by one probe. When more cascades are waiting, the ones that have waited longest go first, so an object that keeps moving delays the farther cascades rather than blocking them.
+			[b]Note:[/b] This property is only read when the project starts.
+		</member>
+		<member name="rendering/global_illumination/sdfgi/dynamic_objects" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], meshes with [member GeometryInstance3D.gi_mode] set to [constant GeometryInstance3D.GI_MODE_DYNAMIC] take part in signed distance field global illumination: they are voxelized like static geometry, and whenever one moves, appears, disappears or otherwise changes (a skeleton pose or blend shape reshaping it, for example), the area it was and now is in is voxelized again (see [member rendering/global_illumination/sdfgi/dynamic_object_updates_per_frame]). A door blocks indirect light while closed and lets it through once opened, a few frames after it moves. Light from lights with [member Light3D.light_bake_mode] set to [constant Light3D.BAKE_STATIC] is only baked again inside the updated area, so use [constant Light3D.BAKE_DYNAMIC] (the default) for lights such an object can block or let through.
+			Objects that move all the time, such as characters, keep SDFGI voxelizing every frame. Set their [member GeometryInstance3D.gi_mode] to [constant GeometryInstance3D.GI_MODE_DISABLED] unless they need to take part.
+			If [code]false[/code], [constant GeometryInstance3D.GI_MODE_DYNAMIC] objects are ignored by SDFGI, as before.
+			[b]Note:[/b] This property is only read when the project starts.
+		</member>
 		<member name="rendering/global_illumination/sdfgi/frames_to_converge" type="int" setter="" getter="" default="5">
 			The number of frames to use for converging signed distance field global illumination. Higher values lead to a less noisy result, at the cost of taking a longer time to fully converge. This means the scene's global illumination will be too dark for a longer period of time, especially when the camera moves fast. The actual convergence speed depends on rendered framerate. For example, with the default setting of 30 frames, rendering at 60 FPS will make SDFGI fully converge after 0.5 seconds. See also [member rendering/global_illumination/sdfgi/frames_to_update_lights] and [member rendering/global_illumination/sdfgi/probe_ray_count].
 			[b]Note:[/b] This property is only read when the project starts. To control SDFGI convergence speed at runtime, call [method RenderingServer.environment_set_sdfgi_frames_to_converge] instead.

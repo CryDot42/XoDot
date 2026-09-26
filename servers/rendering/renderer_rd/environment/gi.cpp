@@ -1339,6 +1339,74 @@ void GI::SDFGI::update(RID p_env, const Vector3 &p_world_position) {
 			}
 		}
 	}
+
+	// Voxelize again where dynamic objects moved (see mark_dirty()), in a few cascades per frame:
+	// those that have waited longest first, so one kept busy by something that never stops
+	// moving does not hold the others up for good, but with each cascade counting as having
+	// waited DYNAMIC_OBJECT_CASCADE_DELAY frames less than the one below it: the nearest, finest
+	// cascades, where a moving object shows most, keep up with it, and the farther ones follow.
+	for (SDFGI::Cascade &cascade : cascades) {
+		cascade.updating_box = false;
+	}
+	for (uint32_t budget = gi->sdfgi_dynamic_object_updates_per_frame; budget > 0; budget--) {
+		int next = -1;
+		for (uint32_t i = 0; i < cascades.size(); i++) {
+			SDFGI::Cascade &cascade = cascades[i];
+			if (!cascade.has_dirty_box || cascade.updating_box) {
+				continue;
+			}
+			if (cascade.dirty_regions == SDFGI::Cascade::DIRTY_ALL) {
+				cascade.has_dirty_box = false; // Voxelized again from scratch anyway.
+				continue;
+			}
+			_get_box_cells(cascade, cascade.dirty_box, cascade.box_from, cascade.box_to);
+			if (cascade.box_from.x >= cascade.box_to.x || cascade.box_from.y >= cascade.box_to.y || cascade.box_from.z >= cascade.box_to.z) {
+				cascade.has_dirty_box = false; // No longer in the cascade.
+				continue;
+			}
+			if (next == -1 || cascade.dirty_box_since + i * DYNAMIC_OBJECT_CASCADE_DELAY < cascades[next].dirty_box_since + next * DYNAMIC_OBJECT_CASCADE_DELAY) {
+				next = i;
+			}
+		}
+		if (next == -1) {
+			break;
+		}
+		cascades[next].updating_box = true;
+		cascades[next].has_dirty_box = false;
+	}
+}
+
+void GI::SDFGI::_get_box_cells(const Cascade &p_cascade, const AABB &p_box, Vector3i &r_from, Vector3i &r_to) const {
+	// A cell of margin all around: what the rasterizer marks in voxels only partly inside the
+	// box is not quite what the box says.
+	Vector3 to_cells = Vector3(1.0, y_mult, 1.0) / p_cascade.cell_size;
+	Vector3i origin = p_cascade.position - Vector3i(1, 1, 1) * int32_t(cascade_size >> 1);
+	Vector3i from = Vector3i((p_box.position * to_cells).floor()) - origin - Vector3i(1, 1, 1);
+	Vector3i to = Vector3i(((p_box.position + p_box.size) * to_cells).floor()) - origin + Vector3i(2, 2, 2);
+	r_from = from.clamp(Vector3i(), Vector3i(1, 1, 1) * int32_t(cascade_size));
+	r_to = to.clamp(Vector3i(), Vector3i(1, 1, 1) * int32_t(cascade_size));
+}
+
+void GI::SDFGI::mark_dirty(const LocalVector<AABB> &p_aabbs) {
+	uint64_t frame = RSG::rasterizer->get_frame_number();
+	for (SDFGI::Cascade &cascade : cascades) {
+		AABB bounds;
+		bounds.position = Vector3(cascade.position - Vector3i(1, 1, 1) * int32_t(cascade_size >> 1)) * cascade.cell_size * Vector3(1, 1.0 / y_mult, 1);
+		bounds.size = Vector3(1, 1, 1) * float(cascade_size) * cascade.cell_size * Vector3(1, 1.0 / y_mult, 1);
+
+		for (const AABB &aabb : p_aabbs) {
+			if (!bounds.intersects(aabb)) {
+				continue;
+			}
+			if (cascade.has_dirty_box) {
+				cascade.dirty_box.merge_with(aabb);
+			} else {
+				cascade.dirty_box = aabb;
+				cascade.has_dirty_box = true;
+				cascade.dirty_box_since = frame;
+			}
+		}
+	}
 }
 
 void GI::SDFGI::update_light() {
@@ -1363,6 +1431,12 @@ void GI::SDFGI::update_light() {
 	push_constant.bounce_feedback = bounce_feedback;
 	push_constant.y_mult = y_mult;
 	push_constant.use_occlusion = uses_occlusion;
+	for (int i = 0; i < 3; i++) {
+		push_constant.process_from[i] = 0;
+		push_constant.process_to[i] = cascade_size;
+	}
+	push_constant.pad = 0;
+	push_constant.pad2 = 0;
 
 	RID area_light_atlas_dynamic_uniform_set;
 	{
@@ -1552,6 +1626,25 @@ void GI::SDFGI::store_probes() {
 	RD::get_singleton()->draw_command_end_label();
 }
 
+int GI::SDFGI::get_pending_region_count() const {
+	int dirty_count = 0;
+	for (const SDFGI::Cascade &c : cascades) {
+		if (c.dirty_regions == SDFGI::Cascade::DIRTY_ALL) {
+			dirty_count++;
+			continue;
+		}
+		for (int j = 0; j < 3; j++) {
+			if (c.dirty_regions[j] != 0) {
+				dirty_count++;
+			}
+		}
+		if (c.updating_box) {
+			dirty_count++;
+		}
+	}
+	return dirty_count;
+}
+
 int GI::SDFGI::get_pending_region_data(int p_region, Vector3i &r_local_offset, Vector3i &r_local_size, AABB &r_bounds) const {
 	int dirty_count = 0;
 	for (uint32_t i = 0; i < cascades.size(); i++) {
@@ -1602,6 +1695,22 @@ int GI::SDFGI::get_pending_region_data(int p_region, Vector3i &r_local_offset, V
 
 					dirty_count++;
 				}
+			}
+
+			// After the cascade's scroll regions, so render_region() still sees the cascade's
+			// regions in a row, and runs the cascade's update after the last of them.
+			if (c.updating_box) {
+				if (dirty_count == p_region) {
+					r_local_offset = c.box_from;
+					r_local_size = c.box_to - c.box_from;
+
+					r_bounds.position = Vector3(c.box_from + Vector3i(1, 1, 1) * -int32_t(cascade_size >> 1) + c.position) * c.cell_size * Vector3(1, 1.0 / y_mult, 1);
+					r_bounds.size = Vector3(r_local_size) * c.cell_size * Vector3(1, 1.0 / y_mult, 1);
+
+					return i;
+				}
+
+				dirty_count++;
 			}
 		}
 	}
@@ -2314,6 +2423,15 @@ void GI::SDFGI::render_region(Ref<RenderSceneBuffersRD> p_render_buffers, int p_
 		push_constant.grid_size = cascade_size;
 		push_constant.cascade = cascade;
 
+		if (cascades[cascade].updating_box) {
+			// Voxelized again for dynamic objects: the scroll leaves the old voxels in it out, and
+			// the occlusion of the probes around it is recomputed.
+			for (int i = 0; i < 3; i++) {
+				push_constant.box_from[i] = cascades[cascade].box_from[i];
+				push_constant.box_to[i] = cascades[cascade].box_to[i];
+			}
+		}
+
 		if (cascades[cascade].dirty_regions != SDFGI::Cascade::DIRTY_ALL) {
 			RD::get_singleton()->buffer_copy(cascades[cascade].solid_cell_dispatch_buffer_storage, cascades[cascade].solid_cell_dispatch_buffer_call, 0, 0, sizeof(uint32_t) * 4);
 
@@ -2342,7 +2460,9 @@ void GI::SDFGI::render_region(Ref<RenderSceneBuffersRD> p_render_buffers, int p_
 			//no barrier, continue together
 
 			//scroll probes and their history also
-			_scroll_probes(compute_list, cascade, dirty / int32_t(cascade_size / SDFGI::PROBE_DIVISOR), 0);
+			if (dirty != Vector3i()) {
+				_scroll_probes(compute_list, cascade, dirty / int32_t(cascade_size / SDFGI::PROBE_DIVISOR), 0);
+			}
 
 			//ok finally barrier
 			RD::get_singleton()->compute_list_end();
@@ -2725,6 +2845,8 @@ void GI::SDFGI::render_static_lights(RenderDataRD *p_render_data, Ref<RenderScen
 	dl_push_constant.bounce_feedback = 0.0; // this is static light, do not multibounce yet
 	dl_push_constant.y_mult = y_mult;
 	dl_push_constant.use_occlusion = uses_occlusion;
+	dl_push_constant.pad = 0;
+	dl_push_constant.pad2 = 0;
 
 	//all must be processed
 	dl_push_constant.process_offset = 0;
@@ -2751,8 +2873,25 @@ void GI::SDFGI::render_static_lights(RenderDataRD *p_render_data, Ref<RenderScen
 		if (dl_push_constant.light_count > 0) {
 			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, cc.sdf_direct_light_static_uniform_set, 0);
 			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, area_light_atlas_static_uniform_set, 1);
-			RD::get_singleton()->compute_list_set_push_constant(compute_list, &dl_push_constant, sizeof(SDFGIShader::DirectLightPushConstant));
-			RD::get_singleton()->compute_list_dispatch_indirect(compute_list, cc.solid_cell_dispatch_buffer_call, 0);
+
+			// Only the voxels this frame voxelized, region by region. The rest were carried over
+			// with these lights already baked in (static light adds to what a voxel holds), and
+			// lighting them again made the light brighter every time the cascade scrolled.
+			int region_count = get_pending_region_count();
+			for (int r = 0; r < region_count; r++) {
+				Vector3i from;
+				Vector3i size;
+				AABB bounds;
+				if (get_pending_region_data(r, from, size, bounds) != int(p_cascade_indices[i])) {
+					continue;
+				}
+				for (int j = 0; j < 3; j++) {
+					dl_push_constant.process_from[j] = from[j];
+					dl_push_constant.process_to[j] = from[j] + size[j];
+				}
+				RD::get_singleton()->compute_list_set_push_constant(compute_list, &dl_push_constant, sizeof(SDFGIShader::DirectLightPushConstant));
+				RD::get_singleton()->compute_list_dispatch_indirect(compute_list, cc.solid_cell_dispatch_buffer_call, 0);
+			}
 		}
 	}
 
@@ -4302,6 +4441,7 @@ GI::GI() {
 	sdfgi_probe_relocation = GLOBAL_GET("rendering/global_illumination/sdfgi/probe_relocation");
 	sdfgi_view_bias = MAX(0.0, float(GLOBAL_GET("rendering/global_illumination/sdfgi/view_bias")));
 	sdfgi_per_pixel_visibility = GLOBAL_GET("rendering/global_illumination/sdfgi/per_pixel_visibility");
+	sdfgi_dynamic_object_updates_per_frame = MAX(1, int(GLOBAL_GET("rendering/global_illumination/sdfgi/dynamic_object_updates_per_frame")));
 }
 
 GI::~GI() {

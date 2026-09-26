@@ -4245,6 +4245,17 @@ void RenderForwardClustered::sdfgi_update(const Ref<RenderSceneBuffers> &p_rende
 	}
 }
 
+void RenderForwardClustered::sdfgi_mark_dirty(const Ref<RenderSceneBuffers> &p_render_buffers, const LocalVector<AABB> &p_aabbs) {
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND(rb.is_null());
+
+	if (!rb->has_custom_data(RB_SCOPE_SDFGI)) {
+		return; // Voxelized from scratch when created.
+	}
+	Ref<RendererRD::GI::SDFGI> sdfgi = rb->get_custom_data(RB_SCOPE_SDFGI);
+	sdfgi->mark_dirty(p_aabbs);
+}
+
 int RenderForwardClustered::sdfgi_get_pending_region_count(const Ref<RenderSceneBuffers> &p_render_buffers) const {
 	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
 	ERR_FAIL_COND_V(rb.is_null(), 0);
@@ -4254,20 +4265,7 @@ int RenderForwardClustered::sdfgi_get_pending_region_count(const Ref<RenderScene
 	}
 	Ref<RendererRD::GI::SDFGI> sdfgi = rb->get_custom_data(RB_SCOPE_SDFGI);
 
-	int dirty_count = 0;
-	for (const RendererRD::GI::SDFGI::Cascade &c : sdfgi->cascades) {
-		if (c.dirty_regions == RendererRD::GI::SDFGI::Cascade::DIRTY_ALL) {
-			dirty_count++;
-		} else {
-			for (int j = 0; j < 3; j++) {
-				if (c.dirty_regions[j] != 0) {
-					dirty_count++;
-				}
-			}
-		}
-	}
-
-	return dirty_count;
+	return sdfgi->get_pending_region_count();
 }
 
 AABB RenderForwardClustered::sdfgi_get_pending_region_bounds(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const {

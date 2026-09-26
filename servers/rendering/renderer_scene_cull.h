@@ -55,7 +55,7 @@ public:
 
 	enum {
 		SDFGI_MAX_CASCADES = 8,
-		SDFGI_MAX_REGIONS_PER_CASCADE = 3,
+		SDFGI_MAX_REGIONS_PER_CASCADE = 4, // One per scrolled axis, and one where dynamic objects moved.
 		MAX_INSTANCE_PAIRS = 32,
 		MAX_UPDATE_SHADOWS = 512
 	};
@@ -280,6 +280,7 @@ public:
 			FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN = (1 << 22),
 			FLAG_GEOM_PROJECTOR_SOFTSHADOW_DIRTY = (1 << 23),
 			FLAG_IGNORE_ALL_CULLING = (1 << 24),
+			FLAG_USES_DYNAMIC_GI = (1 << 25),
 		};
 
 		uint32_t flags = 0;
@@ -353,6 +354,10 @@ public:
 
 		LocalVector<RID> dynamic_lights;
 
+		// Where dynamic GI objects moved, appeared or went away this frame (see _sdfgi_mark_dirty()).
+		LocalVector<AABB> sdfgi_dirty_aabbs;
+		uint64_t sdfgi_dirty_frame = UINT64_MAX;
+
 		PagedArray<InstanceBounds> instance_aabbs;
 		PagedArray<InstanceData> instance_data;
 		VisibilityArray instance_visibility;
@@ -370,6 +375,7 @@ public:
 	};
 
 	int indexer_update_iterations = 0;
+	bool sdfgi_dynamic_objects = false; // rendering/global_illumination/sdfgi/dynamic_objects
 
 	mutable RID_Owner<Scenario, true> scenario_owner;
 
@@ -1094,6 +1100,8 @@ public:
 	_FORCE_INLINE_ void _update_dirty_instance(Instance *p_instance) const;
 	_FORCE_INLINE_ void _update_instance_lightmap_captures(Instance *p_instance) const;
 	void _unpair_instance(Instance *p_instance);
+	// Records a box that SDFGI has to voxelize again, because a dynamic GI object was or now is there.
+	void _sdfgi_mark_dirty(Scenario *p_scenario, const AABB &p_aabb) const;
 
 	void _light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect);
 

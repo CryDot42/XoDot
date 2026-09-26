@@ -898,6 +898,7 @@ public:
 	/* SDFGI UPDATE */
 
 	void sdfgi_update(const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, const Vector3 &p_world_position) override {}
+	void sdfgi_mark_dirty(const Ref<RenderSceneBuffers> &p_render_buffers, const LocalVector<AABB> &p_aabbs) override {}
 	int sdfgi_get_pending_region_count(const Ref<RenderSceneBuffers> &p_render_buffers) const override {
 		return 0;
 	}

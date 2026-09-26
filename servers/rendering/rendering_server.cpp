@@ -3832,6 +3832,8 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST("rendering/global_illumination/sdfgi/probe_relocation", true);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/sdfgi/view_bias", PROPERTY_HINT_RANGE, "0,4,0.01,suffix:cells"), 1.0);
 	GLOBAL_DEF_RST("rendering/global_illumination/sdfgi/per_pixel_visibility", false);
+	GLOBAL_DEF_RST("rendering/global_illumination/sdfgi/dynamic_objects", true);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/dynamic_object_updates_per_frame", PROPERTY_HINT_RANGE, "1,8,1"), 1);
 
 	GLOBAL_DEF_RST("rendering/environment/fog/use_legacy_blending", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/volume_size", PROPERTY_HINT_RANGE, "16,512,1"), 64);

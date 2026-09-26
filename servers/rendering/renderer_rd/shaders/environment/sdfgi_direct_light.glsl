@@ -107,6 +107,12 @@ layout(push_constant, std430) uniform Params {
 	float bounce_feedback;
 	float y_mult;
 	bool use_occlusion;
+
+	// Only voxels in these cells are lit (static lights only light the ones just voxelized).
+	ivec3 process_from;
+	uint pad;
+	ivec3 process_to;
+	uint pad2;
 }
 params;
 
@@ -196,6 +202,10 @@ void main() {
 
 	//keep for storing to texture
 	ivec3 positioni = ivec3((uvec3(voxel_position, voxel_position, voxel_position) >> uvec3(0, 7, 14)) & uvec3(0x7F));
+
+	if (any(lessThan(positioni, params.process_from)) || any(greaterThanEqual(positioni, params.process_to))) {
+		return;
+	}
 
 	vec3 position = vec3(positioni) + vec3(0.5);
 	position /= cascades.data[params.cascade].to_cell;

@@ -411,6 +411,13 @@ private:
 			uint32_t occlusion_index;
 			int32_t cascade;
 			float min_distance; // PRE_PROCESS_PROBE_PLACEMENT: clearance to keep probes at, in voxels.
+
+			// Cells of the cascade revoxelized this frame for dynamic objects (empty when none): the
+			// scroll leaves the old voxels out of them, and occlusion is recomputed around them.
+			int32_t box_from[3];
+			uint32_t pad;
+			int32_t box_to[3];
+			uint32_t pad2;
 		};
 
 		SdfgiPreprocessShaderRD preprocess;
@@ -502,6 +509,12 @@ private:
 			float bounce_feedback;
 			float y_mult;
 			uint32_t use_occlusion;
+
+			// Only voxels in these cells are lit (the ones just voxelized, for static lights).
+			int32_t process_from[3];
+			uint32_t pad;
+			int32_t process_to[3];
+			uint32_t pad2;
 		};
 
 		enum {
@@ -697,6 +710,7 @@ public:
 	public:
 		enum {
 			MAX_CASCADES = 8,
+			DYNAMIC_OBJECT_CASCADE_DELAY = 4, // Frames; see update().
 			CASCADE_SIZE = 128,
 			PROBE_DIVISOR = 16,
 			ANISOTROPY_SIZE = 6,
@@ -757,6 +771,18 @@ public:
 			float baked_exposure_normalization = 1.0;
 
 			bool all_dynamic_lights_dirty = true;
+
+			// Where dynamic objects moved, appeared or went away since the cascade last voxelized
+			// that part of the world (in world space), still waiting to be voxelized again, and
+			// since when (the cascades waiting longest go first; see update()).
+			AABB dirty_box;
+			bool has_dirty_box = false;
+			uint64_t dirty_box_since = 0;
+
+			// The cells being voxelized again this frame for it, as one more pending region.
+			bool updating_box = false;
+			Vector3i box_from;
+			Vector3i box_to;
 		};
 
 		// access to our containers
@@ -838,6 +864,10 @@ public:
 		void update_light();
 		void update_probes(RID p_env, RendererRD::SkyRD::Sky *p_sky);
 		void store_probes();
+		// Marks the world-space boxes as needing to be voxelized again (dynamic objects moved there).
+		void mark_dirty(const LocalVector<AABB> &p_aabbs);
+		void _get_box_cells(const Cascade &p_cascade, const AABB &p_box, Vector3i &r_from, Vector3i &r_to) const;
+		int get_pending_region_count() const;
 		int get_pending_region_data(int p_region, Vector3i &r_local_offset, Vector3i &r_local_size, AABB &r_bounds) const;
 		void update_cascades();
 		// Call after this frame's render_region() calls: re-seeds the probes of cascades those rebuilt from scratch.
@@ -859,6 +889,7 @@ public:
 	bool sdfgi_probe_relocation = true;
 	float sdfgi_view_bias = 1.0;
 	bool sdfgi_per_pixel_visibility = false;
+	uint32_t sdfgi_dynamic_object_updates_per_frame = 1;
 
 	float sdfgi_solid_cell_ratio = 0.25;
 	Vector3 sdfgi_debug_probe_pos;
