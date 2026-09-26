@@ -186,7 +186,7 @@ vec3 sdfgi_cascade_ambient(uint p_cascade, vec3 p_cascade_pos) {
 			occ_pos *= sdfgi.occlusion_renormalize;
 			float occlusion = dot(textureLod(sampler3D(sdfgi_occlusion_texture, linear_sampler), occ_pos, 0.0), occ_mask);
 
-			weight *= max(occlusion, 0.01);
+			weight *= max(occlusion, 0.0001); // See sdfvoxel_gi_process() in gi.glsl.
 		}
 
 		// Compute ambient texture position

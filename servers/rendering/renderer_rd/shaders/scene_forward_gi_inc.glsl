@@ -123,7 +123,8 @@ vec2 octahedron_encode(vec3 n) {
 	return n.xy;
 }
 
-void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal, vec3 cam_specular_normal, bool use_specular, float roughness, out vec3 diffuse_light, out vec3 specular_light, out float blend) {
+// r_visibility: see sdfvoxel_gi_process() in gi.glsl.
+void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal, vec3 cam_specular_normal, bool use_specular, float roughness, out vec3 diffuse_light, out vec3 specular_light, out float blend, out float r_visibility) {
 	cascade_pos += cam_normal * sdfgi.normal_bias;
 
 	vec3 base_pos = floor(cascade_pos);
@@ -149,6 +150,9 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 	vec4 light_accum = vec4(0.0);
 	float weight_accum = 0.0;
 
+	float visible_weight = 0.0;
+	float total_weight = 0.0;
+
 	for (uint j = 0; j < 8; j++) {
 		ivec3 offset = (ivec3(j) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1);
 		ivec3 probe_posi = probe_base_pos;
@@ -162,6 +166,7 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 
 		vec3 trilinear = vec3(1.0) - abs(probe_to_pos);
 		float weight = trilinear.x * trilinear.y * trilinear.z * max(0.005, dot(cam_normal, probe_dir));
+		total_weight += weight;
 
 		// Compute lightprobe occlusion
 
@@ -178,7 +183,10 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 			occ_pos *= sdfgi.occlusion_renormalize;
 			float occlusion = dot(textureLod(sampler3D(sdfgi_occlusion_cascades, SAMPLER_LINEAR_CLAMP), occ_pos, 0.0), occ_mask);
 
-			weight *= max(occlusion, 0.01);
+			visible_weight += weight * occlusion;
+			weight *= max(occlusion, 0.0001); // See sdfvoxel_gi_process() in gi.glsl.
+		} else {
+			visible_weight += weight;
 		}
 
 		// Compute lightprobe texture position
@@ -220,6 +228,8 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 
 		specular_light = specular_accum;
 	}
+
+	r_visibility = total_weight > 0.0 ? visible_weight / total_weight : 1.0;
 
 	{
 		//process blend

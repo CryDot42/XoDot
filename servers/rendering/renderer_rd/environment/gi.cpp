@@ -504,7 +504,11 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 	RD::TextureFormat tf_occlusion = tf_sdf;
 	tf_occlusion.format = RD::DATA_FORMAT_R16_UINT;
 	tf_occlusion.shareable_formats.push_back(RD::DATA_FORMAT_R16_UINT);
-	tf_occlusion.shareable_formats.push_back(RD::DATA_FORMAT_R4G4B4A4_UNORM_PACK16);
+	// Sampled as B4G4R4A4 rather than R4G4B4A4: Vulkan requires filtered sampling of the former
+	// but not the latter, and where the latter is missing (lavapipe, for one) every lookup reads
+	// zero, which silently turns occlusion into "every probe hidden". The 4-bit fields are packed
+	// to match (see occlusion_shift in sdfgi_preprocess.glsl).
+	tf_occlusion.shareable_formats.push_back(RD::DATA_FORMAT_B4G4R4A4_UNORM_PACK16);
 	tf_occlusion.depth *= cascades.size(); //use depth for occlusion slices
 	tf_occlusion.width *= 2; //use width for the other half
 
@@ -573,7 +577,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 	occlusion_data = create_clear_texture(tf_occlusion, "SDFGI Occlusion Data");
 	{
 		RD::TextureView tv;
-		tv.format_override = RD::DATA_FORMAT_R4G4B4A4_UNORM_PACK16;
+		tv.format_override = RD::DATA_FORMAT_B4G4R4A4_UNORM_PACK16;
 		occlusion_texture = RD::get_singleton()->texture_create_shared(tv, occlusion_data);
 	}
 

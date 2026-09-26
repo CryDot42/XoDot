@@ -218,7 +218,9 @@ vec3 reconstruct_position(ivec2 screen_pos) {
 	}
 }
 
-void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal, vec3 cam_specular_normal, float roughness, out vec3 diffuse_light, out vec3 specular_light) {
+// r_visibility is how much of the weight the point would give its probes, before occlusion,
+// goes to probes it can actually see: near zero when every probe around it is hidden from it.
+void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal, vec3 cam_specular_normal, float roughness, out vec3 diffuse_light, out vec3 specular_light, out float r_visibility) {
 	cascade_pos += cam_normal * sdfgi.normal_bias;
 
 	vec3 base_pos = floor(cascade_pos);
@@ -241,6 +243,9 @@ void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_
 	vec4 light_accum = vec4(0.0);
 	float weight_accum = 0.0;
 
+	float visible_weight = 0.0;
+	float total_weight = 0.0;
+
 	for (uint j = 0; j < 8; j++) {
 		ivec3 offset = (ivec3(j) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1);
 		ivec3 probe_posi = probe_base_pos;
@@ -254,6 +259,7 @@ void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_
 
 		vec3 trilinear = vec3(1.0) - abs(probe_to_pos);
 		float weight = trilinear.x * trilinear.y * trilinear.z * max(0.005, dot(cam_normal, probe_dir));
+		total_weight += weight;
 
 		// Compute lightprobe occlusion
 
@@ -270,7 +276,16 @@ void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_
 			occ_pos *= sdfgi.occlusion_renormalize;
 			float occlusion = dot(textureLod(sampler3D(occlusion_texture, linear_sampler), occ_pos, 0.0), occ_mask);
 
-			weight *= max(occlusion, 0.01);
+			visible_weight += weight * occlusion;
+			// Occluded probes keep only a token weight, so that a point hidden from all of them
+			// still gets a (normalizable) answer, which the fallback in sdfgi_process() then
+			// replaces with the next cascade's. It used to be 0.01, but next to a wall with sunlit
+			// probes behind it, the probes the point does see can be a thousand times darker, and
+			// even that small share of the hidden ones lit the whole wall, in bands where they sit
+			// close.
+			weight *= max(occlusion, 0.0001);
+		} else {
+			visible_weight += weight;
 		}
 
 		// Compute lightprobe texture position
@@ -310,6 +325,8 @@ void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_
 	}
 
 	specular_light = specular_accum;
+
+	r_visibility = total_weight > 0.0 ? visible_weight / total_weight : 1.0;
 }
 
 void sdfgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, out vec4 ambient_light, out vec4 reflection_light) {
@@ -356,7 +373,8 @@ void sdfgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, o
 
 		float blend;
 		vec3 diffuse, specular;
-		sdfvoxel_gi_process(cascade, cascade_pos, cam_pos, cam_normal, reflection, roughness, diffuse, specular);
+		float visibility;
+		sdfvoxel_gi_process(cascade, cascade_pos, cam_pos, cam_normal, reflection, roughness, diffuse, specular, visibility);
 
 		{
 			//process blend
@@ -377,7 +395,16 @@ void sdfgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, o
 			}
 		}
 
-		if (blend > 0.0) {
+		// When the point can see none of this cascade's probes (a space smaller than the probe
+		// spacing, closed off from all of them), the floor weights would hand it whichever hidden
+		// probe happened to be nearest, often lit from the other side of a wall. Lean on the next
+		// cascade instead, if it sees the point better. Only then, though: a point that sees just
+		// a few of its probes, or only far ones (next to a wall, with the probes behind it
+		// carrying most of the interpolation weight), is lit right by those alone, and the next
+		// cascade, twice as coarse, is the one more likely to see through the wall.
+		float fallback = 1.0 - smoothstep(0.01, 0.05, visibility);
+
+		if (blend > 0.0 || fallback > 0.0) {
 			//blend
 			if (cascade == sdfgi.max_cascades - 1) {
 				ambient_light.a = 1.0 - blend;
@@ -385,10 +412,12 @@ void sdfgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, o
 
 			} else {
 				vec3 diffuse2, specular2;
+				float visibility2;
 				cascade_pos = (cam_pos - sdfgi.cascades[cascade + 1].position) * sdfgi.cascades[cascade + 1].to_probe;
-				sdfvoxel_gi_process(cascade + 1, cascade_pos, cam_pos, cam_normal, reflection, roughness, diffuse2, specular2);
-				diffuse = mix(diffuse, diffuse2, blend);
-				specular = mix(specular, specular2, blend);
+				sdfvoxel_gi_process(cascade + 1, cascade_pos, cam_pos, cam_normal, reflection, roughness, diffuse2, specular2, visibility2);
+				float mix_weight = max(blend, fallback * clamp((visibility2 - visibility) * 5.0, 0.0, 1.0));
+				diffuse = mix(diffuse, diffuse2, mix_weight);
+				specular = mix(specular, specular2, mix_weight);
 			}
 		}
 
