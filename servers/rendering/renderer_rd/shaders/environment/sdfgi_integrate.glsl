@@ -56,11 +56,13 @@ layout(set = 0, binding = 15) uniform texture2DArray probe_state_texture;
 #define STATE_AGE 0 // How many of the history frames are the probe's own, up to history_size.
 #define STATE_SUSPECT 1 // Consecutive frames whose light disagreed with the history's.
 #define STATE_PLACEMENT 2 // Where the probe was placed when its history was traced, to notice it moving.
+#define STATE_CHANGE_RATE 3 // How much its light has been changing lately, from one history turn to the next.
 
 // A probe that starts from a guess (seeded from the cascade above when it scrolls in) counts
-// that guess as this many history frames: enough to hide its first noisy traces, few enough that
-// its own light takes over within a handful of frames rather than a whole convergence period.
-#define PRIOR_AGE 2
+// that guess as this many history frames: enough to hide its first noisy traces (new probes
+// scroll in all the time while the camera moves, and should not sparkle at the edges of the
+// cascades), few enough that its own light takes over well before a whole convergence period.
+#define PRIOR_AGE 6
 
 // Marks, in the alpha channel of a history texel, a frame that is no good for telling whether
 // the light changed since (see the adaptive history in MODE_PROCESS): a seeded one, which traced
@@ -72,13 +74,20 @@ layout(set = 0, binding = 15) uniform texture2DArray probe_state_texture;
 #define HISTORY_FLAG_UNSETTLED 1
 
 // Adaptive history. A probe whose light differs from what the very same rays saw one history
-// turn earlier by more than ADAPT_RELATIVE (plus a couple of fixed point steps, ADAPT_ABSOLUTE),
-// ADAPT_CONFIRM_FRAMES frames in a row, has seen the light change: it drops all but those frames
-// of history and catches up at once. A single differing frame is averaged in as usual.
+// turn earlier by more than ADAPT_RELATIVE, and by ADAPT_RATE_MARGIN times as much as it has
+// lately been changing (and by more than a couple of fixed point steps, ADAPT_ABSOLUTE),
+// ADAPT_CONFIRM_FRAMES frames in a row, has seen the light change suddenly: it drops as much of
+// its history as the change calls for (see MODE_PROCESS) and catches up. A single differing
+// frame is averaged in as usual, and so is light that keeps changing at a steady pace (a light
+// moving, the sun turning), which the probe follows the way it would without this, smoothly, a
+// little behind.
 #define ADAPT_RELATIVE 0.15
+#define ADAPT_RATE_MARGIN 3.0
 #define ADAPT_ABSOLUTE (2.0 / float(1 << HISTORY_BITS))
-#define ADAPT_CONFIRM_FRAMES 2
+#define ADAPT_CONFIRM_FRAMES 3
 #define ADAPT_SETTLE_FRAMES 4
+// How many frames the pace of change (STATE_CHANGE_RATE) is averaged over.
+#define ADAPT_RATE_FRAMES 8.0
 
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 layout(set = 1, binding = 0) uniform texture2DArray sky_irradiance;
@@ -413,9 +422,13 @@ void main() {
 
 	int age = int(get_probe_state(average_pos, STATE_AGE));
 	float suspect = get_probe_state(average_pos, STATE_SUSPECT);
+	float change_rate = get_probe_state(average_pos, STATE_CHANGE_RATE);
 
-	// How many of the most recent history frames to keep, when not all of them.
+	// How many of the most recent history frames to keep, when not all of them, and whether those
+	// are to be marked unsettled (see HISTORY_FLAG_UNSETTLED): they are when what the probe saw
+	// changed altogether, and the frames it keeps were traced as that happened.
 	int keep = age;
+	bool unsettle_kept = true;
 
 	// The frame about to leave the history traced exactly these rays one full turn ago, so unless
 	// the light changed since, it saw exactly the same. Comparing against it rather than the
@@ -431,16 +444,32 @@ void main() {
 
 		float lum = max(0.0, get_luminance(l0));
 		float previous_lum = max(0.0, get_luminance(previous_l0));
-		if (abs(lum - previous_lum) > ADAPT_RELATIVE * max(lum, previous_lum) + ADAPT_ABSOLUTE) {
+		float change = abs(lum - previous_lum);
+		float relative = change / max(max(lum, previous_lum), ADAPT_ABSOLUTE);
+
+		// Only a change that stands out from how the light has been changing lately counts: light
+		// that keeps moving on (a lamp carried around, the sun turning) changes every turn, and
+		// dropping the history over and over for it left probes with a handful of rays each,
+		// flickering out of step with their neighbors for as long as the light moved. Each frame
+		// compares a different handful of rays, so while the light moves, how much one of them
+		// changed swings well above and below the pace: the margin is a factor, not an offset.
+		if (relative > max(ADAPT_RELATIVE, change_rate * ADAPT_RATE_MARGIN) && change > ADAPT_ABSOLUTE) {
 			suspect += 1.0;
 			if (suspect >= float(ADAPT_CONFIRM_FRAMES)) {
-				// It keeps disagreeing: the light changed. Keep only the frames since.
-				keep = ADAPT_CONFIRM_FRAMES - 1;
+				// It keeps disagreeing: the light changed. Drop as much of the history as the change
+				// calls for, going by how much of the light is new: all but the frames since when
+				// it all is (a light switched on or off, a door shut), less when only part of it
+				// is. The frames kept still carry some of the light from before, so the probe gets
+				// there over some frames rather than at once, but it does not flicker for it.
+				float kept = float(history_size) * (1.0 - relative) * (1.0 - relative);
+				keep = clamp(int(kept), ADAPT_CONFIRM_FRAMES - 1, age - 1);
+				unsettle_kept = keep < ADAPT_SETTLE_FRAMES;
 				suspect = 0.0;
 			}
 		} else {
 			suspect = 0.0;
 		}
+		change_rate += (relative - change_rate) / ADAPT_RATE_FRAMES;
 	}
 
 	if (!probe_valid) {
@@ -449,6 +478,7 @@ void main() {
 		// The probe was moved (its cascade was revoxelized with new geometry in reach) or only
 		// just seeded, so its history was traced from elsewhere: keep a little of it as a guess.
 		keep = min(keep, PRIOR_AGE);
+		unsettle_kept = true;
 		suspect = 0.0;
 	}
 
@@ -474,8 +504,9 @@ void main() {
 				ivec3 kept_pos = ivec3(slot_pos.xy, (history_index - j + history_size) % history_size);
 				ivec4 kept = imageLoad(lightprobe_history_texture, kept_pos);
 				average.rgb += kept.rgb;
-				// Traced as the light was changing: unsettled.
-				imageStore(lightprobe_history_texture, kept_pos, ivec4(kept.rgb, HISTORY_FLAG_UNSETTLED));
+				if (unsettle_kept) {
+					imageStore(lightprobe_history_texture, kept_pos, ivec4(kept.rgb, HISTORY_FLAG_UNSETTLED));
+				}
 			}
 		} else if (age >= history_size) {
 			average.rgb -= imageLoad(lightprobe_history_texture, slot_pos).rgb;
@@ -488,6 +519,8 @@ void main() {
 			average.a = floatBitsToInt(suspect);
 		} else if (i == STATE_PLACEMENT) {
 			average.a = floatBitsToInt(placement_code);
+		} else if (i == STATE_CHANGE_RATE) {
+			average.a = floatBitsToInt(change_rate);
 		}
 
 		imageStore(lightprobe_history_texture, slot_pos, ivec4(ivalue, history_flags));
@@ -725,7 +758,7 @@ void main() {
 				for (int i = 0; i < SH_SIZE; i++) {
 					seed[i] /= total_weight;
 				}
-				seed_age = PRIOR_AGE;
+				seed_age = min(PRIOR_AGE, int(params.history_size) - 1);
 			}
 
 		} else if (!bool(params.flags & INTEGRATE_FLAG_RESET)) {
@@ -739,7 +772,7 @@ void main() {
 				for (int i = 0; i < SH_SIZE; i++) {
 					seed[i] = get_probe_coefficient(imageLoad(lightprobe_average_texture, own_pos + ivec2(0, i)), own_age);
 				}
-				seed_age = PRIOR_AGE;
+				seed_age = min(PRIOR_AGE, int(params.history_size) - 1);
 			}
 		}
 
