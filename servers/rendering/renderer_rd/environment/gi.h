@@ -526,8 +526,9 @@ private:
 				SKY_FLAGS_ORIENTATION_SIGN = 0x04,
 			};
 
-			enum {
-				FLAG_RESET = 0x01, // INTEGRATE_FLAG_RESET in sdfgi_integrate.glsl.
+			enum { // INTEGRATE_FLAG_* in sdfgi_integrate.glsl.
+				FLAG_RESET = 0x01,
+				FLAG_ADAPTIVE = 0x02,
 			};
 
 			float grid_size[3];
@@ -847,6 +848,7 @@ public:
 	RSE::EnvironmentSDFGIRayCount sdfgi_ray_count = RSE::ENV_SDFGI_RAY_COUNT_16;
 	RSE::EnvironmentSDFGIFramesToConverge sdfgi_frames_to_converge = RSE::ENV_SDFGI_CONVERGE_IN_30_FRAMES;
 	RSE::EnvironmentSDFGIFramesToUpdateLight sdfgi_frames_to_update_light = RSE::ENV_SDFGI_UPDATE_LIGHT_IN_4_FRAMES;
+	bool sdfgi_adaptive_history = true;
 
 	float sdfgi_solid_cell_ratio = 0.25;
 	Vector3 sdfgi_debug_probe_pos;

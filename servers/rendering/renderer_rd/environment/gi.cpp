@@ -1358,7 +1358,7 @@ void GI::SDFGI::update_probes(RID p_env, SkyRD::Sky *p_sky) {
 	push_constant.image_size[0] = probe_axis_count * probe_axis_count;
 	push_constant.image_size[1] = probe_axis_count;
 	push_constant.store_ambient_texture = RendererSceneRenderRD::get_singleton()->environment_get_volumetric_fog_enabled(p_env);
-	push_constant.flags = 0;
+	push_constant.flags = gi->sdfgi_adaptive_history ? SDFGIShader::IntegratePushConstant::FLAG_ADAPTIVE : 0;
 
 	const float sky_irradiance_border_size = p_sky != nullptr ? p_sky->uv_border_size : 0.0f;
 	push_constant.sky_irradiance_border_size[0] = sky_irradiance_border_size;
@@ -1576,6 +1576,8 @@ void GI::SDFGI::_scroll_probes(RD::ComputeListID p_compute_list, uint32_t p_casc
 	ipush_constant.max_cascades = cascades.size();
 	ipush_constant.probe_axis_size = probe_axis_count;
 	ipush_constant.history_size = history_size;
+	// The history frame the next update_probes() will write, which seeded probes plan their history around.
+	ipush_constant.history_index = render_pass % history_size;
 	ipush_constant.y_mult = y_mult;
 	ipush_constant.flags = p_flags;
 
@@ -4211,6 +4213,7 @@ GI::GI() {
 	sdfgi_ray_count = RSE::EnvironmentSDFGIRayCount(CLAMP(int32_t(GLOBAL_GET("rendering/global_illumination/sdfgi/probe_ray_count")), 0, int32_t(RSE::ENV_SDFGI_RAY_COUNT_MAX - 1)));
 	sdfgi_frames_to_converge = RSE::EnvironmentSDFGIFramesToConverge(CLAMP(int32_t(GLOBAL_GET("rendering/global_illumination/sdfgi/frames_to_converge")), 0, int32_t(RSE::ENV_SDFGI_CONVERGE_MAX - 1)));
 	sdfgi_frames_to_update_light = RSE::EnvironmentSDFGIFramesToUpdateLight(CLAMP(int32_t(GLOBAL_GET("rendering/global_illumination/sdfgi/frames_to_update_lights")), 0, int32_t(RSE::ENV_SDFGI_UPDATE_LIGHT_MAX - 1)));
+	sdfgi_adaptive_history = GLOBAL_GET("rendering/global_illumination/sdfgi/adaptive_history");
 }
 
 GI::~GI() {
