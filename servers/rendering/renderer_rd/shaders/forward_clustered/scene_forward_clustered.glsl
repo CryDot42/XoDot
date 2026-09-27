@@ -2346,7 +2346,11 @@ void fragment_shader(in SceneData scene_data) {
 #else
 		// cheap luminance approximation
 		float f90 = clamp(50.0 * f0.g, metallic, 1.0);
-		indirect_specular_light *= energy_compensation * ((f90 - f0) * envBRDF.x + f0 * envBRDF.y);
+		vec3 specular_albedo = (f90 - f0) * envBRDF.x + f0 * envBRDF.y;
+		indirect_specular_light *= energy_compensation * specular_albedo;
+
+		// Light reflected by the specular lobe is not available to the diffuse lobe.
+		ambient_light *= max(1.0 - specular_albedo, 0.0);
 
 #ifdef LIGHT_CLEARCOAT_USED
 		float geo_NdotV = max(dot(geo_normal, view), 0.0001); // We want to use geometric normal, not normal_map

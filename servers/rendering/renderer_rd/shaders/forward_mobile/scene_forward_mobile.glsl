@@ -1970,7 +1970,12 @@ void main() {
 		half a004 = min(r.x * r.x, exp2(half(-9.28) * ndotv)) * r.x + r.y;
 		hvec2 env = hvec2(-1.04, 1.04) * a004 + r.zw;
 
-		indirect_specular_light *= env.x * f0 + env.y * clamp(half(50.0) * f0.g, metallic, half(1.0));
+		hvec3 specular_albedo = env.x * f0 + env.y * clamp(half(50.0) * f0.g, metallic, half(1.0));
+		indirect_specular_light *= specular_albedo;
+
+		// Light reflected by the specular lobe is not available to the diffuse lobe.
+		// The approximation above can slightly exceed 1.0 at grazing angles.
+		ambient_light *= max(half(1.0) - specular_albedo, half(0.0));
 
 #ifdef LIGHT_CLEARCOAT_USED
 		half geo_NdotV = max(dot(geo_normal, view), half(0.0001)); // We want to use geometric normal, not normal_map
