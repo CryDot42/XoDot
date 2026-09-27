@@ -1,0 +1,18 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import("env")
+Import("env_modules")
+
+env_landscape = env_modules.Clone()
+
+if env["rendering_device"] and "RD_GLSL" in env["BUILDERS"]:
+    # GPU quadtree traversal and map generation compute shaders.
+    env_landscape.RD_GLSL("shaders/landscape_lod.glsl")
+    env_landscape.RD_GLSL("shaders/landscape_maps.glsl")
+    env_landscape.Depends(Glob("shaders/*.glsl.gen.h"), ["#glsl_builders.py"])
+
+# Godot source files
+env_landscape.add_source_files(env.modules_sources, "*.cpp")
+if env.editor_build:
+    env_landscape.add_source_files(env.modules_sources, "editor/*.cpp")

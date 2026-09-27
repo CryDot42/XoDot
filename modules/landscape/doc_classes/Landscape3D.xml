@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="Landscape3D" inherits="Node3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Built-in terrain rendered with a GPU quadtree, screen-space error LOD and indirect drawing.
+	</brief_description>
+	<description>
+		[Landscape3D] renders large terrains (up to 16 x 16 km) described by a [LandscapeData] resource, painted with up to 16 weight-blended [LandscapeLayer] materials.
+		Rendering is fully GPU-driven: every frame a compute shader walks a quadtree over the heightmap, one level per indirect dispatch. Each node is frustum culled and its geometric error (maximum height deviation from the full resolution terrain) is projected to the screen. Nodes whose projected error exceeds [member lod_pixel_error] are split, the others are written as patch instances directly into an indirect [MultiMesh] buffer together with the draw command, so the CPU never reads back the selection. Patch edges shared with coarser neighbors are stitched in the vertex shader, which guarantees crack-free LOD transitions.
+		Close to the camera the quadtree can keep subdividing below the heightmap resolution ([member micro_detail_levels]) to add micro detail displacement from the height maps of the painted layers ([member LandscapeLayer.displacement]).
+		Shadows use a separate patch list that is not frustum culled (see [member shadow_lod_bias] and [member shadow_distance]).
+		Collision is generated as [HeightMapShape3D] tiles, optionally only around the camera for very large worlds (see [member collision_radius]).
+		The editor provides a "Landscape" dock (similar to the Landscape Mode of Unreal Engine) with Manage, Sculpt and Paint tools when a [Landscape3D] is selected.
+		[b]Note:[/b] [Landscape3D] requires the Forward+ or Mobile renderer. Physics collision and CPU queries also work with the Compatibility renderer, but nothing is drawn.
+		[b]Note:[/b] Save the [LandscapeData] as a binary [code].res[/code] file, text resources are very large and slow for heightmaps.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="force_update">
+			<return type="void" />
+			<description>
+				Forces a full update of the GPU data (heightmap, normals, layers, LOD tree) and of the collision. Changes made through [LandscapeData] are detected automatically, this is only needed after modifying the data arrays in unusual ways.
+			</description>
+		</method>
+		<method name="get_aabb" qualifiers="const">
+			<return type="AABB" />
+			<description>
+				Returns the bounding box of the landscape in local space, including the micro detail displacement.
+			</description>
+		</method>
+		<method name="get_builtin_shader_code" qualifiers="static">
+			<return type="String" />
+			<description>
+				Returns the code of the built-in landscape shader. It can be used as a starting point for a custom [member shader_override].
+			</description>
+		</method>
+		<method name="get_dominant_layer_at" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="global_position" type="Vector3" />
+			<description>
+				Returns the index of the material layer with the highest weight at the given global position.
+			</description>
+		</method>
+		<method name="get_height_at" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="global_position" type="Vector3" />
+			<description>
+				Returns the global height of the terrain at the given global position (bilinear interpolation of the heightmap).
+			</description>
+		</method>
+		<method name="get_layer" qualifiers="const">
+			<return type="LandscapeLayer" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the material layer at [param index].
+			</description>
+		</method>
+		<method name="get_layer_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of material layers.
+			</description>
+		</method>
+		<method name="get_normal_at" qualifiers="const">
+			<return type="Vector3" />
+			<param index="0" name="global_position" type="Vector3" />
+			<description>
+				Returns the global normal of the terrain at the given global position.
+			</description>
+		</method>
+		<method name="get_statistics" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns statistics of the GPU LOD selection, read back asynchronously from the GPU (a few frames old):
+				- [code]patches[/code]: number of patches drawn in the main view.
+				- [code]shadow_patches[/code]: number of patches drawn in the shadow passes.
+				- [code]triangles[/code]: number of triangles drawn in the main view.
+				- [code]budget_exceeded[/code]: [code]true[/code] if [member max_patches] was too small to hold the selected patches.
+				- [code]heightmap_levels[/code]: number of quadtree levels over the heightmap.
+				- [code]micro_levels[/code]: number of micro detail levels currently in use.
+			</description>
+		</method>
+		<method name="global_to_local" qualifiers="const">
+			<return type="Vector3" />
+			<param index="0" name="global_position" type="Vector3" />
+			<description>
+				Converts a global position to the local space of the landscape (the heightmap texel [code](x, z)[/code] is at [code](x * vertex_spacing, height, z * vertex_spacing)[/code]).
+			</description>
+		</method>
+		<method name="local_to_global" qualifiers="const">
+			<return type="Vector3" />
+			<param index="0" name="local_position" type="Vector3" />
+			<description>
+				Converts a position in the local space of the landscape to a global position.
+			</description>
+		</method>
+		<method name="raycast" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="from" type="Vector3" />
+			<param index="1" name="direction" type="Vector3" />
+			<param index="2" name="max_distance" type="float" default="1000000.0" />
+			<description>
+				Intersects a ray with the terrain on the CPU (no physics needed). Returns a dictionary with [code]position[/code] and [code]normal[/code] (global space), or an empty dictionary if nothing was hit.
+			</description>
+		</method>
+		<method name="set_brush_preview">
+			<return type="void" />
+			<param index="0" name="visible" type="bool" />
+			<param index="1" name="local_center" type="Vector3" default="Vector3(0, 0, 0)" />
+			<param index="2" name="radius" type="float" default="0.0" />
+			<param index="3" name="falloff" type="float" default="0.0" />
+			<param index="4" name="color" type="Color" default="Color(0.25, 0.6, 1, 1)" />
+			<description>
+				Shows a brush cursor projected on the terrain. Used by the editor, can be used to show a brush in custom in-game editors. [param local_center] is in local space, [param radius] in meters and [param falloff] in the [code]0..1[/code] range.
+			</description>
+		</method>
+		<method name="update_collision">
+			<return type="void" />
+			<description>
+				Rebuilds all collision tiles immediately.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="cast_shadows" type="bool" setter="set_cast_shadows" getter="is_casting_shadows" default="true">
+			If [code]true[/code], the landscape casts shadows. Shadow casters use their own patch list that isn't frustum culled.
+		</member>
+		<member name="collision_enabled" type="bool" setter="set_collision_enabled" getter="is_collision_enabled" default="true">
+			If [code]true[/code], the landscape generates static collision made of [HeightMapShape3D] tiles.
+		</member>
+		<member name="collision_layer" type="int" setter="set_collision_layer" getter="get_collision_layer" default="1">
+			The physics layers the landscape collision is in.
+		</member>
+		<member name="collision_lod" type="int" setter="set_collision_lod" getter="get_collision_lod" default="0">
+			Reduces the resolution of the collision: [code]0[/code] uses every heightmap sample, [code]1[/code] every second sample, etc.
+		</member>
+		<member name="collision_mask" type="int" setter="set_collision_mask" getter="get_collision_mask" default="1">
+			The physics layers the landscape collision scans.
+		</member>
+		<member name="collision_priority" type="float" setter="set_collision_priority" getter="get_collision_priority" default="1.0">
+			The priority used to solve colliding when occurring penetration, see [member CollisionObject3D.collision_priority].
+		</member>
+		<member name="collision_radius" type="float" setter="set_collision_radius" getter="get_collision_radius" default="0.0">
+			If greater than [code]0[/code], only the collision tiles within this distance (in meters) of the LOD camera are created. This keeps the memory usage low for very large landscapes. If [code]0[/code], the whole landscape has collision.
+		</member>
+		<member name="collision_tile_size" type="int" setter="set_collision_tile_size" getter="get_collision_tile_size" default="256">
+			Size of a collision tile in heightmap quads. Tiles are rebuilt when the terrain is edited.
+		</member>
+		<member name="data" type="LandscapeData" setter="set_data" getter="get_data">
+			The heightmap and layer weights of the landscape.
+		</member>
+		<member name="debug_view" type="int" setter="set_debug_view" getter="get_debug_view" enum="Landscape3D.DebugView" default="0">
+			Debug visualization of the landscape, useful to tune the LOD settings.
+		</member>
+		<member name="displacement_scale" type="float" setter="set_displacement_scale" getter="get_displacement_scale" default="1.0">
+			Global multiplier of the micro detail displacement of all layers.
+		</member>
+		<member name="freeze_lod" type="bool" setter="set_freeze_lod" getter="is_lod_frozen" default="false">
+			If [code]true[/code], the LOD selection isn't updated anymore. Useful to inspect the selected patches and the culling from another point of view.
+		</member>
+		<member name="layer_texture_size" type="int" setter="set_layer_texture_size" getter="get_layer_texture_size" default="1024">
+			Resolution of the texture arrays built from the layer textures. All layer textures are resized to this size.
+		</member>
+		<member name="layers" type="LandscapeLayer[]" setter="set_layers" getter="get_layers" default="[]">
+			The material layers (up to 16). The weights of each layer are painted in [member data].
+		</member>
+		<member name="lod_camera_path" type="NodePath" setter="set_lod_camera_path" getter="get_lod_camera_path" default="NodePath(&quot;&quot;)">
+			Camera used to select the LOD. If empty, the current camera of the viewport is used (the editor camera in the editor).
+		</member>
+		<member name="lod_pixel_error" type="float" setter="set_lod_pixel_error" getter="get_lod_pixel_error" default="2.0">
+			Maximum screen-space error in pixels. Quadtree nodes whose geometric error, projected on the screen, is larger than this value are subdivided. Lower values give more detail and more triangles.
+		</member>
+		<member name="max_patches" type="int" setter="set_max_patches" getter="get_max_patches" default="16384">
+			Maximum number of patches that can be drawn per frame (and size of each quadtree level list). If exceeded, [method get_statistics] reports [code]budget_exceeded[/code] and some patches are drawn with a coarser LOD or not at all.
+		</member>
+		<member name="micro_detail_levels" type="int" setter="set_micro_detail_levels" getter="get_micro_detail_levels" default="2">
+			Number of quadtree levels that can be added below the heightmap resolution close to the camera. They are only used when at least one layer has a [member LandscapeLayer.displacement], the layer height maps then displace the subdivided surface (micro detail).
+		</member>
+		<member name="patch_size" type="int" setter="set_patch_size" getter="get_patch_size" default="32">
+			Number of quads along each side of a patch. Larger patches reduce the number of instances, smaller patches follow the screen-space error more closely.
+		</member>
+		<member name="render_layers" type="int" setter="set_render_layers" getter="get_render_layers" default="1">
+			The render layers the landscape is drawn in.
+		</member>
+		<member name="shader_override" type="Shader" setter="set_shader_override" getter="get_shader_override">
+			Custom shader used instead of the built-in landscape shader. It must declare the [code]ls_*[/code] uniforms and implement the patch placement of the built-in shader (see [method get_builtin_shader_code]).
+		</member>
+		<member name="shadow_distance" type="float" setter="set_shadow_distance" getter="get_shadow_distance" default="0.0">
+			Maximum distance from the camera of the patches drawn in the shadow passes. [code]0[/code] means unlimited.
+		</member>
+		<member name="shadow_lod_bias" type="float" setter="set_shadow_lod_bias" getter="get_shadow_lod_bias" default="1.0">
+			Multiplier of [member lod_pixel_error] used to select the patches drawn in the shadow passes. Larger values reduce the cost of shadows at the expense of accuracy.
+		</member>
+	</members>
+	<constants>
+		<constant name="DEBUG_VIEW_DISABLED" value="0" enum="DebugView">
+			Regular rendering.
+		</constant>
+		<constant name="DEBUG_VIEW_LOD_LEVELS" value="1" enum="DebugView">
+			Colors the terrain by quadtree level.
+		</constant>
+		<constant name="DEBUG_VIEW_PATCHES" value="2" enum="DebugView">
+			Colors every patch differently.
+		</constant>
+		<constant name="DEBUG_VIEW_NORMALS" value="3" enum="DebugView">
+			Displays the terrain normals.
+		</constant>
+		<constant name="DEBUG_VIEW_LAYERS" value="4" enum="DebugView">
+			Colors the terrain by dominant material layer.
+		</constant>
+		<constant name="MAX_LAYERS" value="16">
+			Maximum number of material layers.
+		</constant>
+	</constants>
+</class>

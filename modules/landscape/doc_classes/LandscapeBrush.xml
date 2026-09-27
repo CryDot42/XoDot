@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LandscapeBrush" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Sculpt and paint tools for [LandscapeData].
+	</brief_description>
+	<description>
+		Holds brush settings (size, falloff, strength, alpha) and applies sculpt and paint tools to a [LandscapeData]. It is used by the landscape editor and can also deform or paint terrains at runtime:
+		[codeblock]
+		var brush = LandscapeBrush.new()
+		brush.tool = LandscapeBrush.TOOL_SCULPT
+		brush.size = 5.0
+		brush.strength = 1.0
+		brush.invert = true # Dig a crater.
+		brush.apply($Landscape3D.data, $Landscape3D.global_to_local(impact_position))
+		[/codeblock]
+		Positions are in the local space of the [Landscape3D]. Modified regions are notified to the data automatically.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="apply">
+			<return type="Rect2i" />
+			<param index="0" name="data" type="LandscapeData" />
+			<param index="1" name="local_center" type="Vector3" />
+			<param index="2" name="delta" type="float" default="1.0" />
+			<description>
+				Applies one dab of [member tool] centered at [param local_center]. [param delta] scales the strength (use the time step for continuous strokes). Returns the modified texel rectangle.
+			</description>
+		</method>
+		<method name="apply_ramp">
+			<return type="Rect2i" />
+			<param index="0" name="data" type="LandscapeData" />
+			<param index="1" name="local_from" type="Vector3" />
+			<param index="2" name="local_to" type="Vector3" />
+			<description>
+				Builds a ramp between two local positions (using the heights of the positions), [member ramp_width] wide with the brush falloff on the sides. Returns the modified texel rectangle.
+			</description>
+		</method>
+		<method name="get_weight" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="offset_x" type="float" />
+			<param index="1" name="offset_z" type="float" />
+			<description>
+				Returns the weight of the brush at a normalized offset from its center ([code]-1..1[/code] on both axes), including the falloff or the alpha texture.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="alpha" type="Image" setter="set_alpha" getter="get_alpha">
+			Optional grayscale image used as the brush shape instead of the circular falloff (alpha brush).
+		</member>
+		<member name="alpha_rotation" type="float" setter="set_alpha_rotation" getter="get_alpha_rotation" default="0.0">
+			Rotation of the [member alpha] image.
+		</member>
+		<member name="erosion_iterations" type="int" setter="set_erosion_iterations" getter="get_erosion_iterations" default="4">
+			Number of iterations of [constant TOOL_EROSION] per dab.
+		</member>
+		<member name="erosion_talus" type="float" setter="set_erosion_talus" getter="get_erosion_talus" default="35.0">
+			Slope (in degrees) above which [constant TOOL_EROSION] moves material down.
+		</member>
+		<member name="falloff" type="float" setter="set_falloff" getter="get_falloff" default="0.5">
+			Fraction of the brush radius used to fade out the tool.
+		</member>
+		<member name="falloff_type" type="int" setter="set_falloff_type" getter="get_falloff_type" enum="LandscapeBrush.FalloffType" default="0">
+			Shape of the falloff.
+		</member>
+		<member name="flatten_mode" type="int" setter="set_flatten_mode" getter="get_flatten_mode" enum="LandscapeBrush.FlattenMode" default="0">
+			Whether [constant TOOL_FLATTEN] raises, lowers or does both.
+		</member>
+		<member name="invert" type="bool" setter="set_invert" getter="is_inverted" default="false">
+			Inverts the tool: lower instead of raise, erase instead of paint.
+		</member>
+		<member name="layer" type="int" setter="set_layer" getter="get_layer" default="0">
+			The material layer painted by the paint tools.
+		</member>
+		<member name="noise_scale" type="float" setter="set_noise_scale" getter="get_noise_scale" default="10.0">
+			Size in meters of the noise features of [constant TOOL_NOISE] and [constant TOOL_PAINT_NOISE].
+		</member>
+		<member name="noise_seed" type="int" setter="set_noise_seed" getter="get_noise_seed" default="0">
+			Seed of the noise.
+		</member>
+		<member name="ramp_width" type="float" setter="set_ramp_width" getter="get_ramp_width" default="10.0">
+			Width in meters of the ramps built by [method apply_ramp].
+		</member>
+		<member name="size" type="float" setter="set_size" getter="get_size" default="20.0">
+			Radius of the brush in meters.
+		</member>
+		<member name="smooth_radius" type="int" setter="set_smooth_radius" getter="get_smooth_radius" default="2">
+			Kernel radius in texels of the smooth tools.
+		</member>
+		<member name="strength" type="float" setter="set_strength" getter="get_strength" default="0.3">
+			Strength of the tool.
+		</member>
+		<member name="target_height" type="float" setter="set_target_height" getter="get_target_height" default="0.0">
+			Height targeted by [constant TOOL_FLATTEN], in local space.
+		</member>
+		<member name="target_weight" type="float" setter="set_target_weight" getter="get_target_weight" default="1.0">
+			Weight targeted by [constant TOOL_PAINT] and [constant TOOL_PAINT_FLATTEN].
+		</member>
+		<member name="terrace_height" type="float" setter="set_terrace_height" getter="get_terrace_height" default="4.0">
+			Height of the steps of [constant TOOL_TERRACE].
+		</member>
+		<member name="tool" type="int" setter="set_tool" getter="get_tool" enum="LandscapeBrush.Tool" default="0">
+			The tool applied by [method apply].
+		</member>
+	</members>
+	<constants>
+		<constant name="TOOL_SCULPT" value="0" enum="Tool">
+			Raises (or lowers when inverted) the terrain.
+		</constant>
+		<constant name="TOOL_SMOOTH" value="1" enum="Tool">
+			Smooths the heights.
+		</constant>
+		<constant name="TOOL_FLATTEN" value="2" enum="Tool">
+			Flattens the terrain towards [member target_height].
+		</constant>
+		<constant name="TOOL_RAMP" value="3" enum="Tool">
+			Builds a ramp, see [method apply_ramp].
+		</constant>
+		<constant name="TOOL_NOISE" value="4" enum="Tool">
+			Adds procedural noise to the heights.
+		</constant>
+		<constant name="TOOL_EROSION" value="5" enum="Tool">
+			Thermal erosion: material slides down the slopes steeper than [member erosion_talus].
+		</constant>
+		<constant name="TOOL_TERRACE" value="6" enum="Tool">
+			Creates terraces of [member terrace_height].
+		</constant>
+		<constant name="TOOL_PAINT" value="7" enum="Tool">
+			Paints (or erases when inverted) [member layer].
+		</constant>
+		<constant name="TOOL_PAINT_SMOOTH" value="8" enum="Tool">
+			Smooths the layer weights.
+		</constant>
+		<constant name="TOOL_PAINT_FLATTEN" value="9" enum="Tool">
+			Sets the weight of [member layer] to [member target_weight].
+		</constant>
+		<constant name="TOOL_PAINT_NOISE" value="10" enum="Tool">
+			Paints [member layer] modulated by noise.
+		</constant>
+		<constant name="TOOL_MAX" value="11" enum="Tool">
+			Represents the size of the [enum Tool] enum.
+		</constant>
+		<constant name="FALLOFF_SMOOTH" value="0" enum="FalloffType">
+			Smooth (cubic) falloff.
+		</constant>
+		<constant name="FALLOFF_LINEAR" value="1" enum="FalloffType">
+			Linear falloff.
+		</constant>
+		<constant name="FALLOFF_SPHERICAL" value="2" enum="FalloffType">
+			Spherical falloff, round top with a sharp border.
+		</constant>
+		<constant name="FALLOFF_TIP" value="3" enum="FalloffType">
+			Sharp tip falloff.
+		</constant>
+		<constant name="FLATTEN_BOTH" value="0" enum="FlattenMode">
+			Raises and lowers the terrain.
+		</constant>
+		<constant name="FLATTEN_RAISE" value="1" enum="FlattenMode">
+			Only raises the terrain.
+		</constant>
+		<constant name="FLATTEN_LOWER" value="2" enum="FlattenMode">
+			Only lowers the terrain.
+		</constant>
+	</constants>
+</class>
