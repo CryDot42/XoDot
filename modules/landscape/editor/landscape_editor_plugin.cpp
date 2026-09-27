@@ -252,11 +252,43 @@ void LandscapeEditor::_update_info() {
 	const Vector2i size = ldata->get_size();
 	const Vector2 world = ldata->get_world_size();
 	const Vector2 range = ldata->get_height_range();
-	info_label->set_text(vformat(TTR("Resolution: %d x %d (%s x %s km), spacing %s m\nHeight range: %s .. %s m\nLayers: %d / %d"),
+	info_label->set_text(vformat(TTR("Resolution: %d x %d (%s x %s km), spacing %s m\nHeight range: %s .. %s m\nLayers: %d / %d\nStorage: %s"),
 			size.x, size.y, String::num(world.x / 1000.0, 2), String::num(world.y / 1000.0, 2), String::num(ldata->get_vertex_spacing(), 3),
-			String::num(range.x, 1), String::num(range.y, 1), landscape->get_layer_count(), Landscape3D::MAX_LAYERS));
+			String::num(range.x, 1), String::num(range.y, 1), landscape->get_layer_count(), Landscape3D::MAX_LAYERS,
+			ldata->is_streamed() ? TTR("streamed from the .lsdata file") : TTR("embedded (save it as .lsdata to stream it)")));
 	resize_x->set_value(size.x);
 	resize_z->set_value(size.y);
+
+	updating_debug = true;
+	debug_view->select(int(landscape->get_debug_view()));
+	freeze_lod->set_pressed(landscape->is_lod_frozen());
+	updating_debug = false;
+}
+
+void LandscapeEditor::_debug_view_selected(int p_index) {
+	if (!landscape || updating_debug) {
+		return;
+	}
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(TTR("Set Landscape Debug View"), UndoRedo::MERGE_DISABLE, landscape);
+	undo_redo->add_do_property(landscape, "debug_view", p_index);
+	undo_redo->add_undo_property(landscape, "debug_view", int(landscape->get_debug_view()));
+	undo_redo->add_do_method(this, "_update_info");
+	undo_redo->add_undo_method(this, "_update_info");
+	undo_redo->commit_action();
+}
+
+void LandscapeEditor::_freeze_lod_toggled(bool p_pressed) {
+	if (!landscape || updating_debug) {
+		return;
+	}
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(TTR("Freeze Landscape LOD"), UndoRedo::MERGE_DISABLE, landscape);
+	undo_redo->add_do_property(landscape, "freeze_lod", p_pressed);
+	undo_redo->add_undo_property(landscape, "freeze_lod", landscape->is_lod_frozen());
+	undo_redo->add_do_method(this, "_update_info");
+	undo_redo->add_undo_method(this, "_update_info");
+	undo_redo->commit_action();
 }
 
 void LandscapeEditor::_update_new_world_size(double p_value) {
@@ -435,10 +467,10 @@ void LandscapeEditor::_import_weights_file_selected(const String &p_path) {
 
 void LandscapeEditor::_create_pressed() {
 	ERR_FAIL_NULL(landscape);
-	String base = "res://landscape_data.res";
+	String base = "res://landscape_data.lsdata";
 	if (landscape->get_owner() && !landscape->get_owner()->get_scene_file_path().is_empty()) {
 		const String scene = landscape->get_owner()->get_scene_file_path();
-		base = scene.get_base_dir().path_join(scene.get_file().get_basename() + "_" + String(landscape->get_name()).to_snake_case() + ".res");
+		base = scene.get_base_dir().path_join(scene.get_file().get_basename() + "_" + String(landscape->get_name()).to_snake_case() + ".lsdata");
 	}
 	create_dialog->set_current_path(base);
 	create_dialog->popup_file_dialog();
@@ -830,6 +862,12 @@ void LandscapeEditor::_notification(int p_what) {
 				if (bool(stats["budget_exceeded"])) {
 					text += "\n" + TTR("Patch budget exceeded: increase Max Patches or the LOD Pixel Error.");
 				}
+				if (stats.has("pages_resident")) {
+					text += "\n" + vformat(TTR("Streaming: %d / %d pages resident (%d needed, %d loading), GPU pool %s MB, CPU cache %s MB (%d tiles)"), int(stats["pages_resident"]), int(stats["pages_capacity"]), int(stats["pages_desired"]), int(stats["pages_loading"]), String::num(int64_t(stats["gpu_pool_bytes"]) / 1048576.0, 0), String::num(int64_t(stats["cpu_cache_bytes"]) / 1048576.0, 0), int(stats["cpu_tiles"]));
+					if (int(stats["pages_desired"]) >= int(stats["pages_capacity"])) {
+						text += "\n" + TTR("The streaming pool is full: increase Streaming Pool Size for more detail.");
+					}
+				}
 				stats_label->set_text(text);
 				// Layers may also be edited from the inspector.
 				if (_compute_layer_hash() != layer_list_hash) {
@@ -976,6 +1014,24 @@ LandscapeEditor::LandscapeEditor() {
 		resize->set_tooltip_text(TTR("Resample heights and layers to a new resolution, keeping the world size."));
 		resize->connect(SceneStringName(pressed), callable_mp(this, &LandscapeEditor::_resize_pressed));
 		manage_panel->add_child(resize);
+
+		manage_panel->add_child(memnew(HSeparator));
+		Label *debug_title = memnew(Label(TTR("Debug")));
+		debug_title->set_theme_type_variation("HeaderSmall");
+		manage_panel->add_child(debug_title);
+		debug_view = memnew(OptionButton);
+		debug_view->add_item(TTR("Disabled"), Landscape3D::DEBUG_VIEW_DISABLED);
+		debug_view->add_item(TTR("LOD Levels"), Landscape3D::DEBUG_VIEW_LOD_LEVELS);
+		debug_view->add_item(TTR("Patches"), Landscape3D::DEBUG_VIEW_PATCHES);
+		debug_view->add_item(TTR("Normals"), Landscape3D::DEBUG_VIEW_NORMALS);
+		debug_view->add_item(TTR("Dominant Layer"), Landscape3D::DEBUG_VIEW_LAYERS);
+		debug_view->add_item(TTR("Streaming (Page Mip Levels)"), Landscape3D::DEBUG_VIEW_STREAMING);
+		debug_view->connect(SceneStringName(item_selected), callable_mp(this, &LandscapeEditor::_debug_view_selected));
+		_add_setting(manage_panel, TTR("Debug View"), debug_view, TTR("Colors the landscape by LOD level, patch, normal, dominant layer or by the mip level of the streamed pages."));
+		freeze_lod = memnew(CheckBox(TTR("Freeze LOD")));
+		freeze_lod->set_tooltip_text(TTR("Keep the current LOD selection and streamed pages while moving the camera, to inspect them."));
+		freeze_lod->connect(SceneStringName(toggled), callable_mp(this, &LandscapeEditor::_freeze_lod_toggled));
+		manage_panel->add_child(freeze_lod);
 	}
 
 	/* Sculpt */
@@ -1138,7 +1194,8 @@ LandscapeEditor::LandscapeEditor() {
 	create_dialog = memnew(EditorFileDialog);
 	create_dialog->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
 	create_dialog->set_access(EditorFileDialog::ACCESS_RESOURCES);
-	create_dialog->add_filter("*.res", TTR("Binary Resource"));
+	create_dialog->add_filter("*.lsdata", TTR("Landscape Data (streamed)"));
+	create_dialog->add_filter("*.res", TTR("Binary Resource (loaded entirely)"));
 	create_dialog->set_title(TTR("Save Landscape Data As..."));
 	create_dialog->connect("file_selected", callable_mp(this, &LandscapeEditor::_create_file_selected));
 	add_child(create_dialog);

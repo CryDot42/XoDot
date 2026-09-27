@@ -34,6 +34,7 @@
 #include "landscape_gpu.h"
 #include "landscape_layer.h"
 #include "landscape_lod_tree.h"
+#include "landscape_streamer.h"
 
 #include "core/templates/hash_map.h"
 #include "scene/3d/node_3d.h"
@@ -50,6 +51,9 @@ class TriangleMesh;
 // straight into an indirect MultiMesh (no CPU readback). The patch vertex shader stitches
 // LOD transitions and optionally subdivides below the heightmap resolution to add micro
 // detail displacement from the painted material layers.
+//
+// The terrain data is streamed: only the pages (tiles of the data mip levels) needed by the
+// current view are resident on the GPU, in a pool of fixed size (see LandscapeStreamer).
 class Landscape3D : public Node3D {
 	GDCLASS(Landscape3D, Node3D);
 
@@ -63,6 +67,7 @@ public:
 		DEBUG_VIEW_PATCHES,
 		DEBUG_VIEW_NORMALS,
 		DEBUG_VIEW_LAYERS,
+		DEBUG_VIEW_STREAMING,
 	};
 
 	typedef Camera3D *(*EditorCameraCallback)();
@@ -81,6 +86,8 @@ private:
 	int micro_detail_levels = 2;
 	float displacement_scale = 1.0;
 	int max_patches = 16384;
+	int streaming_pool_size = 256; // MB.
+	float texture_lod_bias = 0.5;
 	float shadow_lod_bias = 1.0;
 	float shadow_distance = 0.0;
 	NodePath lod_camera_path;
@@ -105,10 +112,11 @@ private:
 	RID multimeshes[2];
 	RID instances[2];
 	RID material;
-	RID height_texture;
-	RID normal_texture;
-	RID weights_textures[LandscapeData::MAX_WEIGHTMAPS];
-	RID holes_texture;
+	RID page_heights_texture;
+	RID page_normals_texture;
+	RID page_weights_textures[LandscapeData::MAX_WEIGHTMAPS];
+	RID page_holes_texture;
+	RID page_table_texture;
 	bool gpu_holes = false;
 	Ref<Texture2DArray> albedo_height_array;
 	Ref<Texture2DArray> normal_roughness_array;
@@ -117,11 +125,12 @@ private:
 
 #ifdef RD_ENABLED
 	LandscapeGPU *gpu = nullptr;
+	LandscapeStreamer streamer;
 #endif
 	bool rendering_supported = false;
 
 	// CPU state.
-	LandscapeLodTree lod_tree;
+	const LandscapeLodTree *_get_tree() const;
 	int micro_levels_in_use = 0;
 	int max_level_in_use = 0;
 	float micro_amplitude = 0.0;
@@ -181,10 +190,8 @@ private:
 	void _frame_pre_draw();
 	void _process_pending_changes();
 	void _full_update();
-	void _upload_heights(const Rect2i &p_rect);
-	void _upload_weights(const Rect2i &p_rect);
-	void _upload_holes(const Rect2i &p_rect);
 	void _upload_bounds(const LocalVector<LandscapeLodTree::Range> &p_ranges);
+	void _page_region_changed(const Rect2i &p_rect);
 	void _update_layer_params();
 	void _rebuild_layer_textures();
 	void _update_lod();
@@ -195,7 +202,7 @@ private:
 	void _clear_collision();
 	void _update_collision();
 	void _mark_collision_dirty(const Rect2i &p_rect);
-	void _build_collision_tile(const Vector2i &p_tile, CollisionTile &r_tile);
+	bool _build_collision_tile(const Vector2i &p_tile, CollisionTile &r_tile);
 
 	void _set_layers_bind(const TypedArray<LandscapeLayer> &p_layers);
 	TypedArray<LandscapeLayer> _get_layers_bind() const;
@@ -229,6 +236,10 @@ public:
 	float get_displacement_scale() const { return displacement_scale; }
 	void set_max_patches(int p_count);
 	int get_max_patches() const { return max_patches; }
+	void set_streaming_pool_size(int p_megabytes);
+	int get_streaming_pool_size() const { return streaming_pool_size; }
+	void set_texture_lod_bias(float p_bias);
+	float get_texture_lod_bias() const { return texture_lod_bias; }
 	void set_shadow_lod_bias(float p_bias);
 	float get_shadow_lod_bias() const { return shadow_lod_bias; }
 	void set_shadow_distance(float p_distance);
@@ -283,6 +294,10 @@ public:
 	PackedStringArray get_configuration_warnings() const override;
 
 	static void cleanup_shared_resources();
+
+#ifdef RD_ENABLED
+	void _page_built(LandscapeStreamer::BuildJob *p_job);
+#endif
 
 	Landscape3D();
 	~Landscape3D();

@@ -38,15 +38,22 @@ shader_type spatial;
 render_mode depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
 
 group_uniforms landscape_system;
-uniform highp sampler2D ls_heightmap : filter_nearest, repeat_disable;
-uniform sampler2D ls_normalmap : filter_linear_mipmap_anisotropic, repeat_disable;
+// Streamed terrain data: pages of PAGE_SIZE + 1 texels (see LandscapeGPU) addressed by the page table.
+uniform highp sampler2D ls_page_table : filter_nearest, repeat_disable;
+uniform highp sampler2DArray ls_page_heights : filter_nearest, repeat_disable;
+uniform sampler2DArray ls_page_normals : filter_linear, repeat_disable;
 uniform bool ls_normal_rg = false; // Normal X/Z in RG (true) or in RA (false).
-uniform sampler2D ls_weightmap_0 : filter_linear_mipmap, repeat_disable;
-uniform sampler2D ls_weightmap_1 : filter_linear_mipmap, repeat_disable;
-uniform sampler2D ls_weightmap_2 : filter_linear_mipmap, repeat_disable;
-uniform sampler2D ls_weightmap_3 : filter_linear_mipmap, repeat_disable;
-uniform sampler2D ls_holes : filter_linear, repeat_disable;
+uniform sampler2DArray ls_page_weights_0 : filter_linear, repeat_disable;
+uniform sampler2DArray ls_page_weights_1 : filter_linear, repeat_disable;
+uniform sampler2DArray ls_page_weights_2 : filter_linear, repeat_disable;
+uniform sampler2DArray ls_page_weights_3 : filter_linear, repeat_disable;
+uniform sampler2DArray ls_page_holes : filter_linear, repeat_disable;
 uniform bool ls_holes_enabled = false;
+uniform int ls_page_rows[16]; // First page table row of each mip level.
+uniform int ls_page_cols[16]; // Tile count of each mip level.
+uniform int ls_page_row_count[16];
+uniform int ls_root_mip = 0;
+uniform float ls_texture_lod_bias = 0.5;
 uniform sampler2DArray ls_albedo_height : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2DArray ls_normal_roughness : filter_linear_mipmap_anisotropic, repeat_enable;
 
@@ -77,34 +84,10 @@ varying vec3 v_local;
 varying flat int v_level;
 varying flat vec2 v_patch;
 
-float ls_texel_height(int p_x, int p_z) {
-	return texelFetch(ls_heightmap, ivec2(clamp(p_x, 0, ls_size.x - 1), clamp(p_z, 0, ls_size.y - 1)), 0).r;
-}
-
-// Height at a grid position expressed in micro units (1 texel = 2^micro_levels units).
-float ls_grid_height(ivec2 p_grid) {
-	int m = ls_micro_levels;
-	int tx = p_grid.x >> m;
-	int tz = p_grid.y >> m;
-	int mask = (1 << m) - 1;
-	int fx = p_grid.x & mask;
-	int fz = p_grid.y & mask;
-	float h00 = ls_texel_height(tx, tz);
-	if (fx == 0 && fz == 0) {
-		return h00;
-	}
-	float inv = 1.0 / float(1 << m);
-	float h10 = ls_texel_height(tx + 1, tz);
-	float h01 = ls_texel_height(tx, tz + 1);
-	float h11 = ls_texel_height(tx + 1, tz + 1);
-	float ax = float(fx) * inv;
-	float az = float(fz) * inv;
-	return mix(mix(h00, h10, ax), mix(h01, h11, ax), az);
-}
-
-vec2 ls_heightmap_uv(vec2 p_local_xz) {
-	return (p_local_xz / ls_spacing + 0.5) / vec2(ls_size);
-}
+const int LS_PAGE_SHIFT = 7;
+const int LS_PAGE_SIZE = 128;
+const float LS_PAGE_TEXELS = 129.0;
+const int LS_SLOT_BITS = 12;
 
 vec3 ls_decode_normal(vec4 p_color) {
 	// The normal map stores X and Z, Y is always positive on a height field.
@@ -112,27 +95,135 @@ vec3 ls_decode_normal(vec4 p_color) {
 	return normalize(vec3(xz.x, sqrt(max(1.0 - dot(xz, xz), 0.0)), xz.y));
 }
 
-// Weights of the layers [4 * index, 4 * index + 3]. The index is uniform in all callers.
-vec4 ls_weights(int p_index, vec2 p_uv) {
-	if (p_index == 0) {
-		return texture(ls_weightmap_0, p_uv);
-	} else if (p_index == 1) {
-		return texture(ls_weightmap_1, p_uv);
-	} else if (p_index == 2) {
-		return texture(ls_weightmap_2, p_uv);
+int ls_page_entry(int p_mip, ivec2 p_tile) {
+	if (p_tile.x < 0 || p_tile.y < 0 || p_tile.x >= ls_page_cols[p_mip] || p_tile.y >= ls_page_row_count[p_mip]) {
+		return -1;
 	}
-	return texture(ls_weightmap_3, p_uv);
+	return int(texelFetch(ls_page_table, ivec2(p_tile.x, ls_page_rows[p_mip] + p_tile.y), 0).r);
 }
 
-vec4 ls_weights_lod(int p_index, vec2 p_uv) {
-	if (p_index == 0) {
-		return textureLod(ls_weightmap_0, p_uv, 0.0);
-	} else if (p_index == 1) {
-		return textureLod(ls_weightmap_1, p_uv, 0.0);
-	} else if (p_index == 2) {
-		return textureLod(ls_weightmap_2, p_uv, 0.0);
+ivec2 ls_mip_last(int p_mip) {
+	return (ls_size + ivec2((1 << p_mip) - 2)) >> ivec2(p_mip);
+}
+
+// Slot of the resident page of mip p_mip holding the texel p_texel (in texels of that mip), or -1.
+// Texels on the first row/column of a tile are also stored in the border of the previous tile.
+int ls_find_page(int p_mip, ivec2 p_texel, bool p_border_x, bool p_border_z, out ivec2 r_local) {
+	ivec2 tile = p_texel >> ivec2(LS_PAGE_SHIFT);
+	r_local = p_texel - (tile << ivec2(LS_PAGE_SHIFT));
+	int entry = ls_page_entry(p_mip, tile);
+	if (entry >= 0 && (entry >> LS_SLOT_BITS) == p_mip) {
+		return entry & ((1 << LS_SLOT_BITS) - 1);
 	}
-	return textureLod(ls_weightmap_3, p_uv, 0.0);
+	bool bx = p_border_x && r_local.x == 0 && tile.x > 0;
+	bool bz = p_border_z && r_local.y == 0 && tile.y > 0;
+	if (bx) {
+		entry = ls_page_entry(p_mip, tile - ivec2(1, 0));
+		if (entry >= 0 && (entry >> LS_SLOT_BITS) == p_mip) {
+			r_local.x = LS_PAGE_SIZE;
+			return entry & ((1 << LS_SLOT_BITS) - 1);
+		}
+	}
+	if (bz) {
+		entry = ls_page_entry(p_mip, tile - ivec2(0, 1));
+		if (entry >= 0 && (entry >> LS_SLOT_BITS) == p_mip) {
+			r_local.y = LS_PAGE_SIZE;
+			return entry & ((1 << LS_SLOT_BITS) - 1);
+		}
+	}
+	if (bx && bz) {
+		entry = ls_page_entry(p_mip, tile - ivec2(1, 1));
+		if (entry >= 0 && (entry >> LS_SLOT_BITS) == p_mip) {
+			r_local = ivec2(LS_PAGE_SIZE);
+			return entry & ((1 << LS_SLOT_BITS) - 1);
+		}
+	}
+	return -1;
+}
+
+// Exact height (and normal) of the terrain at an integer texel (mip 0 texels, may be past the edge),
+// read from the finest resident mip level >= p_mip on which the texel is a vertex. Every mip level
+// stores exact heights, so vertices shared by patches of different levels always match.
+float ls_texel_height(ivec2 p_texel, int p_mip, out vec3 r_normal) {
+	r_normal = vec3(0.0, 1.0, 0.0);
+	for (int m = p_mip; m <= ls_root_mip; m++) {
+		if (((p_texel.x | p_texel.y) & ((1 << m) - 1)) != 0) {
+			continue; // Not a vertex of this mip level.
+		}
+		ivec2 local;
+		int slot = ls_find_page(m, min(p_texel >> ivec2(m), ls_mip_last(m)), true, true, local);
+		if (slot >= 0) {
+			r_normal = ls_decode_normal(texelFetch(ls_page_normals, ivec3(local, slot), 0));
+			return texelFetch(ls_page_heights, ivec3(local, slot), 0).r;
+		}
+	}
+	return 0.0;
+}
+
+// Height at a grid position expressed in micro units (1 texel = 2^micro_levels units).
+float ls_grid_height(ivec2 p_grid, int p_mip, out vec3 r_normal) {
+	int m = ls_micro_levels;
+	ivec2 t = p_grid >> ivec2(m);
+	ivec2 f = p_grid & ivec2((1 << m) - 1);
+	if (f.x == 0 && f.y == 0) {
+		return ls_texel_height(t, p_mip, r_normal);
+	}
+	// Below the heightmap resolution: bilinear interpolation of the mip 0 page.
+	ivec2 local;
+	int slot = ls_find_page(0, min(t, ls_size - 1), f.x == 0, f.y == 0, local);
+	if (slot < 0) {
+		return ls_texel_height(t, 0, r_normal);
+	}
+	vec2 a = vec2(f) / float(1 << m);
+	ivec2 l1 = min(local + 1, ivec2(LS_PAGE_SIZE));
+	float h00 = texelFetch(ls_page_heights, ivec3(local, slot), 0).r;
+	float h10 = texelFetch(ls_page_heights, ivec3(l1.x, local.y, slot), 0).r;
+	float h01 = texelFetch(ls_page_heights, ivec3(local.x, l1.y, slot), 0).r;
+	float h11 = texelFetch(ls_page_heights, ivec3(l1, slot), 0).r;
+	r_normal = ls_decode_normal(textureLod(ls_page_normals, vec3((vec2(local) + a + 0.5) / LS_PAGE_TEXELS, float(slot)), 0.0));
+	return mix(mix(h00, h10, a.x), mix(h01, h11, a.x), a.y);
+}
+
+// Sampling coordinates in the mip 0 page holding a position (mip 0 texels), if resident.
+bool ls_mip0_page(vec2 p_t0, out vec3 r_uv) {
+	vec2 t = clamp(p_t0, vec2(0.0), vec2(ls_size - 1));
+	ivec2 ti = ivec2(floor(t));
+	vec2 f = t - vec2(ti);
+	ivec2 local;
+	int slot = ls_find_page(0, ti, f.x == 0.0, f.y == 0.0, local);
+	if (slot < 0) {
+		return false;
+	}
+	r_uv = vec3((vec2(local) + f + 0.5) / LS_PAGE_TEXELS, float(slot));
+	return true;
+}
+
+// Sampling coordinates in the finest resident page of mip p_mip or coarser (virtual texturing).
+vec3 ls_page_uv(vec2 p_t0, int p_mip, out int r_mip) {
+	vec2 t0 = clamp(p_t0, vec2(0.0), vec2(ls_size - 1));
+	int m = clamp(p_mip, 0, ls_root_mip);
+	int entry = ls_page_entry(m, ivec2(floor(t0 / float(1 << m))) >> ivec2(LS_PAGE_SHIFT));
+	if (entry < 0) {
+		r_mip = -1;
+		return vec3(0.0);
+	}
+	r_mip = entry >> LS_SLOT_BITS;
+	vec2 tm = t0 / float(1 << r_mip);
+	ivec2 tile = ivec2(floor(tm)) >> ivec2(LS_PAGE_SHIFT);
+	vec2 local = tm - vec2(tile << ivec2(LS_PAGE_SHIFT));
+	return vec3((local + 0.5) / LS_PAGE_TEXELS, float(entry & ((1 << LS_SLOT_BITS) - 1)));
+}
+
+// Weights of the layers [4 * index, 4 * index + 3]. The index is uniform in all callers.
+vec4 ls_weights(int p_index, vec3 p_uv) {
+	if (p_index == 0) {
+		return textureLod(ls_page_weights_0, p_uv, 0.0);
+	} else if (p_index == 1) {
+		return textureLod(ls_page_weights_1, p_uv, 0.0);
+	} else if (p_index == 2) {
+		return textureLod(ls_page_weights_2, p_uv, 0.0);
+	}
+	return textureLod(ls_page_weights_3, p_uv, 0.0);
 }
 
 vec2 ls_layer_coords(int p_layer, vec2 p_pos) {
@@ -141,10 +232,10 @@ vec2 ls_layer_coords(int p_layer, vec2 p_pos) {
 	return vec2(uv.x * uvp.y - uv.y * uvp.z, uv.x * uvp.z + uv.y * uvp.y);
 }
 
-float ls_displacement(vec3 p_pos, vec2 p_hm_uv, float p_dist) {
+float ls_displacement(vec3 p_pos, vec3 p_uv, float p_dist) {
 	float total = 0.0;
 	for (int w = 0; w < ls_weightmap_count; w++) {
-		vec4 weights = ls_weights_lod(w, p_hm_uv);
+		vec4 weights = ls_weights(w, p_uv);
 		for (int c = 0; c < 4; c++) {
 			int layer = w * 4 + c;
 			float weight = weights[c];
@@ -164,19 +255,19 @@ float ls_displacement(vec3 p_pos, vec2 p_hm_uv, float p_dist) {
 
 // Local position of a grid vertex. Only depends on the grid position (and the LOD camera),
 // which guarantees that vertices shared between patches are bit-exact.
-vec3 ls_grid_position(ivec2 p_grid) {
+vec3 ls_grid_position(ivec2 p_grid, int p_mip, out vec3 r_normal) {
 	int scale = 1 << ls_micro_levels;
 	ivec2 max_units = (ls_size - ivec2(1)) * scale;
 	ivec2 g = clamp(p_grid, ivec2(0), max_units);
 	float unit = ls_spacing / float(scale);
-	vec3 p = vec3(float(g.x) * unit, ls_grid_height(g), float(g.y) * unit);
+	vec3 p = vec3(float(g.x) * unit, ls_grid_height(max(p_grid, ivec2(0)), p_mip, r_normal), float(g.y) * unit);
 	if (ls_micro_params.y > 0.0) {
 		float dist = distance(p, ls_lod_camera);
 		float fade = 1.0 - smoothstep(ls_micro_params.x, ls_micro_params.y, dist);
-		if (fade > 0.0) {
-			vec2 hm_uv = ls_heightmap_uv(p.xz);
-			vec3 n = ls_decode_normal(textureLod(ls_normalmap, hm_uv, 0.0));
-			p += n * (ls_displacement(p, hm_uv, dist) * fade);
+		vec3 uv;
+		if (fade > 0.0 && ls_mip0_page(p.xz / ls_spacing, uv)) {
+			vec3 n = ls_decode_normal(textureLod(ls_page_normals, uv, 0.0));
+			p += n * (ls_displacement(p, uv, dist) * fade);
 		}
 	}
 	return p;
@@ -190,6 +281,8 @@ void vertex() {
 	int edges = int(INSTANCE_CUSTOM.w);
 	int grid_step = 1 << (ls_max_level - level);
 	ivec2 g = origin + vi * grid_step;
+	// Mip level of the heights of this patch.
+	int mip = max(ls_max_level - ls_micro_levels - level, 0);
 
 	// Stitch edges shared with coarser neighbors. Edge vertices either collapse onto the
 	// coarse grid, or (for very large LOD differences) are interpolated along the coarse edge.
@@ -235,14 +328,17 @@ void vertex() {
 		}
 	}
 
-	vec3 p = ls_grid_position(ga);
+	vec3 vertex_normal;
+	vec3 p = ls_grid_position(ga, mip, vertex_normal);
 	if (t > 0.0) {
-		p = mix(p, ls_grid_position(gb), t);
+		vec3 normal_b;
+		p = mix(p, ls_grid_position(gb, mip, normal_b), t);
+		vertex_normal = normalize(mix(vertex_normal, normal_b, t));
 	}
 
 	VERTEX = p;
-	NORMAL = ls_decode_normal(textureLod(ls_normalmap, ls_heightmap_uv(p.xz), 0.0));
-	UV = ls_heightmap_uv(p.xz);
+	NORMAL = vertex_normal;
+	UV = p.xz / (ls_spacing * vec2(max(ls_size - 1, ivec2(1))));
 	v_local = p;
 	v_level = level;
 	v_patch = vec2(origin) / float(n << (ls_max_level - level));
@@ -311,20 +407,25 @@ vec3 ls_debug_color(int p_index) {
 
 void fragment() {
 	vec3 p = v_local;
-	vec2 hm_uv = ls_heightmap_uv(p.xz);
+	// Virtual texturing: pick the page mip level matching the screen footprint of a texel.
+	vec2 t0 = p.xz / ls_spacing;
+	float footprint = max(length(dFdx(t0)), length(dFdy(t0)));
+	int page_mip;
+	vec3 page_uv = ls_page_uv(t0, int(floor(log2(max(footprint, 1e-6)) + ls_texture_lod_bias)), page_mip);
+	bool has_page = page_mip >= 0;
 #ifdef LS_HOLES
-	if (ls_holes_enabled && texture(ls_holes, hm_uv).r > 0.5) {
+	if (has_page && ls_holes_enabled && textureLod(ls_page_holes, page_uv, 0.0).r > 0.5) {
 		discard; // Visibility tool (holes).
 	}
 #endif
-	vec3 terrain_normal = ls_decode_normal(texture(ls_normalmap, hm_uv));
+	vec3 terrain_normal = has_page ? ls_decode_normal(textureLod(ls_page_normals, page_uv, 0.0)) : vec3(0.0, 1.0, 0.0);
 
 	// Select the four most important layers of this pixel.
 	int ids[4] = int[](0, 0, 0, 0);
 	float weights[4] = float[](0.0, 0.0, 0.0, 0.0);
 	float total = 0.0;
-	for (int w = 0; w < ls_weightmap_count; w++) {
-		vec4 wm = ls_weights(w, hm_uv);
+	for (int w = 0; w < (has_page ? ls_weightmap_count : 0); w++) {
+		vec4 wm = ls_weights(w, page_uv);
 		for (int c = 0; c < 4; c++) {
 			int layer = w * 4 + c;
 			float weight = wm[c];
@@ -390,6 +491,9 @@ void fragment() {
 		normal = terrain_normal;
 	} else if (ls_debug_view == 4) {
 		albedo = ls_debug_color(ids[0]) * (0.5 + 0.5 * weights[0]);
+	} else if (ls_debug_view == 5) {
+		// Streaming: mip level of the resident page used for shading.
+		albedo = page_mip < 0 ? vec3(1.0, 0.0, 1.0) : ls_debug_color(page_mip + 3);
 	}
 
 	// Editor brush preview.

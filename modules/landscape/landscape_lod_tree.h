@@ -34,7 +34,7 @@
 #include "core/math/vector2.h"
 #include "core/templates/local_vector.h"
 
-class LandscapeData;
+class LandscapeStorage;
 
 // CPU-side quadtree used by the GPU traversal for screen-space error (SSE) LOD selection.
 //
@@ -43,6 +43,10 @@ class LandscapeData;
 // Every node stores (min height, max height, geometric error, unused) where the
 // geometric error is the maximum vertical deviation between the node mesh and
 // the finer representation of the terrain (monotonic: never smaller than any child error).
+//
+// A node of level l is rendered with the heights of mip level (max_level - l) of the storage,
+// its error is measured against the samples of the next finer mip level, so building
+// and updating the tree only reads the storage tiles it needs.
 class LandscapeLodTree {
 public:
 	static constexpr int MAX_LEVELS = 16;
@@ -61,38 +65,47 @@ private:
 	LocalVector<float> nodes;
 	uint32_t level_offsets[MAX_LEVELS + 1] = {};
 
+	// Heights of a region of one mip level.
+	struct Samples {
+		int mip = 0;
+		Rect2i rect;
+		LocalVector<float> heights;
+		_FORCE_INLINE_ float get(int p_x, int p_z) const { return heights[(p_z - rect.position.y) * rect.size.x + (p_x - rect.position.x)]; }
+	};
+
 	struct BuildContext {
-		const float *heights = nullptr;
+		const Samples *samples = nullptr;
 		int level = 0;
 		int x_begin = 0;
 		int x_end = 0;
 		int z_begin = 0;
 	};
 
-	_FORCE_INLINE_ float _h(const float *p_heights, int p_x, int p_z) const {
-		p_x = CLAMP(p_x, 0, data_size.x - 1);
-		p_z = CLAMP(p_z, 0, data_size.y - 1);
-		return p_heights[p_z * data_size.x + p_x];
-	}
 	_FORCE_INLINE_ float *_node(int p_level, int p_x, int p_z) {
 		return &nodes[(level_offsets[p_level] + uint32_t(p_z) * (1u << p_level) + uint32_t(p_x)) * FLOATS_PER_NODE];
 	}
 
-	void _compute_node(const float *p_heights, int p_level, int p_x, int p_z);
+	void _setup(const Vector2i &p_data_size, int p_patch_quads);
+	void _compute_node(const Samples &p_samples, int p_level, int p_x, int p_z);
 	void _compute_row(uint32_t p_index, BuildContext *p_context);
-	void _compute_level(const float *p_heights, int p_level, const Rect2i &p_nodes, bool p_threaded);
+	void _compute_level(LandscapeStorage &p_storage, int p_level, const Rect2i &p_nodes);
 
 public:
 	static int compute_max_level(const Vector2i &p_data_size, int p_patch_quads);
 
-	void build(const LandscapeData *p_data, int p_patch_quads);
-	void update(const LandscapeData *p_data, const Rect2i &p_texel_rect, LocalVector<Range> *r_ranges);
+	void build(LandscapeStorage &p_storage, int p_patch_quads);
+	void update(LandscapeStorage &p_storage, const Rect2i &p_texel_rect, LocalVector<Range> *r_ranges = nullptr);
+	// Node ranges (one per level) affected by a change of the given texels.
+	void get_ranges(const Rect2i &p_texel_rect, LocalVector<Range> &r_ranges) const;
+	// Restores a tree saved with get_nodes(). Returns false if the nodes don't match the layout.
+	bool set_nodes(const Vector2i &p_data_size, int p_patch_quads, const LocalVector<float> &p_nodes);
 	void clear();
 
 	bool is_valid() const { return !nodes.is_empty(); }
 	int get_patch_quads() const { return patch_quads; }
 	int get_max_level() const { return max_level; }
 	int get_root_quads() const { return root_quads; }
+	Vector2i get_data_size() const { return data_size; }
 	uint32_t get_level_offset(int p_level) const { return level_offsets[CLAMP(p_level, 0, MAX_LEVELS)]; }
 	uint32_t get_node_count() const { return level_offsets[max_level + 1]; }
 	const LocalVector<float> &get_nodes() const { return nodes; }

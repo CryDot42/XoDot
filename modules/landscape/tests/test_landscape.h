@@ -34,7 +34,12 @@
 #include "../landscape_data.h"
 #include "../landscape_lod_tree.h"
 
+#include "core/io/dir_access.h"
+#include "core/io/resource_loader.h"
 #include "tests/test_macros.h"
+#include "tests/test_utils.h"
+
+#include "modules/streaming/world_streaming.h"
 
 namespace TestLandscape {
 
@@ -152,7 +157,7 @@ TEST_CASE("[Landscape][LandscapeData] Holes") {
 TEST_CASE("[Landscape][LandscapeLodTree] Bounds and monotonic error") {
 	Ref<LandscapeData> data = make_data(129, 0.0);
 	LandscapeLodTree tree;
-	tree.build(data.ptr(), 16);
+	tree.build(data->get_storage(), 16);
 	REQUIRE(tree.is_valid());
 	CHECK(tree.get_max_level() == 3); // 16 << 3 = 128 quads.
 	CHECK(tree.get_root_quads() == 128);
@@ -162,7 +167,7 @@ TEST_CASE("[Landscape][LandscapeLodTree] Bounds and monotonic error") {
 	// A single spike creates an error in every ancestor of the leaf containing it.
 	data->set_height(37, 41, 8.0);
 	LocalVector<LandscapeLodTree::Range> ranges;
-	tree.update(data.ptr(), Rect2i(37, 41, 1, 1), &ranges);
+	tree.update(data->get_storage(), Rect2i(37, 41, 1, 1), &ranges);
 	CHECK(ranges.size() == 4); // One range per level.
 	CHECK(tree.get_height_range().is_equal_approx(Vector2(0.0, 8.0)));
 	CHECK(tree.get_root_error() == doctest::Approx(8.0));
@@ -207,7 +212,7 @@ TEST_CASE("[Landscape][LandscapeLodTree] Non power of two sizes") {
 	data.instantiate();
 	data->create(Vector2i(100, 40), 2.0, 3.0);
 	LandscapeLodTree tree;
-	tree.build(data.ptr(), 32);
+	tree.build(data->get_storage(), 32);
 	REQUIRE(tree.is_valid());
 	CHECK(tree.get_root_quads() >= 99);
 	CHECK(tree.get_height_range().is_equal_approx(Vector2(3.0, 3.0)));
@@ -276,6 +281,148 @@ TEST_CASE("[Landscape][LandscapeBrush] Ramp") {
 	CHECK(data->get_height(60, 64) == doctest::Approx(20.0));
 	CHECK(data->get_height(100, 64) == doctest::Approx(40.0));
 	CHECK(data->get_height(60, 100) == doctest::Approx(0.0)); // Outside of the ramp.
+}
+
+TEST_CASE("[Landscape][LandscapeStorage] Mip levels hold exact heights and filtered weights") {
+	Ref<LandscapeData> data;
+	data.instantiate();
+	data->create(Vector2i(300, 201), 1.0, 0.0);
+	for (int z = 0; z < 201; z++) {
+		for (int x = 0; x < 300; x++) {
+			data->set_height(x, z, float((x * 7 + z * 13) % 31));
+		}
+	}
+	data->notify_region_changed(Rect2i(0, 0, 300, 201), LandscapeData::CHANGED_HEIGHTS);
+
+	LandscapeStorage &storage = data->get_storage();
+	CHECK(storage.get_domain() == 512);
+	CHECK(storage.get_mip_count() == 7); // 512 -> 8 texels.
+	for (int m = 1; m < storage.get_mip_count(); m++) {
+		const Vector2i last = storage.get_mip_last(m);
+		CHECK(last == Vector2i((299 + (1 << m) - 1) >> m, (200 + (1 << m) - 1) >> m));
+		bool exact = true;
+		for (int z = 0; z <= last.y; z += 3) {
+			for (int x = 0; x <= last.x; x += 5) {
+				// Mip m texel i is the mip 0 texel min(i << m, size - 1).
+				exact = exact && storage.get_mip_height(m, x, z) == data->get_height(MIN(x << m, 299), MIN(z << m, 200));
+			}
+		}
+		CHECK_MESSAGE(exact, vformat("Mip %d heights must be exact.", m));
+	}
+
+	// Filtered weights stay normalized.
+	data->fill_layer(2);
+	uint8_t w[4];
+	storage.read_region(LandscapeStorage::LAYER_WEIGHTS_0, 3, Rect2i(5, 5, 1, 1), w);
+	CHECK(w[2] == 255);
+	CHECK(w[0] == 0);
+}
+
+TEST_CASE("[Landscape][LandscapeStorage] Streamed file round trip and eviction") {
+	const String path = TestUtils::get_temp_path("landscape_roundtrip.lsdata");
+	{
+		Ref<LandscapeData> data;
+		data.instantiate();
+		data->create(Vector2i(1025, 1025), 2.0, 5.0);
+		data->ensure_layer_capacity(8);
+		data->set_height(700, 300, 42.0);
+		data->set_layer_weight(10, 1000, 6, 1.0);
+		data->set_hole(512, 512, true);
+		data->notify_region_changed(Rect2i(0, 0, 1025, 1025), LandscapeData::CHANGED_ALL);
+		CHECK(data->get_lod_tree(32) != nullptr);
+		CHECK(data->save_to_file(path) == OK);
+		CHECK(data->is_streamed());
+		CHECK_FALSE(data->has_unsaved_changes());
+	}
+
+	Ref<LandscapeData> loaded;
+	loaded.instantiate();
+	REQUIRE(loaded->load_from_file(path) == OK);
+	CHECK(loaded->get_size() == Vector2i(1025, 1025));
+	CHECK(loaded->get_vertex_spacing() == doctest::Approx(2.0));
+	CHECK(loaded->get_weightmap_count() == 2);
+	CHECK(loaded->get_memory_usage() == 0); // Nothing is loaded until needed.
+	CHECK(loaded->get_height(700, 300) == doctest::Approx(42.0));
+	CHECK(loaded->get_height(0, 0) == doctest::Approx(5.0));
+	CHECK(loaded->get_layer_weight(10, 1000, 6) == doctest::Approx(1.0));
+	CHECK(loaded->has_holes());
+	CHECK(loaded->is_hole(512, 512));
+	CHECK_FALSE(loaded->is_hole(100, 100));
+	CHECK(loaded->get_height_range().is_equal_approx(Vector2(5.0, 42.0)));
+
+	// The saved LOD tree matches a rebuilt one.
+	const LandscapeLodTree *tree = loaded->get_lod_tree(32);
+	REQUIRE(tree != nullptr);
+	LandscapeLodTree rebuilt;
+	rebuilt.build(loaded->get_storage(), 32);
+	CHECK(rebuilt.get_nodes().size() == tree->get_nodes().size());
+	CHECK(memcmp(rebuilt.get_nodes().ptr(), tree->get_nodes().ptr(), tree->get_nodes().size() * sizeof(float)) == 0);
+
+	// Modify every tile with a tiny cache: modified tiles are spilled to the overlay file.
+	LandscapeStorage &storage = loaded->get_storage();
+	storage.set_memory_budget(0); // Clamped to the minimum budget.
+	for (int z = 0; z < 1025; z += 64) {
+		for (int x = 0; x < 1025; x += 64) {
+			loaded->set_height(x, z, float(x + z));
+		}
+		storage.trim();
+	}
+	CHECK(storage.get_memory_usage() <= storage.get_memory_budget());
+	CHECK(loaded->has_unsaved_changes());
+	bool values = true;
+	for (int z = 0; z < 1025; z += 64) {
+		for (int x = 0; x < 1025; x += 64) {
+			values = values && loaded->get_height(x, z) == float(x + z);
+		}
+	}
+	CHECK(values);
+	CHECK(loaded->get_height(700, 300) == doctest::Approx(42.0));
+
+	// Saving over the file being streamed.
+	CHECK(loaded->save_to_file(path) == OK);
+	Ref<LandscapeData> reloaded;
+	reloaded.instantiate();
+	REQUIRE(reloaded->load_from_file(path) == OK);
+	CHECK(reloaded->get_height(128, 64) == doctest::Approx(192.0));
+	CHECK(reloaded->get_height(700, 300) == doctest::Approx(42.0));
+	CHECK(reloaded->is_hole(512, 512));
+
+	DirAccess::remove_absolute(path);
+}
+
+class TestLandscapeJob : public StreamingJob {
+public:
+	int value = 0;
+	bool finished = false;
+
+protected:
+	void run() override { value = 42; }
+	void finish() override { finished = true; }
+};
+
+TEST_CASE("[Landscape][WorldStreaming] Jobs") {
+	WorldStreaming *ws = WorldStreaming::get_singleton();
+	if (!ws) {
+		return;
+	}
+	Ref<TestLandscapeJob> job;
+	job.instantiate();
+	ws->submit(job, 1.0);
+	ws->wait(job);
+	CHECK(job->value == 42);
+	CHECK(job->finished);
+	CHECK(job->get_state() == StreamingJob::STATE_FINISHED);
+
+	Ref<TestLandscapeJob> cancelled;
+	cancelled.instantiate();
+	ws->cancel(cancelled); // Not submitted: nothing happens.
+	CHECK_FALSE(cancelled->finished);
+
+	ws->set_pool_limit("Test Pool", 100);
+	ws->add_pool_usage("Test Pool", 150);
+	CHECK(ws->is_pool_over_limit("Test Pool"));
+	ws->add_pool_usage("Test Pool", -150);
+	CHECK_FALSE(ws->is_pool_over_limit("Test Pool"));
 }
 
 } // namespace TestLandscape

@@ -84,6 +84,18 @@
 				Returns the weight ([code]0..1[/code]) of [param layer] at the given texel.
 			</description>
 		</method>
+		<method name="get_loaded_tile_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of storage tiles currently loaded in memory.
+			</description>
+		</method>
+		<method name="get_memory_usage" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the memory used by the loaded tiles, in bytes. It is kept below [member ProjectSettings.rendering/landscape/streaming/cpu_cache_size_mb] by evicting the least recently used tiles.
+			</description>
+		</method>
 		<method name="get_region" qualifiers="const">
 			<return type="Dictionary" />
 			<param index="0" name="rect" type="Rect2i" />
@@ -118,6 +130,12 @@
 				Returns [code]true[/code] if the hole mask is allocated (holes were painted at least once).
 			</description>
 		</method>
+		<method name="has_unsaved_changes" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the data was modified since it was loaded or saved.
+			</description>
+		</method>
 		<method name="import_heightmap">
 			<return type="int" enum="Error" />
 			<param index="0" name="path" type="String" />
@@ -144,10 +162,23 @@
 				Returns [code]true[/code] if the given texel is a hole.
 			</description>
 		</method>
+		<method name="is_streamed" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the data is backed by a [code].lsdata[/code] file: the tiles are then loaded on demand.
+			</description>
+		</method>
 		<method name="is_valid" qualifiers="const">
 			<return type="bool" />
 			<description>
 				Returns [code]true[/code] if the data has been created.
+			</description>
+		</method>
+		<method name="load_from_file">
+			<return type="int" enum="Error" />
+			<param index="0" name="path" type="String" />
+			<description>
+				Loads a [code].lsdata[/code] file. Only the header is read, the tiles are streamed when they are needed. Loading the file with [method @GDScript.load] or [ResourceLoader] does the same.
 			</description>
 		</method>
 		<method name="notify_region_changed">
@@ -186,6 +217,13 @@
 			<param index="1" name="local_z" type="float" />
 			<description>
 				Returns the normal at a position in local space.
+			</description>
+		</method>
+		<method name="save_to_file">
+			<return type="int" enum="Error" />
+			<param index="0" name="path" type="String" />
+			<description>
+				Saves the data to a [code].lsdata[/code] file (tiles of every mip level, compressed, plus the LOD tree), which then backs the data. Saving the resource with [ResourceSaver] to a [code].lsdata[/code] path does the same. The file being streamed can be overwritten.
 			</description>
 		</method>
 		<method name="set_height">
@@ -253,6 +291,12 @@
 			<param index="1" name="image" type="Image" />
 			<description>
 				Replaces the weightmap [param index] with an image (resampled to the current resolution).
+			</description>
+		</method>
+		<method name="trim_memory">
+			<return type="void" />
+			<description>
+				Evicts tiles until the memory usage is within the budget. This happens automatically after edits and every frame for landscapes being rendered.
 			</description>
 		</method>
 	</methods>

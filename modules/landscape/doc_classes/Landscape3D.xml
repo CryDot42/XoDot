@@ -192,6 +192,12 @@
 		<member name="shadow_lod_bias" type="float" setter="set_shadow_lod_bias" getter="get_shadow_lod_bias" default="1.0">
 			Multiplier of [member lod_pixel_error] used to select the patches drawn in the shadow passes. Larger values reduce the cost of shadows at the expense of accuracy.
 		</member>
+		<member name="streaming_pool_size" type="int" setter="set_streaming_pool_size" getter="get_streaming_pool_size" default="256">
+			Size in megabytes of the GPU pool holding the streamed pages of the landscape data (heights, normals, weights and holes). A larger pool keeps more detail resident around and away from the camera, see [method get_statistics]. For 16 layers, a page uses about 380 KB.
+		</member>
+		<member name="texture_lod_bias" type="float" setter="set_texture_lod_bias" getter="get_texture_lod_bias" default="0.5">
+			Bias of the mip level of the streamed pages used for shading (normals and layer weights). Higher values use coarser data (less memory, blurrier layer transitions in the distance), lower values finer data.
+		</member>
 	</members>
 	<constants>
 		<constant name="DEBUG_VIEW_DISABLED" value="0" enum="DebugView">
@@ -208,6 +214,9 @@
 		</constant>
 		<constant name="DEBUG_VIEW_LAYERS" value="4" enum="DebugView">
 			Colors the terrain by dominant material layer.
+		</constant>
+		<constant name="DEBUG_VIEW_STREAMING" value="5" enum="DebugView">
+			Colors the landscape by the mip level of the streamed page used for shading (magenta when no page is resident yet).
 		</constant>
 		<constant name="MAX_LAYERS" value="16">
 			Maximum number of material layers.

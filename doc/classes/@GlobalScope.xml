@@ -1675,6 +1675,9 @@
 		<member name="WorkerThreadPool" type="WorkerThreadPool" setter="" getter="">
 			The [WorkerThreadPool] singleton.
 		</member>
+		<member name="WorldStreaming" type="WorldStreaming" setter="" getter="">
+			The [WorldStreaming] singleton.
+		</member>
 		<member name="XRServer" type="XRServer" setter="" getter="">
 			The [XRServer] singleton.
 		</member>

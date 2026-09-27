@@ -10,6 +10,8 @@
 // current level is frustum culled, its screen-space error (SSE) is evaluated and the
 // node is either split (four children appended to the next level list) or emitted as a
 // patch instance straight into the MultiMesh buffer used by the indirect draw.
+// A node is only split when the pages holding the heights of its children are resident
+// (streamed in), so every emitted patch can read exact heights.
 //
 // MODE_STITCH runs after the traversal: it finds the LOD of the neighbors of every
 // emitted patch (using the split bits written during traversal) so that the vertex
@@ -32,6 +34,8 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	uvec4 flags; // x = frustum culling enabled.
 	uvec4 bounds_offsets[4]; // Node offset of each level in the bounds buffer.
 	uvec4 split_offsets[4]; // Word offset of each level in the split bit buffer.
+	uvec4 page_rows[4]; // First row of each mip level in the page table.
+	uvec4 page_tiles[4]; // Tile count of each mip level (x | y << 16).
 }
 params;
 
@@ -74,6 +78,39 @@ layout(set = 0, binding = 6, std430) restrict writeonly buffer Instances {
 	vec4 data[];
 }
 instances;
+
+layout(set = 0, binding = 8, r32f) uniform restrict readonly image2D page_table;
+
+#define PAGE_SHIFT 7u
+#define PAGE_SLOT_BITS 12
+
+// True if the page of the given mip level holding the texel (in texels of that mip) is resident.
+bool is_page_resident(uint p_mip, uvec2 p_texel) {
+	uvec2 tile = p_texel >> PAGE_SHIFT;
+	uint tiles = params.page_tiles[p_mip >> 2u][p_mip & 3u];
+	if (tile.x >= (tiles & 0xFFFFu) || tile.y >= (tiles >> 16u)) {
+		return true; // Outside of the landscape, such nodes are skipped anyway.
+	}
+	uint row = params.page_rows[p_mip >> 2u][p_mip & 3u] + tile.y;
+	int entry = int(imageLoad(page_table, ivec2(tile.x, row)).r);
+	return entry >= 0 && (entry >> PAGE_SLOT_BITS) == int(p_mip);
+}
+
+bool children_resident(uvec2 p_node, uint p_level) {
+	uint heightmap_level = params.grid.y;
+	uint child_level = p_level + 1u;
+	if (child_level > heightmap_level) {
+		return true; // Micro levels reuse the mip 0 page of their heightmap level ancestor.
+	}
+	uint mip = heightmap_level - child_level;
+	for (uint c = 0u; c < 4u; c++) {
+		uvec2 child = p_node * 2u + uvec2(c & 1u, c >> 1u);
+		if (!is_page_resident(mip, child * params.grid.x)) {
+			return false;
+		}
+	}
+	return true;
+}
 
 layout(push_constant, std430) uniform PushConstant {
 	uint level;
@@ -157,7 +194,7 @@ void main() {
 	}
 
 	float sse = params.lod.w > 0.5 ? error * params.camera.w : error * params.camera.w / max(dist, 1e-4);
-	if (level < max_level && sse > params.lod.x) {
+	if (level < max_level && sse > params.lod.x && children_resident(node, level)) {
 		uint base = atomicAdd(counters.data[level + 1u], 4u);
 		uint list_offset = (level + 1u) * capacity;
 		if (base + 4u <= capacity) {

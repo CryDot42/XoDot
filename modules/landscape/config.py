@@ -1,4 +1,5 @@
 def can_build(env, platform):
+    env.module_add_dependencies("landscape", ["streaming"])
     return not env["disable_3d"]
 
 

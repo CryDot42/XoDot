@@ -48,11 +48,12 @@
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
 
+#include "modules/streaming/world_streaming.h"
+
 Landscape3D::EditorCameraCallback Landscape3D::editor_camera_callback = nullptr;
 Ref<Shader> Landscape3D::builtin_shader;
 Ref<Shader> Landscape3D::builtin_shader_holes;
 
-static constexpr int UPLOAD_CHUNK = 1024;
 static constexpr int MAX_DIRTY_RECTS = 16;
 
 static void _landscape_add_dirty_rect(LocalVector<Rect2i> &r_rects, const Rect2i &p_rect) {
@@ -97,12 +98,13 @@ void Landscape3D::_create_render_resources() {
 #endif
 
 	material = rs->material_create();
-	height_texture = rs->texture_2d_placeholder_create();
-	normal_texture = rs->texture_2d_placeholder_create();
-	for (RID &weights : weights_textures) {
-		weights = rs->texture_2d_placeholder_create();
+	page_heights_texture = rs->texture_2d_layered_placeholder_create(RSE::TEXTURE_LAYERED_2D_ARRAY);
+	page_normals_texture = rs->texture_2d_layered_placeholder_create(RSE::TEXTURE_LAYERED_2D_ARRAY);
+	for (RID &weights : page_weights_textures) {
+		weights = rs->texture_2d_layered_placeholder_create(RSE::TEXTURE_LAYERED_2D_ARRAY);
 	}
-	holes_texture = rs->texture_2d_placeholder_create();
+	page_holes_texture = rs->texture_2d_layered_placeholder_create(RSE::TEXTURE_LAYERED_2D_ARRAY);
+	page_table_texture = rs->texture_2d_placeholder_create();
 	albedo_height_array.instantiate();
 	normal_roughness_array.instantiate();
 
@@ -142,7 +144,7 @@ void Landscape3D::_free_render_resources() {
 		rs->free_rid(material);
 		material = RID();
 	}
-	RID *textures[] = { &height_texture, &normal_texture, &holes_texture, &weights_textures[0], &weights_textures[1], &weights_textures[2], &weights_textures[3] };
+	RID *textures[] = { &page_heights_texture, &page_normals_texture, &page_holes_texture, &page_table_texture, &page_weights_textures[0], &page_weights_textures[1], &page_weights_textures[2], &page_weights_textures[3] };
 	for (RID *texture : textures) {
 		if (texture->is_valid()) {
 			rs->free_rid(*texture);
@@ -153,6 +155,7 @@ void Landscape3D::_free_render_resources() {
 	normal_roughness_array.unref();
 
 #ifdef RD_ENABLED
+	streamer.clear();
 	if (gpu) {
 		// The GPU resources must be released on the rendering thread, after the textures above.
 		rs->call_on_render_thread(callable_mp_static(&LandscapeGPU::destroy).bind(gpu));
@@ -268,12 +271,14 @@ void Landscape3D::_update_material_shader() {
 	}
 	rs->material_set_shader(material, shader->get_rid());
 
-	rs->material_set_param(material, "ls_heightmap", height_texture);
-	rs->material_set_param(material, "ls_normalmap", normal_texture);
+	rs->material_set_param(material, "ls_page_table", page_table_texture);
+	rs->material_set_param(material, "ls_page_heights", page_heights_texture);
+	rs->material_set_param(material, "ls_page_normals", page_normals_texture);
 	for (int i = 0; i < LandscapeData::MAX_WEIGHTMAPS; i++) {
-		rs->material_set_param(material, vformat("ls_weightmap_%d", i), weights_textures[i]);
+		rs->material_set_param(material, vformat("ls_page_weights_%d", i), page_weights_textures[i]);
 	}
-	rs->material_set_param(material, "ls_holes", holes_texture);
+	rs->material_set_param(material, "ls_page_holes", page_holes_texture);
+	rs->material_set_param(material, "ls_texture_lod_bias", texture_lod_bias);
 	rs->material_set_param(material, "ls_holes_enabled", gpu_holes);
 	rs->material_set_param(material, "ls_albedo_height", albedo_height_array->get_rid());
 	rs->material_set_param(material, "ls_normal_roughness", normal_roughness_array->get_rid());
@@ -293,7 +298,8 @@ AABB Landscape3D::_get_local_aabb() const {
 		return AABB(Vector3(), Vector3(1, 1, 1));
 	}
 	const Vector2 world_size = data->get_world_size();
-	Vector2 range = lod_tree.is_valid() ? lod_tree.get_height_range() : data->get_height_range();
+	const LandscapeLodTree *tree = _get_tree();
+	Vector2 range = tree ? tree->get_height_range() : data->get_height_range();
 	const real_t margin = micro_amplitude + 1.0;
 	return AABB(Vector3(0, range.x - margin, 0), Vector3(world_size.x, range.y - range.x + margin * 2.0, world_size.y));
 }
@@ -533,7 +539,8 @@ void Landscape3D::_update_micro_detail() {
 		micro_levels_in_use = levels;
 		lod_dirty = true;
 	}
-	max_level_in_use = lod_tree.get_max_level() + micro_levels_in_use;
+	const LandscapeLodTree *tree = _get_tree();
+	max_level_in_use = (tree ? tree->get_max_level() : 0) + micro_levels_in_use;
 	lod_dirty = true;
 }
 
@@ -579,6 +586,22 @@ void Landscape3D::set_max_patches(int p_count) {
 	}
 	max_patches = p_count;
 	_rebuild_patch_mesh();
+}
+
+void Landscape3D::set_streaming_pool_size(int p_megabytes) {
+	p_megabytes = CLAMP(p_megabytes, 16, 16384);
+	if (streaming_pool_size == p_megabytes) {
+		return;
+	}
+	streaming_pool_size = p_megabytes;
+	full_update_pending = true;
+	RenderingServerDefault::redraw_request();
+}
+
+void Landscape3D::set_texture_lod_bias(float p_bias) {
+	texture_lod_bias = CLAMP(p_bias, -2.0f, 4.0f);
+	_set_material_param("ls_texture_lod_bias", texture_lod_bias);
+	RenderingServerDefault::redraw_request();
 }
 
 void Landscape3D::set_shadow_lod_bias(float p_bias) {
@@ -633,78 +656,11 @@ void Landscape3D::_frame_pre_draw() {
 	}
 }
 
-void Landscape3D::_upload_heights(const Rect2i &p_rect) {
-#ifdef RD_ENABLED
-	if (!gpu) {
-		return;
+const LandscapeLodTree *Landscape3D::_get_tree() const {
+	if (data.is_null() || !data->is_valid()) {
+		return nullptr;
 	}
-	RenderingServer *rs = RenderingServer::get_singleton();
-	const Vector2i size = data->get_size();
-	const float *heights = data->get_heights_ptr();
-	for (int z = p_rect.position.y; z < p_rect.get_end().y; z += UPLOAD_CHUNK) {
-		for (int x = p_rect.position.x; x < p_rect.get_end().x; x += UPLOAD_CHUNK) {
-			const Rect2i chunk(x, z, MIN(UPLOAD_CHUNK, p_rect.get_end().x - x), MIN(UPLOAD_CHUNK, p_rect.get_end().y - z));
-			Vector<uint8_t> bytes;
-			bytes.resize(int64_t(chunk.size.x) * chunk.size.y * sizeof(float));
-			uint8_t *w = bytes.ptrw();
-			for (int row = 0; row < chunk.size.y; row++) {
-				memcpy(w + int64_t(row) * chunk.size.x * sizeof(float), heights + int64_t(chunk.position.y + row) * size.x + chunk.position.x, chunk.size.x * sizeof(float));
-			}
-			rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::upload_heights).bind(chunk, bytes));
-		}
-	}
-#endif
-}
-
-void Landscape3D::_upload_weights(const Rect2i &p_rect) {
-#ifdef RD_ENABLED
-	if (!gpu) {
-		return;
-	}
-	RenderingServer *rs = RenderingServer::get_singleton();
-	const Vector2i size = data->get_size();
-	for (int m = 0; m < data->get_weightmap_count(); m++) {
-		const uint8_t *weights = data->get_weightmap_ptr(m);
-		for (int z = p_rect.position.y; z < p_rect.get_end().y; z += UPLOAD_CHUNK) {
-			for (int x = p_rect.position.x; x < p_rect.get_end().x; x += UPLOAD_CHUNK) {
-				const Rect2i chunk(x, z, MIN(UPLOAD_CHUNK, p_rect.get_end().x - x), MIN(UPLOAD_CHUNK, p_rect.get_end().y - z));
-				Vector<uint8_t> bytes;
-				bytes.resize(int64_t(chunk.size.x) * chunk.size.y * 4);
-				uint8_t *w = bytes.ptrw();
-				for (int row = 0; row < chunk.size.y; row++) {
-					memcpy(w + int64_t(row) * chunk.size.x * 4, weights + (int64_t(chunk.position.y + row) * size.x + chunk.position.x) * 4, chunk.size.x * 4);
-				}
-				rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::upload_weights).bind(chunk, m, bytes));
-			}
-		}
-	}
-#endif
-}
-
-void Landscape3D::_upload_holes(const Rect2i &p_rect) {
-#ifdef RD_ENABLED
-	if (!gpu || !gpu_holes || !data->has_holes()) {
-		return;
-	}
-	RenderingServer *rs = RenderingServer::get_singleton();
-	const Vector2i size = data->get_size();
-	const uint8_t *holes = data->get_holes_ptr();
-	for (int z = p_rect.position.y; z < p_rect.get_end().y; z += UPLOAD_CHUNK) {
-		for (int x = p_rect.position.x; x < p_rect.get_end().x; x += UPLOAD_CHUNK) {
-			const Rect2i chunk(x, z, MIN(UPLOAD_CHUNK, p_rect.get_end().x - x), MIN(UPLOAD_CHUNK, p_rect.get_end().y - z));
-			Vector<uint8_t> bytes;
-			bytes.resize(int64_t(chunk.size.x) * chunk.size.y);
-			uint8_t *w = bytes.ptrw();
-			for (int row = 0; row < chunk.size.y; row++) {
-				const uint8_t *src = holes + int64_t(chunk.position.y + row) * size.x + chunk.position.x;
-				for (int i = 0; i < chunk.size.x; i++) {
-					w[int64_t(row) * chunk.size.x + i] = src[i] ? 255 : 0;
-				}
-			}
-			rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::upload_holes).bind(chunk, bytes));
-		}
-	}
-#endif
+	return data->get_lod_tree(patch_size);
 }
 
 void Landscape3D::_upload_bounds(const LocalVector<LandscapeLodTree::Range> &p_ranges) {
@@ -712,7 +668,11 @@ void Landscape3D::_upload_bounds(const LocalVector<LandscapeLodTree::Range> &p_r
 	if (!gpu) {
 		return;
 	}
-	const LocalVector<float> &nodes = lod_tree.get_nodes();
+	const LandscapeLodTree *tree = _get_tree();
+	if (!tree) {
+		return;
+	}
+	const LocalVector<float> &nodes = tree->get_nodes();
 	for (const LandscapeLodTree::Range &range : p_ranges) {
 		if (range.count == 0) {
 			continue;
@@ -731,29 +691,40 @@ void Landscape3D::_full_update() {
 	dirty_weights.clear();
 	dirty_holes.clear();
 
-	lod_tree.build(data.ptr(), patch_size);
+	const LandscapeLodTree *tree = _get_tree();
+	if (!tree || !tree->is_valid()) {
+		return;
+	}
 	if (gpu_holes != data->has_holes()) {
 		gpu_holes = data->has_holes();
 		_update_material_shader();
 	}
 	const Vector2i size = data->get_size();
-	const Rect2i full(Point2i(), size);
 
 #ifdef RD_ENABLED
 	if (gpu) {
 		RenderingServer *rs = RenderingServer::get_singleton();
+		// Pool of pages: as many as fit in the budget, within the texture array limits.
+		const int weightmaps = MAX(data->get_weightmap_count(), 1);
+		const int64_t slot_size = LandscapeGPU::get_slot_size(weightmaps, gpu_holes);
+		int max_layers = LandscapeGPU::MAX_SLOTS;
+		if (rs->get_rendering_device()) {
+			max_layers = MIN(max_layers, int(rs->get_rendering_device()->limit_get(RD::LIMIT_MAX_TEXTURE_ARRAY_LAYERS)));
+		}
+		const int slots = CLAMP(int(int64_t(streaming_pool_size) * 1024 * 1024 / slot_size), MIN(16, max_layers), max_layers);
+
+		streamer.setup(get_instance_id(), gpu, data.ptr(), slots, tree->get_max_level());
 		Array weights_rs;
-		for (const RID &weights : weights_textures) {
+		for (const RID &weights : page_weights_textures) {
 			weights_rs.push_back(weights);
 		}
-		rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::setup_maps).bind(size, data->get_weightmap_count(), gpu_holes, height_texture, normal_texture, weights_rs, holes_texture));
+		rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::setup_pages).bind(slots, weightmaps, gpu_holes, streamer.get_table_size(), page_heights_texture, page_normals_texture, weights_rs, page_holes_texture, page_table_texture));
 		// Depending on its RD format, the normal map is exposed as RG or as luminance-alpha.
-		_set_material_param("ls_normal_rg", rs->texture_get_format(normal_texture) == Image::FORMAT_RG8);
-		_upload_heights(full);
-		_upload_weights(full);
-		_upload_holes(full);
-		rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::update_normals).bind(full, float(data->get_vertex_spacing())));
-		rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::update_weight_mips).bind(full));
+		_set_material_param("ls_normal_rg", rs->texture_get_format(page_normals_texture) == Image::FORMAT_RG8);
+		_set_material_param("ls_page_rows", streamer.get_table_rows());
+		_set_material_param("ls_page_cols", streamer.get_table_columns());
+		_set_material_param("ls_page_row_count", streamer.get_table_row_counts());
+		_set_material_param("ls_root_mip", streamer.get_root_mip());
 	}
 #endif
 
@@ -776,9 +747,29 @@ void Landscape3D::_full_update() {
 	update_gizmos();
 }
 
+void Landscape3D::_page_region_changed(const Rect2i &p_rect) {
+#ifdef RD_ENABLED
+	streamer.mark_region_changed(p_rect);
+#endif
+}
+
+#ifdef RD_ENABLED
+void Landscape3D::_page_built(LandscapeStreamer::BuildJob *p_job) {
+	streamer.page_built(p_job);
+	RenderingServerDefault::redraw_request();
+}
+#endif
+
 void Landscape3D::_process_pending_changes() {
+	if (WorldStreaming::get_singleton()) {
+		WorldStreaming::get_singleton()->process();
+	}
 	if (full_update_pending) {
 		_full_update();
+	}
+	const LandscapeLodTree *tree = _get_tree();
+	if (!tree) {
+		return;
 	}
 
 	if (layers_dirty) {
@@ -789,59 +780,47 @@ void Landscape3D::_process_pending_changes() {
 	}
 
 #ifdef RD_ENABLED
-	if (lod_resources_dirty && lod_tree.is_valid() && gpu) {
+	if (lod_resources_dirty && tree->is_valid() && gpu) {
 		lod_resources_dirty = false;
-		const int max_level = lod_tree.get_max_level() + micro_detail_levels;
-		RenderingServer::get_singleton()->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::setup_lod).bind(int(lod_tree.get_node_count()), max_patches, max_patches, max_level, multimeshes[0], multimeshes[1]));
+		const int max_level = tree->get_max_level() + micro_detail_levels;
+		RenderingServer::get_singleton()->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::setup_lod).bind(int(tree->get_node_count()), max_patches, max_patches, max_level, multimeshes[0], multimeshes[1]));
 		LocalVector<LandscapeLodTree::Range> ranges;
-		ranges.push_back({ 0, lod_tree.get_nodes().size() });
+		ranges.push_back({ 0, tree->get_nodes().size() });
 		_upload_bounds(ranges);
 		lod_dirty = true;
 	}
 #endif
 
 	if (!dirty_heights.is_empty()) {
-		const Vector2 old_range = lod_tree.get_height_range();
+		// The LOD tree was updated by the data, upload the modified nodes.
 		for (const Rect2i &rect : dirty_heights) {
 			LocalVector<LandscapeLodTree::Range> ranges;
-			lod_tree.update(data.ptr(), rect, &ranges);
+			tree->get_ranges(rect, ranges);
 			_upload_bounds(ranges);
-			_upload_heights(rect);
-#ifdef RD_ENABLED
-			if (gpu) {
-				RenderingServer::get_singleton()->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::update_normals).bind(rect, float(data->get_vertex_spacing())));
-			}
-#endif
+			_page_region_changed(rect);
 			_mark_collision_dirty(rect);
 		}
 		dirty_heights.clear();
-		if (lod_tree.get_height_range() != old_range) {
-			for (int i = 0; i < 2; i++) {
-				RenderingServer::get_singleton()->multimesh_set_custom_aabb(multimeshes[i], _get_local_aabb());
-			}
-			update_gizmos();
+		for (int i = 0; i < 2; i++) {
+			RenderingServer::get_singleton()->multimesh_set_custom_aabb(multimeshes[i], _get_local_aabb());
 		}
+		update_gizmos();
 		lod_dirty = true;
 	}
 
 	if (!dirty_weights.is_empty()) {
 		for (const Rect2i &rect : dirty_weights) {
-			_upload_weights(rect);
-#ifdef RD_ENABLED
-			if (gpu) {
-				RenderingServer::get_singleton()->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::update_weight_mips).bind(rect));
-			}
-#endif
+			_page_region_changed(rect);
 		}
 		dirty_weights.clear();
 	}
 
 	if (!dirty_holes.is_empty()) {
 		if (data->has_holes() != gpu_holes) {
-			full_update_pending = true; // The hole mask texture must be (re)allocated.
+			full_update_pending = true; // The hole pages must be (re)allocated.
 		} else {
 			for (const Rect2i &rect : dirty_holes) {
-				_upload_holes(rect);
+				_page_region_changed(rect);
 				_mark_collision_dirty(rect);
 			}
 		}
@@ -909,7 +888,8 @@ bool Landscape3D::_update_lod_camera() {
 
 void Landscape3D::_update_lod() {
 #ifdef RD_ENABLED
-	if (!gpu || !lod_tree.is_valid()) {
+	const LandscapeLodTree *tree = _get_tree();
+	if (!gpu || !tree || !tree->is_valid()) {
 		return;
 	}
 	// A frozen LOD keeps the last camera, but still follows data and setting changes.
@@ -917,11 +897,30 @@ void Landscape3D::_update_lod() {
 		return;
 	}
 
+	// Stream the pages needed by this view. A change of the resident pages changes the traversal.
+	LandscapeStreamer::Settings stream_settings;
+	stream_settings.patch_quads = patch_size;
+	stream_settings.lod_pixel_error = lod_pixel_error;
+	stream_settings.micro_amplitude = lod_camera.orthogonal ? 0.0 : micro_amplitude;
+	stream_settings.texture_lod_bias = texture_lod_bias;
+	streamer.set_settings(stream_settings);
+	LandscapeStreamer::Camera stream_camera;
+	stream_camera.position = lod_camera.position;
+	stream_camera.projection_factor = lod_camera.projection_factor;
+	stream_camera.orthogonal = lod_camera.orthogonal;
+	for (int i = 0; i < 6; i++) {
+		stream_camera.planes[i] = lod_camera.planes[i];
+	}
+	if (streamer.update(tree, stream_camera)) {
+		lod_dirty = true;
+	}
+	const bool root_resident = streamer.is_root_resident();
+
 	const real_t projection_factor = lod_camera.projection_factor;
 	const bool orthogonal = lod_camera.orthogonal;
 	const Vector3 camera_local = lod_camera.position;
 	const int micro = micro_levels_in_use;
-	const int heightmap_level = lod_tree.get_max_level();
+	const int heightmap_level = tree->get_max_level();
 	const int max_level = heightmap_level + micro;
 	const Vector2i size = data->get_size();
 
@@ -953,10 +952,11 @@ void Landscape3D::_update_lod() {
 	params.flags[0] = 1;
 	uint32_t split_offset = 0;
 	for (int l = 0; l < 16; l++) {
-		params.bounds_offsets[l] = lod_tree.get_level_offset(MIN(l, heightmap_level));
+		params.bounds_offsets[l] = tree->get_level_offset(MIN(l, heightmap_level));
 		params.split_offsets[l] = split_offset;
 		split_offset += _landscape_split_words(l);
 	}
+	streamer.get_table_layout(params.page_rows, params.page_tiles);
 
 	RenderingServer *rs = RenderingServer::get_singleton();
 	bool dispatched = false;
@@ -974,7 +974,7 @@ void Landscape3D::_update_lod() {
 		memcpy(bytes.ptrw(), &params, sizeof(LandscapeLodParams));
 		if (lod_dirty || bytes != last_lod_params[list]) {
 			last_lod_params[list] = bytes;
-			rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::run_lod).bind(list, bytes, max_level));
+			rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::run_lod).bind(list, bytes, max_level, root_resident));
 			dispatched = true;
 		}
 	}
@@ -1024,8 +1024,19 @@ Dictionary Landscape3D::get_statistics() const {
 	stats["shadow_patches"] = shadow_patches;
 	stats["triangles"] = uint64_t(patches) * patch_size * patch_size * 2;
 	stats["budget_exceeded"] = overflow != 0;
-	stats["heightmap_levels"] = lod_tree.get_max_level() + 1;
+	const LandscapeLodTree *tree = _get_tree();
+	stats["heightmap_levels"] = tree ? tree->get_max_level() + 1 : 0;
 	stats["micro_levels"] = micro_levels_in_use;
+#ifdef RD_ENABLED
+	const LandscapeStreamer::Stats stream = streamer.get_stats();
+	stats["pages_resident"] = stream.resident;
+	stats["pages_desired"] = stream.desired;
+	stats["pages_capacity"] = stream.slots;
+	stats["pages_loading"] = stream.building;
+	stats["gpu_pool_bytes"] = stream.pool_bytes;
+#endif
+	stats["cpu_cache_bytes"] = data.is_valid() ? data->get_memory_usage() : 0;
+	stats["cpu_tiles"] = data.is_valid() ? data->get_loaded_tile_count() : 0;
 	return stats;
 }
 
@@ -1064,38 +1075,59 @@ void Landscape3D::_mark_collision_dirty(const Rect2i &p_rect) {
 	collision_timer = Engine::get_singleton()->is_editor_hint() ? 0.3 : 0.0;
 }
 
-void Landscape3D::_build_collision_tile(const Vector2i &p_tile, CollisionTile &r_tile) {
+bool Landscape3D::_build_collision_tile(const Vector2i &p_tile, CollisionTile &r_tile) {
 #ifndef PHYSICS_3D_DISABLED
 	PhysicsServer3D *ps = PhysicsServer3D::get_singleton();
+	LandscapeStorage &storage = data->get_storage();
 	const Vector2i size = data->get_size();
-	const int step = 1 << collision_lod;
+	// The storage mip levels hold exact heights at a coarser resolution.
+	const int mip = MIN(collision_lod, storage.get_mip_count() - 1);
+	const int step = 1 << mip;
 	const int x0 = p_tile.x * collision_tile_size;
 	const int z0 = p_tile.y * collision_tile_size;
 	const int x1 = MIN(x0 + collision_tile_size, size.x - 1);
 	const int z1 = MIN(z0 + collision_tile_size, size.y - 1);
 	const int width = (x1 - x0 + step - 1) / step + 1;
 	const int depth = (z1 - z0 + step - 1) / step + 1;
+	const Rect2i rect(x0 >> mip, z0 >> mip, width, depth);
+	const bool cut_holes = data->has_holes() && _landscape_physics_supports_holes();
+
+	// Stream the storage tiles in first, the tile is built once they are all loaded.
+	const Vector2i last = storage.get_mip_last(mip);
+	const uint8_t mask = LandscapeStorage::MASK_HEIGHTS | (cut_holes ? LandscapeStorage::MASK_HOLES : 0);
+	bool loaded = true;
+	for (int tz = rect.position.y >> LandscapeStorage::TILE_SHIFT; tz <= MIN(rect.get_end().y - 1, last.y) >> LandscapeStorage::TILE_SHIFT; tz++) {
+		for (int tx = rect.position.x >> LandscapeStorage::TILE_SHIFT; tx <= MIN(rect.get_end().x - 1, last.x) >> LandscapeStorage::TILE_SHIFT; tx++) {
+			loaded = storage.request_tile(mip, tx, tz, mask, 100.0) != nullptr && loaded;
+		}
+	}
+	if (!loaded) {
+		return false;
+	}
+
+	LocalVector<float> source;
+	source.resize(width * depth);
+	storage.read_region(LandscapeStorage::LAYER_HEIGHTS, mip, rect, source.ptr());
+	LocalVector<uint8_t> holes;
+	if (cut_holes) {
+		holes.resize(width * depth);
+		storage.read_region(LandscapeStorage::LAYER_HOLES, mip, rect, holes.ptr());
+	}
 
 	Vector<real_t> heights;
 	heights.resize(width * depth);
 	real_t *w = heights.ptrw();
 	float min_h = Math::INF;
 	float max_h = -Math::INF;
-	const bool cut_holes = data->has_holes() && _landscape_physics_supports_holes();
-	for (int j = 0; j < depth; j++) {
-		const int z = MIN(z0 + j * step, z1);
-		for (int i = 0; i < width; i++) {
-			const int x = MIN(x0 + i * step, x1);
-			if (cut_holes && data->is_hole(x, z)) {
-				// NaN samples are holes in the Jolt height field.
-				w[j * width + i] = Math::NaN;
-				continue;
-			}
-			const float h = data->get_height_fast(x, z);
-			w[j * width + i] = h;
-			min_h = MIN(min_h, h);
-			max_h = MAX(max_h, h);
+	for (uint32_t i = 0; i < source.size(); i++) {
+		if (cut_holes && holes[i] >= 128) {
+			// NaN samples are holes in the Jolt height field.
+			w[i] = Math::NaN;
+			continue;
 		}
+		w[i] = source[i];
+		min_h = MIN(min_h, source[i]);
+		max_h = MAX(max_h, source[i]);
 	}
 
 	if (min_h > max_h) {
@@ -1134,6 +1166,9 @@ void Landscape3D::_build_collision_tile(const Vector2i &p_tile, CollisionTile &r
 	ps->body_set_state(r_tile.body, PS3DE::BODY_STATE_TRANSFORM, get_global_transform());
 	ps->body_set_space(r_tile.body, get_world_3d()->get_space());
 	r_tile.dirty = false;
+	return true;
+#else
+	return false;
 #endif // PHYSICS_3D_DISABLED
 }
 
@@ -1174,22 +1209,43 @@ void Landscape3D::_update_collision() {
 		}
 	}
 
-	// Select the tiles that should exist (all of them, or those around the LOD camera).
-	Rect2i wanted(Point2i(), tile_count);
+	// Select the tiles that should exist: all of them, or those around the streaming sources
+	// (StreamingSource3D nodes, or the LOD camera when the world has none).
+	LocalVector<Rect2i> wanted;
 	if (collision_radius > 0.0) {
-		Vector3 center;
-		Camera3D *camera = _get_lod_camera();
-		if (camera) {
-			center = global_to_local(camera->get_global_transform().origin);
+		LocalVector<Vector3> centers;
+		LocalVector<real_t> radii;
+		if (WorldStreaming::get_singleton()) {
+			for (const WorldStreaming::Source &source : WorldStreaming::get_singleton()->get_sources(get_world_3d()->get_scenario())) {
+				centers.push_back(global_to_local(source.position));
+				radii.push_back(collision_radius * source.range_scale);
+			}
+		}
+		if (centers.is_empty()) {
+			Camera3D *camera = _get_lod_camera();
+			if (camera) {
+				centers.push_back(global_to_local(camera->get_global_transform().origin));
+				radii.push_back(collision_radius);
+			}
 		}
 		const real_t tile_world = collision_tile_size * data->get_vertex_spacing();
-		const Vector2i begin = Vector2i(Math::floor((center.x - collision_radius) / tile_world), Math::floor((center.z - collision_radius) / tile_world));
-		const Vector2i end = Vector2i(Math::floor((center.x + collision_radius) / tile_world), Math::floor((center.z + collision_radius) / tile_world));
-		wanted = Rect2i(begin, end - begin + Vector2i(1, 1)).intersection(Rect2i(Point2i(), tile_count));
+		for (uint32_t i = 0; i < centers.size(); i++) {
+			const Vector3 &center = centers[i];
+			const Vector2i begin = Vector2i(Math::floor((center.x - radii[i]) / tile_world), Math::floor((center.z - radii[i]) / tile_world));
+			const Vector2i end = Vector2i(Math::floor((center.x + radii[i]) / tile_world), Math::floor((center.z + radii[i]) / tile_world));
+			const Rect2i rect = Rect2i(begin, end - begin + Vector2i(1, 1)).intersection(Rect2i(Point2i(), tile_count));
+			if (rect.has_area()) {
+				wanted.push_back(rect);
+			}
+		}
 
 		LocalVector<Vector2i> to_remove;
 		for (const KeyValue<Vector2i, CollisionTile> &kv : collision_tiles) {
-			if (!wanted.has_point(kv.key)) {
+			bool keep = false;
+			for (const Rect2i &rect : wanted) {
+				keep = keep || rect.has_point(kv.key);
+			}
+			if (!keep) {
 				to_remove.push_back(kv.key);
 			}
 		}
@@ -1200,20 +1256,27 @@ void Landscape3D::_update_collision() {
 			ps->free_rid(tile.shape);
 			collision_tiles.erase(key);
 		}
+	} else {
+		wanted.push_back(Rect2i(Point2i(), tile_count));
 	}
 
-	for (int z = wanted.position.y; z < wanted.get_end().y; z++) {
-		for (int x = wanted.position.x; x < wanted.get_end().x; x++) {
-			const Vector2i key(x, z);
-			CollisionTile *tile = collision_tiles.getptr(key);
-			if (!tile) {
-				tile = &collision_tiles.insert(key, CollisionTile())->value;
-			}
-			if (tile->dirty) {
-				_build_collision_tile(key, *tile);
+	for (const Rect2i &rect : wanted) {
+		for (int z = rect.position.y; z < rect.get_end().y; z++) {
+			for (int x = rect.position.x; x < rect.get_end().x; x++) {
+				const Vector2i key(x, z);
+				CollisionTile *tile = collision_tiles.getptr(key);
+				if (tile && !tile->dirty) {
+					continue;
+				}
+				CollisionTile new_tile = tile ? *tile : CollisionTile();
+				// Tiles only exist once their data is loaded (streamed in asynchronously).
+				if (_build_collision_tile(key, new_tile)) {
+					collision_tiles[key] = new_tile;
+				}
 			}
 		}
 	}
+	data->trim_memory();
 #endif // PHYSICS_3D_DISABLED
 }
 
@@ -1428,10 +1491,19 @@ Ref<TriangleMesh> Landscape3D::generate_selection_mesh(int p_resolution) const {
 	faces.resize(p_resolution * p_resolution * 6);
 	Vector3 *w = faces.ptrw();
 	int idx = 0;
+	// Use a coarse mip level: only a few storage tiles are read, even for huge landscapes.
+	LandscapeStorage &storage = data->get_storage();
+	const Vector2i size = data->get_size();
+	int mip = 0;
+	while (mip + 1 < storage.get_mip_count() && (MAX(size.x, size.y) >> (mip + 1)) >= p_resolution * 2) {
+		mip++;
+	}
+	const real_t mip_spacing = data->get_vertex_spacing() * real_t(1 << mip);
 	auto vertex = [&](int p_x, int p_z) {
 		const real_t lx = world_size.x * p_x / p_resolution;
 		const real_t lz = world_size.y * p_z / p_resolution;
-		return Vector3(lx, data->sample_height(lx, lz), lz);
+		const float h = storage.get_mip_height(mip, int(Math::round(lx / mip_spacing)), int(Math::round(lz / mip_spacing)));
+		return Vector3(lx, h, lz);
 	};
 	for (int z = 0; z < p_resolution; z++) {
 		for (int x = 0; x < p_resolution; x++) {
@@ -1470,6 +1542,12 @@ PackedStringArray Landscape3D::get_configuration_warnings() const {
 		warnings.push_back(RTR("No LandscapeData is assigned. Create one in the Landscape editor dock (Manage tab) or assign an existing resource."));
 	} else if (!data->is_valid()) {
 		warnings.push_back(RTR("The assigned LandscapeData is empty."));
+	}
+	if (data.is_valid() && data->is_valid() && !data->is_streamed()) {
+		const Vector2i size = data->get_size();
+		if (int64_t(size.x) * size.y > int64_t(4097) * 4097) {
+			warnings.push_back(RTR("The LandscapeData is loaded entirely in memory. Save it as a .lsdata file to stream it (only the parts needed around the camera are loaded)."));
+		}
 	}
 	if (data.is_valid() && data->is_valid() && collision_enabled && collision_radius <= 0.0) {
 		const Vector2i size = data->get_size();
@@ -1535,6 +1613,10 @@ void Landscape3D::_notification(int p_what) {
 		} break;
 
 		case NOTIFICATION_INTERNAL_PROCESS: {
+			// Completes the streaming jobs even when nothing is drawn (e.g. headless servers).
+			if (WorldStreaming::get_singleton()) {
+				WorldStreaming::get_singleton()->process();
+			}
 			_update_collision();
 		} break;
 	}
@@ -1574,6 +1656,10 @@ void Landscape3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_displacement_scale"), &Landscape3D::get_displacement_scale);
 	ClassDB::bind_method(D_METHOD("set_max_patches", "count"), &Landscape3D::set_max_patches);
 	ClassDB::bind_method(D_METHOD("get_max_patches"), &Landscape3D::get_max_patches);
+	ClassDB::bind_method(D_METHOD("set_streaming_pool_size", "megabytes"), &Landscape3D::set_streaming_pool_size);
+	ClassDB::bind_method(D_METHOD("get_streaming_pool_size"), &Landscape3D::get_streaming_pool_size);
+	ClassDB::bind_method(D_METHOD("set_texture_lod_bias", "bias"), &Landscape3D::set_texture_lod_bias);
+	ClassDB::bind_method(D_METHOD("get_texture_lod_bias"), &Landscape3D::get_texture_lod_bias);
 	ClassDB::bind_method(D_METHOD("set_shadow_lod_bias", "bias"), &Landscape3D::set_shadow_lod_bias);
 	ClassDB::bind_method(D_METHOD("get_shadow_lod_bias"), &Landscape3D::get_shadow_lod_bias);
 	ClassDB::bind_method(D_METHOD("set_shadow_distance", "distance"), &Landscape3D::set_shadow_distance);
@@ -1634,7 +1720,11 @@ void Landscape3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "shadow_distance", PROPERTY_HINT_RANGE, "0,16384,1,or_greater,suffix:m"), "set_shadow_distance", "get_shadow_distance");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "lod_camera_path", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "Camera3D"), "set_lod_camera_path", "get_lod_camera_path");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "freeze_lod"), "set_freeze_lod", "is_lod_frozen");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_view", PROPERTY_HINT_ENUM, "Disabled,LOD Levels,Patches,Normals,Layers"), "set_debug_view", "get_debug_view");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_view", PROPERTY_HINT_ENUM, "Disabled,LOD Levels,Patches,Normals,Layers,Streaming"), "set_debug_view", "get_debug_view");
+
+	ADD_GROUP("Streaming", "");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "streaming_pool_size", PROPERTY_HINT_RANGE, "16,4096,1,or_greater,suffix:MB"), "set_streaming_pool_size", "get_streaming_pool_size");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "texture_lod_bias", PROPERTY_HINT_RANGE, "-2,4,0.05"), "set_texture_lod_bias", "get_texture_lod_bias");
 
 	ADD_GROUP("Rendering", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "render_layers", PROPERTY_HINT_LAYERS_3D_RENDER), "set_render_layers", "get_render_layers");
@@ -1654,6 +1744,7 @@ void Landscape3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(DEBUG_VIEW_PATCHES);
 	BIND_ENUM_CONSTANT(DEBUG_VIEW_NORMALS);
 	BIND_ENUM_CONSTANT(DEBUG_VIEW_LAYERS);
+	BIND_ENUM_CONSTANT(DEBUG_VIEW_STREAMING);
 
 	BIND_CONSTANT(MAX_LAYERS);
 }

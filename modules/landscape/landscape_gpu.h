@@ -45,18 +45,23 @@ struct LandscapeLodParams {
 	uint32_t flags[4] = {};
 	uint32_t bounds_offsets[16] = {};
 	uint32_t split_offsets[16] = {};
+	uint32_t page_rows[16] = {}; // First row of each mip level in the page table.
+	uint32_t page_tiles[16] = {}; // Tile count of each mip level (x | y << 16).
 };
 
-static_assert(sizeof(LandscapeLodParams) == 320, "LandscapeLodParams must match the std140 layout of the LOD shader.");
+static_assert(sizeof(LandscapeLodParams) == 448, "LandscapeLodParams must match the std140 layout of the LOD shader.");
 
 #ifdef RD_ENABLED
 
 #include "servers/rendering/rendering_device.h"
 
 class LandscapeLodShaderRD;
-class LandscapeMapsShaderRD;
 
 // Owns all RenderingDevice resources of a Landscape3D.
+//
+// The terrain data is streamed into a pool of pages (texture array slots of
+// PAGE_TEXELS x PAGE_TEXELS texels: a storage tile plus a one texel border), addressed
+// through a page table (one entry per tile of every mip level, see LandscapeStorage).
 //
 // Every method (except the constructor) must be called on the rendering thread,
 // typically through RenderingServer::call_on_render_thread().
@@ -73,6 +78,14 @@ public:
 	static constexpr int MAX_LEVELS = 16;
 	static constexpr int COUNTER_COUNT = 32;
 	static constexpr int MAX_WEIGHTMAPS = 4;
+	static constexpr int PAGE_SIZE = 128;
+	static constexpr int PAGE_TEXELS = PAGE_SIZE + 1;
+	static constexpr int MAX_SLOTS = 4095;
+
+	// Page table entries: slot | (mip << 12), stored as floats. Negative when nothing is resident.
+	static constexpr int PAGE_SLOT_BITS = 12;
+
+	static int64_t get_slot_size(int p_weightmap_count, bool p_holes);
 
 private:
 	enum LodShaderMode {
@@ -81,24 +94,11 @@ private:
 		LOD_MODE_MAX,
 	};
 
-	enum MapsShaderMode {
-		MAPS_MODE_NORMALS_RG8,
-		MAPS_MODE_NORMALS_RGBA8,
-		MAPS_MODE_DOWNSAMPLE_RGBA8,
-		MAPS_MODE_DOWNSAMPLE_RG8,
-		MAPS_MODE_MAX,
-	};
-
 	struct Shared {
 		LandscapeLodShaderRD *lod_shader = nullptr;
 		RID lod_version;
 		RID lod_shaders[LOD_MODE_MAX];
 		RID lod_pipelines[LOD_MODE_MAX];
-
-		LandscapeMapsShaderRD *maps_shader = nullptr;
-		RID maps_version;
-		RID maps_shaders[MAPS_MODE_MAX];
-		RID maps_pipelines[MAPS_MODE_MAX];
 	};
 
 	static Shared *shared;
@@ -106,22 +106,22 @@ private:
 
 	bool initialized = false;
 
-	// Maps.
-	struct Maps {
-		Vector2i size;
-		int mipmaps = 1;
-		RID height; // R32F.
-		RID normal; // Normal X and Z in RG (RG8, or RGBA8 if RG8 storage isn't supported), with mipmaps.
-		RenderingDevice::DataFormat normal_format = RenderingDevice::DATA_FORMAT_R8G8_UNORM;
-		RID weights[MAX_WEIGHTMAPS]; // RGBA8 with mipmaps, 1x1 when unused.
+	// Pages.
+	struct Pages {
+		int slots = 0;
 		int weightmap_count = 0;
-		RID holes; // R8, 1x1 when the landscape has no holes.
-		bool has_holes = false;
-		LocalVector<RID> normal_views; // One per mipmap.
-		LocalVector<RID> weight_views[MAX_WEIGHTMAPS];
+		bool holes = false;
+		RID heights; // R32F array.
+		RID normals; // Normal X and Z (RG8, or RGBA8 with Z also in alpha if RG8 isn't supported).
+		RenderingDevice::DataFormat normal_format = RenderingDevice::DATA_FORMAT_R8G8_UNORM;
+		RID weights[MAX_WEIGHTMAPS]; // RGBA8 arrays, 1x1 when unused.
+		RID hole_pages; // R8 array, 1x1 when the landscape has no holes.
+		RID table; // R32F.
+		Vector2i table_size;
+		int64_t bytes = 0;
 	};
-	Maps maps;
-	bool maps_valid = false;
+	Pages pages;
+	bool pages_valid = false;
 
 	// LOD.
 	RID bounds_buffer;
@@ -143,30 +143,27 @@ private:
 	// Statistics read back asynchronously from the traversal counters.
 	SafeNumeric<uint32_t> stat_patches[LIST_MAX];
 	SafeNumeric<uint32_t> stat_overflow[LIST_MAX];
-	uint32_t stat_counter[LIST_MAX] = {};
 	void _stats_received(const Vector<uint8_t> &p_data, int p_list);
 
 	void _ensure_initialized();
-	void _free_maps(Maps &r_maps);
-	RID _create_map_texture(RenderingDevice::DataFormat p_format, const Vector2i &p_size, int p_mipmaps, bool p_storage, const String &p_name);
+	void _free_pages(Pages &r_pages);
+	RID _create_array(RenderingDevice::DataFormat p_format, int p_size, int p_layers, const String &p_name);
 	void _free_lod();
-	void _upload_rect(RID p_texture, RenderingDevice::DataFormat p_format, const Rect2i &p_rect, int p_layer, const Vector<uint8_t> &p_data);
-	void _downsample(const LocalVector<RID> &p_views, int p_view_offset, const Rect2i &p_rect, bool p_rg8);
+	void _clear_draw(int p_list);
 
 protected:
 	static void _bind_methods() {}
 
 public:
-	void setup_maps(const Vector2i &p_size, int p_weightmap_count, bool p_holes, RID p_height_rs, RID p_normal_rs, const Array &p_weights_rs, RID p_holes_rs);
-	void upload_heights(const Rect2i &p_rect, const Vector<uint8_t> &p_data);
-	void upload_weights(const Rect2i &p_rect, int p_weightmap, const Vector<uint8_t> &p_data);
-	void upload_holes(const Rect2i &p_rect, const Vector<uint8_t> &p_data);
-	void update_normals(const Rect2i &p_rect, float p_spacing);
-	void update_weight_mips(const Rect2i &p_rect);
+	void setup_pages(int p_slots, int p_weightmap_count, bool p_holes, const Vector2i &p_table_size, RID p_heights_rs, RID p_normals_rs, const Array &p_weights_rs, RID p_holes_rs, RID p_table_rs);
+	// Page data: heights (R32F) | normals (RG8) | weightmaps (RGBA8) | holes (R8, if any), PAGE_TEXELS^2 texels each.
+	void upload_page(int p_slot, const Vector<uint8_t> &p_data);
+	void upload_page_table(const Vector<uint8_t> &p_table);
 
 	void setup_lod(int p_node_count, int p_list_capacity, int p_instance_capacity, int p_max_level, RID p_multimesh_main, RID p_multimesh_shadow);
 	void upload_bounds(int p_offset, const Vector<float> &p_data);
-	void run_lod(int p_list, const Vector<uint8_t> &p_params, int p_max_level);
+	// When p_enabled is false (e.g. the root page isn't resident yet), nothing is drawn.
+	void run_lod(int p_list, const Vector<uint8_t> &p_params, int p_max_level, bool p_enabled);
 
 	void free_resources();
 	static void destroy(Object *p_gpu);

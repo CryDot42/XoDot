@@ -30,18 +30,27 @@
 
 #pragma once
 
+#include "landscape_lod_tree.h"
+#include "landscape_storage.h"
+
 #include "core/io/image.h"
 #include "core/io/resource.h"
+#include "core/io/resource_loader.h"
+#include "core/io/resource_saver.h"
 #include "core/math/rect2i.h"
 #include "core/math/vector2i.h"
+#include "core/templates/hash_map.h"
 #include "core/variant/typed_array.h"
 
 // Terrain source data: a regular grid of heights (in meters) plus up to
-// 16 weight-blended material layers stored as four RGBA8 weightmaps.
+// 16 weight-blended material layers stored as four RGBA8 weightmaps, and an optional hole mask.
 //
 // Texel (x, z) maps to the local position (x * vertex_spacing, height, z * vertex_spacing)
 // of the owning Landscape3D node, so the landscape covers
 // (size - 1) * vertex_spacing meters along each axis.
+//
+// The data lives in a tiled LandscapeStorage. Saved as a .lsdata file, it is streamed:
+// tiles are only loaded when they are needed (rendering, collision, queries, editing).
 class LandscapeData : public Resource {
 	GDCLASS(LandscapeData, Resource);
 
@@ -59,21 +68,14 @@ public:
 	};
 
 private:
-	Vector2i size;
 	real_t vertex_spacing = 1.0;
+	mutable LandscapeStorage storage;
 
-	Vector<float> heights;
-	Vector<uint8_t> weightmaps[MAX_WEIGHTMAPS];
-	int weightmap_count = 0;
-	Vector<uint8_t> holes; // Empty when there are no holes, otherwise one byte per texel.
+	mutable HashMap<int, LandscapeLodTree *> lod_trees;
+	Dictionary saved_lod_trees; // Patch size -> nodes, as loaded from the data file.
+	void _clear_lod_trees();
 
-	mutable bool height_range_dirty = true;
-	mutable Vector2 height_range;
-
-	void _allocate_weightmap(int p_index);
-	_FORCE_INLINE_ int _index(int p_x, int p_z) const { return p_z * size.x + p_x; }
-
-	// Serialization helpers.
+	// Serialization helpers (embedded resources, .lsdata files are handled by ResourceFormatLandscapeData).
 	void _set_size(const Vector2i &p_size);
 	void _set_heights(const PackedFloat32Array &p_heights);
 	PackedFloat32Array _get_heights() const;
@@ -81,6 +83,8 @@ private:
 	Array _get_weightmaps() const;
 	void _set_holes(const PackedByteArray &p_holes);
 	PackedByteArray _get_holes() const;
+
+	void _write_image_rows(int p_layer, const Vector<uint8_t> &p_data, int p_texel_size);
 
 	static Ref<Image> _load_png16(const String &p_path);
 	static Ref<Image> _load_raw16(const String &p_path);
@@ -93,30 +97,28 @@ public:
 	// Creation.
 	void create(const Vector2i &p_size, real_t p_vertex_spacing = 1.0, float p_height = 0.0);
 	void resize(const Vector2i &p_size);
-	bool is_valid() const { return size.x >= MIN_RESOLUTION && size.y >= MIN_RESOLUTION && heights.size() == size.x * size.y; }
+	bool is_valid() const { return storage.is_valid(); }
 
-	Vector2i get_size() const { return size; }
+	Vector2i get_size() const { return storage.get_size(); }
 	void set_vertex_spacing(real_t p_spacing);
 	real_t get_vertex_spacing() const { return vertex_spacing; }
 	Vector2 get_world_size() const;
 
 	// Heights.
-	_FORCE_INLINE_ float get_height_fast(int p_x, int p_z) const { return heights.ptr()[_index(p_x, p_z)]; }
 	float get_height(int p_x, int p_z) const;
 	void set_height(int p_x, int p_z, float p_height);
 	float sample_height(real_t p_local_x, real_t p_local_z) const;
 	Vector3 sample_normal(real_t p_local_x, real_t p_local_z) const;
 	Vector2 get_height_range() const;
-
-	const float *get_heights_ptr() const { return heights.ptr(); }
-	float *get_heights_ptrw() { return heights.ptrw(); }
-	const Vector<float> &get_heights_vector() const { return heights; }
+	// Bulk access to mip 0 heights (the rect must be inside the landscape for writes).
+	void read_heights(const Rect2i &p_rect, float *r_heights) const;
+	void write_heights(const Rect2i &p_rect, const float *p_heights);
 
 	// Weights (layer painting).
 	void set_weightmap_count(int p_count);
-	int get_weightmap_count() const { return weightmap_count; }
+	int get_weightmap_count() const { return storage.get_weightmap_count(); }
 	void ensure_layer_capacity(int p_layer_count);
-	int get_layer_capacity() const { return weightmap_count * 4; }
+	int get_layer_capacity() const { return get_weightmap_count() * 4; }
 
 	float get_layer_weight(int p_x, int p_z, int p_layer) const;
 	void set_layer_weight(int p_x, int p_z, int p_layer, float p_weight);
@@ -126,17 +128,10 @@ public:
 	void fill_layer(int p_layer);
 	void remove_layer(int p_layer);
 
-	const uint8_t *get_weightmap_ptr(int p_index) const;
-	uint8_t *get_weightmap_ptrw(int p_index);
-	const Vector<uint8_t> &get_weightmap_vector(int p_index) const;
-
 	// Holes (visibility), e.g. for caves.
-	bool has_holes() const { return !holes.is_empty(); }
+	bool has_holes() const { return storage.get_has_holes(); }
 	bool is_hole(int p_x, int p_z) const;
 	void set_hole(int p_x, int p_z, bool p_hole);
-	const uint8_t *get_holes_ptr() const { return holes.ptr(); }
-	uint8_t *get_holes_ptrw();
-	const Vector<uint8_t> &get_holes_vector() const { return holes; }
 	void clear_holes();
 
 	// Region snapshots (used by undo/redo and runtime scripts).
@@ -154,11 +149,45 @@ public:
 	Error import_layer_weights(int p_layer, const String &p_path);
 	void set_layer_weights_image(int p_layer, const Ref<Image> &p_image);
 
-	// Change notification. Emits `region_changed`.
+	// Change notification. Updates the derived data (mip levels, LOD trees) and emits `region_changed`.
 	void notify_region_changed(const Rect2i &p_rect, int p_flags);
 	Rect2i clip_rect(const Rect2i &p_rect) const;
 
+	// LOD tree for a patch size (built on first use, kept up to date and saved with the data).
+	const LandscapeLodTree *get_lod_tree(int p_patch_quads) const;
+
+	// Streaming.
+	LandscapeStorage &get_storage() const { return storage; }
+	Error save_to_file(const String &p_path);
+	Error load_from_file(const String &p_path);
+	bool is_streamed() const { return storage.is_file_backed(); }
+	bool has_unsaved_changes() const { return storage.has_unsaved_changes(); }
+	int64_t get_memory_usage() const { return storage.get_memory_usage(); }
+	int get_loaded_tile_count() const { return storage.get_loaded_tile_count(); }
+	void trim_memory() { storage.trim(); }
+
 	LandscapeData();
+	~LandscapeData();
 };
 
 VARIANT_ENUM_CAST(LandscapeData::ChangeFlags);
+
+// Streamed landscape data files (.lsdata).
+class ResourceFormatLoaderLandscapeData : public ResourceFormatLoader {
+	GDSOFTCLASS(ResourceFormatLoaderLandscapeData, ResourceFormatLoader);
+
+public:
+	Ref<Resource> load(const String &p_path, const String &p_original_path = "", Error *r_error = nullptr, bool p_use_sub_threads = false, float *r_progress = nullptr, CacheMode p_cache_mode = CACHE_MODE_REUSE) override;
+	void get_recognized_extensions(List<String> *p_extensions) const override;
+	bool handles_type(const String &p_type) const override;
+	String get_resource_type(const String &p_path) const override;
+};
+
+class ResourceFormatSaverLandscapeData : public ResourceFormatSaver {
+	GDSOFTCLASS(ResourceFormatSaverLandscapeData, ResourceFormatSaver);
+
+public:
+	Error save(const Ref<Resource> &p_resource, const String &p_path, uint32_t p_flags = 0) override;
+	bool recognize(const Ref<Resource> &p_resource) const override;
+	void get_recognized_extensions(const Ref<Resource> &p_resource, List<String> *p_extensions) const override;
+};

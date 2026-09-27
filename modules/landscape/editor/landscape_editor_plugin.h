@@ -108,6 +108,9 @@ private:
 	SpinBox *new_size_x = nullptr;
 	SpinBox *new_size_z = nullptr;
 	OptionButton *size_presets = nullptr;
+	OptionButton *debug_view = nullptr;
+	CheckBox *freeze_lod = nullptr;
+	bool updating_debug = false;
 	SpinBox *new_spacing = nullptr;
 	SpinBox *new_height = nullptr;
 	Label *new_world_size = nullptr;
@@ -166,6 +169,8 @@ private:
 	void _brush_size_slider_changed(double p_value);
 	void _alpha_changed(const Ref<Resource> &p_resource);
 	void _update_info();
+	void _debug_view_selected(int p_index);
+	void _freeze_lod_toggled(bool p_pressed);
 	void _update_new_world_size(double p_value = 0.0);
 	void _size_preset_selected(int p_index);
 

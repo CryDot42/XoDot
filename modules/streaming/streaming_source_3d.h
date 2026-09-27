@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  register_types.cpp                                                    */
+/*  streaming_source_3d.h                                                 */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -28,58 +28,37 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#include "register_types.h"
+#pragma once
 
-#include "landscape_3d.h"
-#include "landscape_brush.h"
-#include "landscape_data.h"
-#include "landscape_gpu.h"
-#include "landscape_layer.h"
+#ifndef _3D_DISABLED
 
-#ifdef TOOLS_ENABLED
-#include "editor/landscape_editor_plugin.h"
-#endif
+#include "scene/3d/node_3d.h"
 
-#include "core/config/project_settings.h"
-#include "core/io/resource_loader.h"
-#include "core/io/resource_saver.h"
-#include "core/object/class_db.h"
+// Marks a position around which world content (landscape data, collision, ...) is streamed in,
+// e.g. the player character or a server-side area of interest. When a world has no source,
+// streaming systems fall back to the active camera.
+class StreamingSource3D : public Node3D {
+	GDCLASS(StreamingSource3D, Node3D);
 
-static Ref<ResourceFormatLoaderLandscapeData> landscape_data_loader;
-static Ref<ResourceFormatSaverLandscapeData> landscape_data_saver;
+	bool enabled = true;
+	real_t range_scale = 1.0;
+	real_t priority = 1.0;
 
-void initialize_landscape_module(ModuleInitializationLevel p_level) {
-	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
-		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/landscape/streaming/cpu_cache_size_mb", PROPERTY_HINT_RANGE, "64,16384,1,or_greater,suffix:MB"), 512);
+	void _update_source();
 
-		GDREGISTER_CLASS(LandscapeData);
-		GDREGISTER_CLASS(LandscapeLayer);
-		GDREGISTER_CLASS(LandscapeBrush);
-		GDREGISTER_CLASS(Landscape3D);
-#ifdef RD_ENABLED
-		GDREGISTER_INTERNAL_CLASS(LandscapeGPU);
-#endif
+protected:
+	void _notification(int p_what);
+	static void _bind_methods();
 
-		landscape_data_loader.instantiate();
-		ResourceLoader::add_resource_format_loader(landscape_data_loader);
-		landscape_data_saver.instantiate();
-		ResourceSaver::add_resource_format_saver(landscape_data_saver);
-	}
-#ifdef TOOLS_ENABLED
-	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
-		GDREGISTER_INTERNAL_CLASS(LandscapeEditor);
-		GDREGISTER_INTERNAL_CLASS(LandscapeEditorPlugin);
-		EditorPlugins::add_by_type<LandscapeEditorPlugin>();
-	}
-#endif
-}
+public:
+	void set_enabled(bool p_enabled);
+	bool is_enabled() const { return enabled; }
+	void set_range_scale(real_t p_scale);
+	real_t get_range_scale() const { return range_scale; }
+	void set_priority(real_t p_priority);
+	real_t get_priority() const { return priority; }
 
-void uninitialize_landscape_module(ModuleInitializationLevel p_level) {
-	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
-		Landscape3D::cleanup_shared_resources();
-		ResourceLoader::remove_resource_format_loader(landscape_data_loader);
-		landscape_data_loader.unref();
-		ResourceSaver::remove_resource_format_saver(landscape_data_saver);
-		landscape_data_saver.unref();
-	}
-}
+	StreamingSource3D();
+};
+
+#endif // _3D_DISABLED

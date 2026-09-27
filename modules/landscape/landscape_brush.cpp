@@ -160,7 +160,6 @@ Rect2i LandscapeBrush::apply_ramp(const Ref<LandscapeData> &p_data, const Vector
 }
 
 Rect2i LandscapeBrush::_apply_heights(LandscapeData *p_data, const Vector2 &p_center, real_t p_delta, const Vector2 &p_ramp_from, const Vector2 &p_ramp_to, float p_ramp_from_height, float p_ramp_to_height) {
-	const Vector2i size_texels = p_data->get_size();
 	const real_t spacing = p_data->get_vertex_spacing();
 	const real_t radius = MAX(size / spacing, real_t(0.5));
 
@@ -184,19 +183,32 @@ Rect2i LandscapeBrush::_apply_heights(LandscapeData *p_data, const Vector2 &p_ce
 		if (invert && !p_data->has_holes()) {
 			return Rect2i();
 		}
-		uint8_t *holes = p_data->get_holes_ptrw();
+		const bool had_holes = p_data->has_holes();
+		LocalVector<uint8_t> holes;
+		holes.resize(rect.size.x * rect.size.y);
+		p_data->get_storage().read_region(LandscapeStorage::LAYER_HOLES, 0, rect, holes.ptr());
 		for (int z = rect.position.y; z < rect.get_end().y; z++) {
 			for (int x = rect.position.x; x < rect.get_end().x; x++) {
 				if (get_weight((x - p_center.x) / radius, (z - p_center.y) / radius) > 0.5f) {
-					holes[int64_t(z) * size_texels.x + x] = invert ? 0 : 1;
+					holes[(z - rect.position.y) * rect.size.x + (x - rect.position.x)] = invert ? 0 : 255;
 				}
 			}
+		}
+		p_data->get_storage().write_region(LandscapeStorage::LAYER_HOLES, rect, holes.ptr());
+		if (!had_holes) {
+			p_data->emit_changed(); // Landscapes need to allocate their hole resources.
 		}
 		p_data->notify_region_changed(rect, LandscapeData::CHANGED_HOLES);
 		return rect;
 	}
 
-	float *heights = p_data->get_heights_ptrw();
+	// Local copy of the modified texels, written back at the end.
+	LocalVector<float> heights;
+	heights.resize(rect.size.x * rect.size.y);
+	p_data->read_heights(rect, heights.ptr());
+	auto height_at = [&](int p_x, int p_z) -> float & {
+		return heights[(p_z - rect.position.y) * rect.size.x + (p_x - rect.position.x)];
+	};
 	const float sign = invert ? -1.0f : 1.0f;
 	const float rate = float(strength * p_delta);
 
@@ -206,9 +218,7 @@ Rect2i LandscapeBrush::_apply_heights(LandscapeData *p_data, const Vector2 &p_ce
 	LocalVector<float> src;
 	if (tool == TOOL_SMOOTH || tool == TOOL_EROSION) {
 		src.resize(src_rect.size.x * src_rect.size.y);
-		for (int z = 0; z < src_rect.size.y; z++) {
-			memcpy(&src[z * src_rect.size.x], heights + int64_t(src_rect.position.y + z) * size_texels.x + src_rect.position.x, sizeof(float) * src_rect.size.x);
-		}
+		p_data->read_heights(src_rect, src.ptr());
 	}
 
 	// Separable box blur for the smooth tool.
@@ -281,9 +291,10 @@ Rect2i LandscapeBrush::_apply_heights(LandscapeData *p_data, const Vector2 &p_ce
 		// Only write back the interior of the source rect (inside the brush rect).
 		for (int z = rect.position.y; z < rect.get_end().y; z++) {
 			for (int x = rect.position.x; x < rect.get_end().x; x++) {
-				heights[int64_t(z) * size_texels.x + x] = current[(z - src_rect.position.y) * w + (x - src_rect.position.x)];
+				height_at(x, z) = current[(z - src_rect.position.y) * w + (x - src_rect.position.x)];
 			}
 		}
+		p_data->write_heights(rect, heights.ptr());
 		p_data->notify_region_changed(rect, LandscapeData::CHANGED_HEIGHTS);
 		return rect;
 	}
@@ -294,7 +305,7 @@ Rect2i LandscapeBrush::_apply_heights(LandscapeData *p_data, const Vector2 &p_ce
 
 	for (int z = rect.position.y; z < rect.get_end().y; z++) {
 		for (int x = rect.position.x; x < rect.get_end().x; x++) {
-			float &h = heights[int64_t(z) * size_texels.x + x];
+			float &h = height_at(x, z);
 
 			if (tool == TOOL_RAMP) {
 				const Vector2 p(x, z);
@@ -343,6 +354,7 @@ Rect2i LandscapeBrush::_apply_heights(LandscapeData *p_data, const Vector2 &p_ce
 		}
 	}
 
+	p_data->write_heights(rect, heights.ptr());
 	p_data->notify_region_changed(rect, LandscapeData::CHANGED_HEIGHTS);
 	return rect;
 }

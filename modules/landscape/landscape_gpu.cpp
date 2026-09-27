@@ -33,27 +33,24 @@
 #include "landscape_gpu.h"
 
 #include "shaders/landscape_lod.glsl.gen.h"
-#include "shaders/landscape_maps.glsl.gen.h"
 
 #include "core/object/callable_mp.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_server.h"
 
+#include "modules/streaming/world_streaming.h"
+
 LandscapeGPU::Shared *LandscapeGPU::shared = nullptr;
 int LandscapeGPU::shared_users = 0;
-
-struct LandscapeMapsPushConstant {
-	int32_t rect_position[2];
-	int32_t rect_size[2];
-	int32_t source_size[2];
-	float spacing;
-	float pad;
-};
 
 struct LandscapeLodPushConstant {
 	uint32_t level;
 	uint32_t pad[3];
 };
+
+int64_t LandscapeGPU::get_slot_size(int p_weightmap_count, bool p_holes) {
+	return int64_t(PAGE_TEXELS) * PAGE_TEXELS * (4 + 2 + 4 * p_weightmap_count + (p_holes ? 1 : 0));
+}
 
 void LandscapeGPU::_ensure_initialized() {
 	if (initialized) {
@@ -78,22 +75,11 @@ void LandscapeGPU::_ensure_initialized() {
 		shared->lod_shaders[i] = shared->lod_shader->version_get_shader(shared->lod_version, i);
 		shared->lod_pipelines[i] = rd->compute_pipeline_create(shared->lod_shaders[i]);
 	}
-
-	Vector<String> maps_modes;
-	maps_modes.push_back("\n#define MODE_NORMALS\n#define FORMAT_RG8\n");
-	maps_modes.push_back("\n#define MODE_NORMALS\n");
-	maps_modes.push_back("\n#define MODE_DOWNSAMPLE\n");
-	maps_modes.push_back("\n#define MODE_DOWNSAMPLE\n#define FORMAT_RG8\n");
-	shared->maps_shader = memnew(LandscapeMapsShaderRD);
-	shared->maps_shader->initialize(maps_modes);
-	shared->maps_version = shared->maps_shader->version_create();
-	for (int i = 0; i < MAPS_MODE_MAX; i++) {
-		shared->maps_shaders[i] = shared->maps_shader->version_get_shader(shared->maps_version, i);
-		shared->maps_pipelines[i] = rd->compute_pipeline_create(shared->maps_shaders[i]);
-	}
 }
 
-void LandscapeGPU::_free_maps(Maps &r_maps) {
+/* Pages */
+
+void LandscapeGPU::_free_pages(Pages &r_pages) {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	auto free_rid = [rd](RID &r_rid) {
 		if (r_rid.is_valid() && rd->texture_is_valid(r_rid)) {
@@ -101,38 +87,28 @@ void LandscapeGPU::_free_maps(Maps &r_maps) {
 		}
 		r_rid = RID();
 	};
-	// Views first, then the textures owning them.
-	for (RID &view : r_maps.normal_views) {
-		free_rid(view);
+	free_rid(r_pages.heights);
+	free_rid(r_pages.normals);
+	for (RID &weights : r_pages.weights) {
+		free_rid(weights);
 	}
-	r_maps.normal_views.clear();
-	for (int i = 0; i < MAX_WEIGHTMAPS; i++) {
-		for (RID &view : r_maps.weight_views[i]) {
-			free_rid(view);
-		}
-		r_maps.weight_views[i].clear();
-		free_rid(r_maps.weights[i]);
+	free_rid(r_pages.hole_pages);
+	free_rid(r_pages.table);
+	if (r_pages.bytes != 0 && WorldStreaming::get_singleton()) {
+		WorldStreaming::get_singleton()->add_pool_usage(SNAME("Landscape GPU"), -r_pages.bytes);
 	}
-	free_rid(r_maps.height);
-	free_rid(r_maps.normal);
-	free_rid(r_maps.holes);
-	r_maps.size = Vector2i();
-	r_maps.weightmap_count = 0;
-	r_maps.has_holes = false;
+	r_pages = Pages();
 }
 
-RID LandscapeGPU::_create_map_texture(RenderingDevice::DataFormat p_format, const Vector2i &p_size, int p_mipmaps, bool p_storage, const String &p_name) {
+RID LandscapeGPU::_create_array(RenderingDevice::DataFormat p_format, int p_size, int p_layers, const String &p_name) {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	RD::TextureFormat tf;
-	tf.texture_type = RD::TEXTURE_TYPE_2D;
-	tf.width = p_size.x;
-	tf.height = p_size.y;
-	tf.mipmaps = p_mipmaps;
+	tf.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
+	tf.width = p_size;
+	tf.height = p_size;
+	tf.array_layers = p_layers;
 	tf.format = p_format;
-	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
-	if (p_storage) {
-		tf.usage_bits |= RD::TEXTURE_USAGE_STORAGE_BIT;
-	}
+	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 	if (p_format == RD::DATA_FORMAT_R8G8B8A8_UNORM) {
 		// The RenderingServer creates an sRGB view of RGBA8 textures.
 		tf.shareable_formats.push_back(RD::DATA_FORMAT_R8G8B8A8_UNORM);
@@ -141,10 +117,155 @@ RID LandscapeGPU::_create_map_texture(RenderingDevice::DataFormat p_format, cons
 	RID texture = rd->texture_create(tf, RD::TextureView());
 	if (texture.is_valid()) {
 		rd->set_resource_name(texture, p_name);
-		rd->texture_clear(texture, Color(0, 0, 0, 0), 0, p_mipmaps, 0, 1);
+		rd->texture_clear(texture, Color(0, 0, 0, 0), 0, 1, 0, p_layers);
 	}
 	return texture;
 }
+
+void LandscapeGPU::setup_pages(int p_slots, int p_weightmap_count, bool p_holes, const Vector2i &p_table_size, RID p_heights_rs, RID p_normals_rs, const Array &p_weights_rs, RID p_holes_rs, RID p_table_rs) {
+	_ensure_initialized();
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_COND(p_slots < 2 || p_slots > MAX_SLOTS);
+	ERR_FAIL_COND(p_table_size.x < 1 || p_table_size.y < 1);
+	ERR_FAIL_COND(p_weights_rs.size() != MAX_WEIGHTMAPS);
+
+	_free_pages(pages);
+	pages_valid = false;
+
+	Pages new_pages;
+	new_pages.slots = p_slots;
+	new_pages.weightmap_count = CLAMP(p_weightmap_count, 1, MAX_WEIGHTMAPS);
+	new_pages.holes = p_holes;
+	new_pages.table_size = p_table_size;
+	new_pages.normal_format = rd->texture_is_format_supported_for_usage(RD::DATA_FORMAT_R8G8_UNORM, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT) ? RD::DATA_FORMAT_R8G8_UNORM : RD::DATA_FORMAT_R8G8B8A8_UNORM;
+
+	bool ok = true;
+	new_pages.heights = _create_array(RD::DATA_FORMAT_R32_SFLOAT, PAGE_TEXELS, p_slots, "Landscape Height Pages");
+	ok = new_pages.heights.is_valid();
+	if (ok) {
+		new_pages.normals = _create_array(new_pages.normal_format, PAGE_TEXELS, p_slots, "Landscape Normal Pages");
+		ok = new_pages.normals.is_valid();
+	}
+	for (int i = 0; ok && i < MAX_WEIGHTMAPS; i++) {
+		const bool used = i < new_pages.weightmap_count;
+		// Layered RenderingServer textures need at least two layers.
+		new_pages.weights[i] = _create_array(RD::DATA_FORMAT_R8G8B8A8_UNORM, used ? PAGE_TEXELS : 1, used ? p_slots : 2, vformat("Landscape Weight Pages %d", i));
+		ok = new_pages.weights[i].is_valid();
+	}
+	if (ok) {
+		new_pages.hole_pages = _create_array(RD::DATA_FORMAT_R8_UNORM, p_holes ? PAGE_TEXELS : 1, p_holes ? p_slots : 2, "Landscape Hole Pages");
+		ok = new_pages.hole_pages.is_valid();
+	}
+	if (ok) {
+		RD::TextureFormat tf;
+		tf.texture_type = RD::TEXTURE_TYPE_2D;
+		tf.width = p_table_size.x;
+		tf.height = p_table_size.y;
+		tf.format = RD::DATA_FORMAT_R32_SFLOAT;
+		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		new_pages.table = rd->texture_create(tf, RD::TextureView());
+		ok = new_pages.table.is_valid();
+		if (ok) {
+			rd->set_resource_name(new_pages.table, "Landscape Page Table");
+			rd->texture_clear(new_pages.table, Color(-1, -1, -1, -1), 0, 1, 0, 1);
+		}
+	}
+	if (!ok) {
+		_free_pages(new_pages);
+		ERR_FAIL_MSG(vformat("Not enough GPU memory for %d landscape pages. Reduce the streaming pool size of the landscape.", p_slots));
+	}
+
+	new_pages.bytes = get_slot_size(new_pages.weightmap_count, p_holes) * p_slots + int64_t(p_table_size.x) * p_table_size.y * 4;
+	if (WorldStreaming::get_singleton()) {
+		WorldStreaming::get_singleton()->add_pool_usage(SNAME("Landscape GPU"), new_pages.bytes);
+	}
+
+	// Point the RenderingServer textures used by the material to the new RD textures.
+	RenderingServer *rs = RenderingServer::get_singleton();
+	if (p_heights_rs.is_valid()) {
+		rs->texture_replace(p_heights_rs, rs->texture_rd_create(new_pages.heights, RSE::TEXTURE_LAYERED_2D_ARRAY));
+	}
+	if (p_normals_rs.is_valid()) {
+		rs->texture_replace(p_normals_rs, rs->texture_rd_create(new_pages.normals, RSE::TEXTURE_LAYERED_2D_ARRAY));
+	}
+	for (int i = 0; i < MAX_WEIGHTMAPS; i++) {
+		const RID weights_rs = p_weights_rs[i];
+		if (weights_rs.is_valid()) {
+			rs->texture_replace(weights_rs, rs->texture_rd_create(new_pages.weights[i], RSE::TEXTURE_LAYERED_2D_ARRAY));
+		}
+	}
+	if (p_holes_rs.is_valid()) {
+		rs->texture_replace(p_holes_rs, rs->texture_rd_create(new_pages.hole_pages, RSE::TEXTURE_LAYERED_2D_ARRAY));
+	}
+	if (p_table_rs.is_valid()) {
+		rs->texture_replace(p_table_rs, rs->texture_rd_create(new_pages.table));
+	}
+
+	pages = new_pages;
+	pages_valid = true;
+}
+
+void LandscapeGPU::upload_page(int p_slot, const Vector<uint8_t> &p_data) {
+	if (!pages_valid) {
+		return;
+	}
+	ERR_FAIL_INDEX(p_slot, pages.slots);
+	constexpr int64_t texels = int64_t(PAGE_TEXELS) * PAGE_TEXELS;
+	const int64_t expected = texels * (4 + 2 + 4 * pages.weightmap_count + (pages.holes ? 1 : 0));
+	ERR_FAIL_COND(p_data.size() != expected);
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	const uint8_t *src = p_data.ptr();
+
+	auto layer = [&](int64_t p_bytes) {
+		Vector<uint8_t> data;
+		data.resize(p_bytes);
+		memcpy(data.ptrw(), src, p_bytes);
+		src += p_bytes;
+		return data;
+	};
+
+	rd->texture_update(pages.heights, p_slot, layer(texels * 4));
+	Vector<uint8_t> normals = layer(texels * 2);
+	if (pages.normal_format != RD::DATA_FORMAT_R8G8_UNORM) {
+		// RGBA8 fallback: X, Z, 0, Z (the shader decodes red and alpha, see ls_decode_normal()).
+		Vector<uint8_t> expanded;
+		expanded.resize(texels * 4);
+		uint8_t *w = expanded.ptrw();
+		const uint8_t *r = normals.ptr();
+		for (int64_t i = 0; i < texels; i++) {
+			w[i * 4 + 0] = r[i * 2 + 0];
+			w[i * 4 + 1] = r[i * 2 + 1];
+			w[i * 4 + 2] = 0;
+			w[i * 4 + 3] = r[i * 2 + 1];
+		}
+		normals = expanded;
+	}
+	rd->texture_update(pages.normals, p_slot, normals);
+	for (int i = 0; i < pages.weightmap_count; i++) {
+		rd->texture_update(pages.weights[i], p_slot, layer(texels * 4));
+	}
+	if (pages.holes) {
+		rd->texture_update(pages.hole_pages, p_slot, layer(texels));
+	}
+}
+
+void LandscapeGPU::upload_page_table(const Vector<uint8_t> &p_table) {
+	if (!pages_valid) {
+		return;
+	}
+	ERR_FAIL_COND(p_table.size() != int64_t(pages.table_size.x) * pages.table_size.y * 4);
+	RenderingDevice::get_singleton()->texture_update(pages.table, 0, p_table);
+}
+
+void LandscapeGPU::_clear_draw(int p_list) {
+	const RID command_buffer = RenderingServer::get_singleton()->multimesh_get_command_buffer_rd_rid(lists[p_list].multimesh);
+	if (command_buffer.is_valid()) {
+		const uint32_t zero = 0;
+		RenderingDevice::get_singleton()->buffer_update(command_buffer, sizeof(uint32_t), sizeof(uint32_t), &zero);
+	}
+}
+
+/* LOD */
 
 void LandscapeGPU::_free_lod() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
@@ -162,211 +283,6 @@ void LandscapeGPU::_free_lod() {
 			}
 		}
 		list = LodList();
-	}
-}
-
-void LandscapeGPU::setup_maps(const Vector2i &p_size, int p_weightmap_count, bool p_holes, RID p_height_rs, RID p_normal_rs, const Array &p_weights_rs, RID p_holes_rs) {
-	_ensure_initialized();
-	RenderingDevice *rd = RenderingDevice::get_singleton();
-	ERR_FAIL_COND(p_size.x < 2 || p_size.y < 2);
-	ERR_FAIL_COND(p_weights_rs.size() != MAX_WEIGHTMAPS);
-
-	Maps new_maps;
-	new_maps.size = p_size;
-	new_maps.mipmaps = Image::get_image_required_mipmaps(p_size.x, p_size.y, Image::FORMAT_RGBA8) + 1;
-	new_maps.weightmap_count = CLAMP(p_weightmap_count, 1, MAX_WEIGHTMAPS);
-	new_maps.has_holes = p_holes;
-	new_maps.normal_format = rd->texture_is_format_supported_for_usage(RD::DATA_FORMAT_R8G8_UNORM, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT) ? RD::DATA_FORMAT_R8G8_UNORM : RD::DATA_FORMAT_R8G8B8A8_UNORM;
-
-	bool ok = true;
-	new_maps.height = _create_map_texture(RD::DATA_FORMAT_R32_SFLOAT, p_size, 1, true, "Landscape Heightmap");
-	ok = ok && new_maps.height.is_valid();
-	if (ok) {
-		new_maps.normal = _create_map_texture(new_maps.normal_format, p_size, new_maps.mipmaps, true, "Landscape Normal Map");
-		ok = new_maps.normal.is_valid();
-	}
-	for (int i = 0; ok && i < MAX_WEIGHTMAPS; i++) {
-		// Only the weightmaps in use are allocated at full resolution.
-		const bool used = i < new_maps.weightmap_count;
-		new_maps.weights[i] = _create_map_texture(RD::DATA_FORMAT_R8G8B8A8_UNORM, used ? p_size : Vector2i(1, 1), used ? new_maps.mipmaps : 1, true, vformat("Landscape Weightmap %d", i));
-		ok = new_maps.weights[i].is_valid();
-	}
-	if (ok) {
-		new_maps.holes = _create_map_texture(RD::DATA_FORMAT_R8_UNORM, p_holes ? p_size : Vector2i(1, 1), 1, false, "Landscape Holes");
-		ok = new_maps.holes.is_valid();
-	}
-	if (!ok) {
-		_free_maps(new_maps);
-		_free_maps(maps);
-		maps_valid = false;
-		ERR_FAIL_MSG(vformat("Not enough GPU memory for a %dx%d landscape with %d weightmaps. Reduce the resolution or the number of layers.", p_size.x, p_size.y, p_weightmap_count));
-	}
-
-	for (int m = 0; m < new_maps.mipmaps; m++) {
-		new_maps.normal_views.push_back(rd->texture_create_shared_from_slice(RD::TextureView(), new_maps.normal, 0, m, 1, RD::TEXTURE_SLICE_2D));
-	}
-	for (int i = 0; i < new_maps.weightmap_count; i++) {
-		for (int m = 0; m < new_maps.mipmaps; m++) {
-			new_maps.weight_views[i].push_back(rd->texture_create_shared_from_slice(RD::TextureView(), new_maps.weights[i], 0, m, 1, RD::TEXTURE_SLICE_2D));
-		}
-	}
-	// Flat normals until the real data is uploaded.
-	rd->texture_clear(new_maps.normal, Color(0.5, 0.5, 0.0, 0.5), 0, new_maps.mipmaps, 0, 1);
-
-	// Point the RenderingServer textures used by the material to the new RD textures.
-	RenderingServer *rs = RenderingServer::get_singleton();
-	if (p_height_rs.is_valid()) {
-		rs->texture_replace(p_height_rs, rs->texture_rd_create(new_maps.height));
-	}
-	if (p_normal_rs.is_valid()) {
-		rs->texture_replace(p_normal_rs, rs->texture_rd_create(new_maps.normal));
-	}
-	for (int i = 0; i < MAX_WEIGHTMAPS; i++) {
-		const RID weights_rs = p_weights_rs[i];
-		if (weights_rs.is_valid()) {
-			rs->texture_replace(weights_rs, rs->texture_rd_create(new_maps.weights[i]));
-		}
-	}
-	if (p_holes_rs.is_valid()) {
-		rs->texture_replace(p_holes_rs, rs->texture_rd_create(new_maps.holes));
-	}
-
-	_free_maps(maps);
-	maps = std::move(new_maps);
-	maps_valid = true;
-}
-
-void LandscapeGPU::_upload_rect(RID p_texture, RenderingDevice::DataFormat p_format, const Rect2i &p_rect, int p_layer, const Vector<uint8_t> &p_data) {
-	RenderingDevice *rd = RenderingDevice::get_singleton();
-	RD::TextureFormat tf;
-	tf.texture_type = RD::TEXTURE_TYPE_2D;
-	tf.width = p_rect.size.x;
-	tf.height = p_rect.size.y;
-	tf.format = p_format;
-	tf.usage_bits = RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
-	Vector<Vector<uint8_t>> data;
-	data.push_back(p_data);
-	RID staging = rd->texture_create(tf, RD::TextureView(), data);
-	ERR_FAIL_COND(staging.is_null());
-	rd->texture_copy(staging, p_texture, Vector3(), Vector3(p_rect.position.x, p_rect.position.y, 0), Vector3(p_rect.size.x, p_rect.size.y, 1), 0, 0, 0, p_layer);
-	rd->free_rid(staging);
-}
-
-void LandscapeGPU::upload_heights(const Rect2i &p_rect, const Vector<uint8_t> &p_data) {
-	if (!maps_valid) {
-		return;
-	}
-	ERR_FAIL_COND(p_rect.intersection(Rect2i(Point2i(), maps.size)) != p_rect || !p_rect.has_area());
-	ERR_FAIL_COND(p_data.size() != int64_t(p_rect.size.x) * p_rect.size.y * 4);
-	_upload_rect(maps.height, RD::DATA_FORMAT_R32_SFLOAT, p_rect, 0, p_data);
-}
-
-void LandscapeGPU::upload_weights(const Rect2i &p_rect, int p_weightmap, const Vector<uint8_t> &p_data) {
-	if (!maps_valid) {
-		return;
-	}
-	ERR_FAIL_INDEX(p_weightmap, maps.weightmap_count);
-	ERR_FAIL_COND(p_rect.intersection(Rect2i(Point2i(), maps.size)) != p_rect || !p_rect.has_area());
-	ERR_FAIL_COND(p_data.size() != int64_t(p_rect.size.x) * p_rect.size.y * 4);
-	_upload_rect(maps.weights[p_weightmap], RD::DATA_FORMAT_R8G8B8A8_UNORM, p_rect, 0, p_data);
-}
-
-void LandscapeGPU::upload_holes(const Rect2i &p_rect, const Vector<uint8_t> &p_data) {
-	if (!maps_valid || !maps.has_holes) {
-		return;
-	}
-	ERR_FAIL_COND(p_rect.intersection(Rect2i(Point2i(), maps.size)) != p_rect || !p_rect.has_area());
-	ERR_FAIL_COND(p_data.size() != int64_t(p_rect.size.x) * p_rect.size.y);
-	_upload_rect(maps.holes, RD::DATA_FORMAT_R8_UNORM, p_rect, 0, p_data);
-}
-
-void LandscapeGPU::_downsample(const LocalVector<RID> &p_views, int p_view_offset, const Rect2i &p_rect, bool p_rg8) {
-	RenderingDevice *rd = RenderingDevice::get_singleton();
-	UniformSetCacheRD *cache = UniformSetCacheRD::get_singleton();
-	const MapsShaderMode mode = p_rg8 ? MAPS_MODE_DOWNSAMPLE_RG8 : MAPS_MODE_DOWNSAMPLE_RGBA8;
-	RID shader = shared->maps_shaders[mode];
-
-	Point2i begin = p_rect.position;
-	Point2i end = p_rect.get_end();
-	Vector2i src_size = maps.size;
-
-	RD::ComputeListID compute_list = rd->compute_list_begin();
-	rd->compute_list_bind_compute_pipeline(compute_list, shared->maps_pipelines[mode]);
-	for (int m = 1; m < maps.mipmaps; m++) {
-		const Vector2i dst_size = Vector2i(MAX(src_size.x >> 1, 1), MAX(src_size.y >> 1, 1));
-		begin = Point2i(begin.x >> 1, begin.y >> 1);
-		end = Point2i(MIN((end.x + 1) >> 1, dst_size.x), MIN((end.y + 1) >> 1, dst_size.y));
-		const Vector2i rect_size = (end - begin).maxi(1);
-
-		RD::Uniform u_src(RD::UNIFORM_TYPE_IMAGE, 0, p_views[p_view_offset + m - 1]);
-		RD::Uniform u_dst(RD::UNIFORM_TYPE_IMAGE, 1, p_views[p_view_offset + m]);
-		RID uniform_set = cache->get_cache(shader, 0, u_src, u_dst);
-
-		LandscapeMapsPushConstant push = {};
-		push.rect_position[0] = begin.x;
-		push.rect_position[1] = begin.y;
-		push.rect_size[0] = rect_size.x;
-		push.rect_size[1] = rect_size.y;
-		push.source_size[0] = src_size.x;
-		push.source_size[1] = src_size.y;
-
-		if (m > 1) {
-			rd->compute_list_add_barrier(compute_list);
-		}
-		rd->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
-		rd->compute_list_set_push_constant(compute_list, &push, sizeof(LandscapeMapsPushConstant));
-		rd->compute_list_dispatch_threads(compute_list, rect_size.x, rect_size.y, 1);
-
-		src_size = dst_size;
-	}
-	rd->compute_list_end();
-}
-
-void LandscapeGPU::update_normals(const Rect2i &p_rect, float p_spacing) {
-	if (!maps_valid) {
-		return;
-	}
-	const Rect2i rect = p_rect.grow(1).intersection(Rect2i(Point2i(), maps.size));
-	if (!rect.has_area()) {
-		return;
-	}
-	RenderingDevice *rd = RenderingDevice::get_singleton();
-	const bool rg8 = maps.normal_format == RD::DATA_FORMAT_R8G8_UNORM;
-	const MapsShaderMode mode = rg8 ? MAPS_MODE_NORMALS_RG8 : MAPS_MODE_NORMALS_RGBA8;
-	RID shader = shared->maps_shaders[mode];
-	RD::Uniform u_height(RD::UNIFORM_TYPE_IMAGE, 0, maps.height);
-	RD::Uniform u_normal(RD::UNIFORM_TYPE_IMAGE, 1, maps.normal_views[0]);
-	RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(shader, 0, u_height, u_normal);
-
-	LandscapeMapsPushConstant push = {};
-	push.rect_position[0] = rect.position.x;
-	push.rect_position[1] = rect.position.y;
-	push.rect_size[0] = rect.size.x;
-	push.rect_size[1] = rect.size.y;
-	push.source_size[0] = maps.size.x;
-	push.source_size[1] = maps.size.y;
-	push.spacing = p_spacing;
-
-	RD::ComputeListID compute_list = rd->compute_list_begin();
-	rd->compute_list_bind_compute_pipeline(compute_list, shared->maps_pipelines[mode]);
-	rd->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
-	rd->compute_list_set_push_constant(compute_list, &push, sizeof(LandscapeMapsPushConstant));
-	rd->compute_list_dispatch_threads(compute_list, rect.size.x, rect.size.y, 1);
-	rd->compute_list_end();
-
-	_downsample(maps.normal_views, 0, rect, rg8);
-}
-
-void LandscapeGPU::update_weight_mips(const Rect2i &p_rect) {
-	if (!maps_valid) {
-		return;
-	}
-	const Rect2i rect = p_rect.intersection(Rect2i(Point2i(), maps.size));
-	if (!rect.has_area()) {
-		return;
-	}
-	for (int i = 0; i < maps.weightmap_count; i++) {
-		_downsample(maps.weight_views[i], 0, rect, false);
 	}
 }
 
@@ -416,7 +332,7 @@ void LandscapeGPU::upload_bounds(int p_offset, const Vector<float> &p_data) {
 	}
 }
 
-void LandscapeGPU::run_lod(int p_list, const Vector<uint8_t> &p_params, int p_max_level) {
+void LandscapeGPU::run_lod(int p_list, const Vector<uint8_t> &p_params, int p_max_level, bool p_enabled) {
 	ERR_FAIL_INDEX(p_list, LIST_MAX);
 	ERR_FAIL_COND(p_params.size() != sizeof(LandscapeLodParams));
 	ERR_FAIL_INDEX(p_max_level, MAX_LEVELS);
@@ -433,10 +349,9 @@ void LandscapeGPU::run_lod(int p_list, const Vector<uint8_t> &p_params, int p_ma
 	}
 
 	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (!maps_valid) {
-		// Nothing valid to draw (e.g. out of GPU memory): clear the instance count of the indirect draw.
-		const uint32_t zero = 0;
-		rd->buffer_update(command_buffer, sizeof(uint32_t), sizeof(uint32_t), &zero);
+	if (!pages_valid || !p_enabled) {
+		// Nothing valid to draw (e.g. out of GPU memory or still streaming the root page).
+		_clear_draw(p_list);
 		return;
 	}
 	rd->buffer_update(list.params_buffer, 0, sizeof(LandscapeLodParams), p_params.ptr());
@@ -472,7 +387,8 @@ void LandscapeGPU::run_lod(int p_list, const Vector<uint8_t> &p_params, int p_ma
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, list.counters),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, list.args[(i + 1) % 2]),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, list.split_bits),
-				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, instance_buffer));
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, instance_buffer),
+				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, pages.table));
 	}
 	RID stitch_set = cache->get_cache(shared->lod_shaders[LOD_MODE_STITCH], 0,
 			RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, list.params_buffer),
@@ -496,10 +412,8 @@ void LandscapeGPU::run_lod(int p_list, const Vector<uint8_t> &p_params, int p_ma
 	rd->compute_list_dispatch(compute_list, (list.instance_capacity + 63) / 64, 1, 1);
 	rd->compute_list_end();
 
-	// Occasionally read back the counters (without stalling) for statistics.
-	if ((stat_counter[p_list]++ % 16) == 0) {
-		rd->buffer_get_data_async(list.counters, callable_mp(this, &LandscapeGPU::_stats_received).bind(p_list), 0, COUNTER_COUNT * sizeof(uint32_t));
-	}
+	// Read back the counters (without stalling) for statistics. The traversal only runs when the view changes.
+	rd->buffer_get_data_async(list.counters, callable_mp(this, &LandscapeGPU::_stats_received).bind(p_list), 0, COUNTER_COUNT * sizeof(uint32_t));
 }
 
 void LandscapeGPU::_stats_received(const Vector<uint8_t> &p_data, int p_list) {
@@ -516,17 +430,15 @@ void LandscapeGPU::free_resources() {
 	if (!initialized) {
 		return;
 	}
-	_free_maps(maps);
-	maps_valid = false;
+	_free_pages(pages);
+	pages_valid = false;
 	_free_lod();
 
 	initialized = false;
 	shared_users--;
 	if (shared_users == 0 && shared) {
 		shared->lod_shader->version_free(shared->lod_version);
-		shared->maps_shader->version_free(shared->maps_version);
 		memdelete(shared->lod_shader);
-		memdelete(shared->maps_shader);
 		memdelete(shared);
 		shared = nullptr;
 	}
