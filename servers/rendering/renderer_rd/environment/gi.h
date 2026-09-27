@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
 #include "servers/rendering/environment/renderer_gi.h"
@@ -44,6 +45,8 @@
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_preprocess.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/voxel_gi.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/voxel_gi_debug.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/voxel_gi_mipmap.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/voxel_gi_screen_probes.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_buffer_custom_data_rd.h"
 #include "servers/rendering/renderer_scene_render.h"
 #include "servers/rendering/rendering_device.h"
@@ -62,6 +65,9 @@ class RendererSceneRenderRD;
 namespace RendererRD {
 
 class GI : public RendererGI {
+private:
+	struct VoxelGIPushConstant;
+
 public:
 	/* VOXEL GI STORAGE */
 
@@ -74,6 +80,9 @@ public:
 		uint32_t data_buffer_size = 0;
 
 		Vector<int> level_counts;
+		// Index of the first leaf cell for each X coordinate, plus one past the last one. Leaf cells are
+		// sorted by X, so this gives the cells of any X range as one contiguous range.
+		LocalVector<uint32_t> leaf_x_offsets;
 
 		int cell_count = 0;
 
@@ -113,12 +122,17 @@ public:
 			RID uniform_set;
 			RID second_bounce_uniform_set;
 			RID write_uniform_set;
+			RID clear_uniform_set; // Region clear of this mipmap.
+			RID downsample_uniform_set; // Region downsample from the previous mipmap into this one (not on mipmap 0).
 			uint32_t level;
 			uint32_t cell_offset;
 			uint32_t cell_count;
 		};
 		Vector<Mipmap> mipmaps;
+		int octree_mipmap_count = 0; // Mipmaps matching octree levels, the others are downsampled.
 
+		// Dynamic objects are rendered from the 6 axes into an oversampled map, which is then shrunk
+		// until it matches the voxel size and plotted into mipmap 0. Maps are sized for the largest object seen.
 		struct DynamicMap {
 			RID texture; //color normally, or emission on first pass
 			RID fb_depth; //actual depth buffer for the first pass, float depth for later passes
@@ -127,12 +141,71 @@ public:
 			RID albedo; //emission buffer for the first pass
 			RID orm; //orm buffer for the first pass
 			RID fb; //used for rendering, only valid on first map
-			RID uniform_set;
+			RID uniform_set; // Lighting on the first map, shrink from the previous map on the others.
+			RID plot_uniform_set; // Shrinks this map and plots the result into mipmap 0.
 			uint32_t size;
-			int mipmap; // mipmap to write to, -1 if no mipmap assigned
 		};
 
 		Vector<DynamicMap> dynamic_maps;
+		uint32_t dynamic_map_size = 0;
+
+		struct CellBox {
+			Vector3i begin;
+			Vector3i end; // Exclusive.
+
+			_FORCE_INLINE_ bool is_empty() const { return begin.x >= end.x || begin.y >= end.y || begin.z >= end.z; }
+			_FORCE_INLINE_ bool intersects(const CellBox &p_box) const {
+				return begin.x < p_box.end.x && p_box.begin.x < end.x && begin.y < p_box.end.y && p_box.begin.y < end.y && begin.z < p_box.end.z && p_box.begin.z < end.z;
+			}
+		};
+
+		// Dynamic objects currently plotted into the texture, so only the parts that change get updated.
+		struct DynamicObject {
+			Transform3D transform;
+			AABB aabb;
+			CellBox box; // Region of mipmap 0 the object was plotted into.
+			uint64_t last_seen_frame = 0;
+			uint32_t refresh_phase = 0;
+		};
+
+		enum {
+			MAX_DYNAMIC_OVERSAMPLE_SHIFT = 4, // Objects are rendered at up to 16x the voxel resolution.
+			MIN_DYNAMIC_MAP_SIZE = 64,
+			MAX_DYNAMIC_MAP_SIZE = 2048, // Larger objects are rendered with less oversampling.
+		};
+
+		HashMap<RenderGeometryInstance *, DynamicObject> dynamic_objects;
+
+		// Anisotropic mipmaps: from mipmap 1 on, every voxel stores what is seen when traveling along each of
+		// the 6 axis directions, which keeps walls from leaking light at coarse mipmaps.
+		struct AnisoMipmap {
+			RID texture;
+			RID uniform_set; // Builds this level from the previous one (from mipmap 0 and the normal mask for the first).
+		};
+		RID aniso_texture;
+		RID aniso_normal_mask; // Directions each static voxel of mipmap 0 faces.
+		Vector<AnisoMipmap> aniso_mipmaps;
+		int aniso_slab_axis = 0; // The 6 directions are stored side by side along this axis.
+
+		// Amortized static light updates, see _update_static_light().
+		enum StaticBounce {
+			STATIC_BOUNCE_NONE,
+			STATIC_BOUNCE_SECOND, // One extra bounce on top of direct light (VoxelGIData.use_two_bounces).
+			STATIC_BOUNCE_FEEDBACK, // Bounces gathered again and again, converging over frames.
+		};
+		enum {
+			FEEDBACK_BOUNCE_ITERATIONS = 4, // Passes over all cells after a light change.
+		};
+		RID direct_light_buffer; // Direct light of every cell, only used with bounce feedback.
+		RID direct_light_uniform_set;
+		RID feedback_uniform_set;
+		uint32_t light_frames_left = 0;
+		uint32_t bounce_frames_left = 0;
+		float bounce_feedback = 0.0;
+
+		uint64_t update_frame = 0;
+		Transform3D last_update_transform;
+		bool static_data_written = false;
 
 		int slot = -1;
 		uint32_t last_probe_version = 0;
@@ -146,6 +219,19 @@ public:
 		Transform3D transform;
 
 		void update(bool p_update_light_instances, const Vector<RID> &p_light_instances, const PagedArray<RenderGeometryInstance *> &p_dynamic_objects);
+		static CellBox _get_dynamic_object_box(const Transform3D &p_to_cell, const AABB &p_aabb, const Vector3i &p_octree_size);
+		void _create_dynamic_maps(uint32_t p_size);
+		void _free_dynamic_maps();
+		void _restore_static_region(RD::ComputeListID p_compute_list, const CellBox &p_box);
+		void _downsample_region(RD::ComputeListID p_compute_list, const CellBox &p_box, int p_from_level = 1);
+		void _plot_dynamic_object(RenderGeometryInstance *p_instance, uint32_t p_oversample_shift, uint32_t p_light_count, RID p_area_light_atlas_uniform_set);
+		void _dispatch_cells(RD::ComputeListID p_compute_list, VoxelGIPushConstant &p_push_constant, uint32_t p_cell_offset, uint32_t p_cell_count, uint32_t p_stride, uint32_t p_phase);
+		void _update_static_light(uint32_t p_light_count, bool p_compute_light, StaticBounce p_bounce, float p_bounce_feedback, uint32_t p_stride, uint32_t p_phase);
+		void _create_feedback();
+		void _free_feedback();
+		void _create_aniso();
+		void _free_aniso();
+		void _build_aniso_region(RD::ComputeListID p_compute_list, const CellBox &p_box);
 		void debug(RD::DrawListID p_draw_list, RID p_framebuffer, const Projection &p_camera_with_transform, bool p_lighting, bool p_emission, float p_alpha);
 		void free_resources();
 	};
@@ -192,8 +278,24 @@ private:
 
 		uint32_t cell_offset;
 		uint32_t cell_count;
-		float aniso_strength;
+		float bounce_feedback;
 		float cell_size;
+
+		int32_t region_begin[3];
+		uint32_t cell_stride;
+		int32_t region_end[3];
+		uint32_t cell_phase;
+	};
+
+	struct VoxelGIMipmapPushConstant {
+		int32_t offset[3];
+		float propagation;
+		int32_t size[3];
+		int32_t slab_axis;
+		int32_t src_size[3];
+		int32_t dst_slab_size;
+		int32_t src_slab_size;
+		uint32_t pad[3];
 	};
 
 	struct VoxelGIDynamicPushConstant {
@@ -227,10 +329,12 @@ private:
 		VOXEL_GI_SHADER_VERSION_COMPUTE_SECOND_BOUNCE,
 		VOXEL_GI_SHADER_VERSION_COMPUTE_MIPMAP,
 		VOXEL_GI_SHADER_VERSION_WRITE_TEXTURE,
+		VOXEL_GI_SHADER_VERSION_WRITE_TEXTURE_REGION,
 		VOXEL_GI_SHADER_VERSION_DYNAMIC_OBJECT_LIGHTING,
 		VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_WRITE,
 		VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_PLOT,
-		VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_WRITE_PLOT,
+		VOXEL_GI_SHADER_VERSION_WRITE_NORMAL_MASK,
+		VOXEL_GI_SHADER_VERSION_FEEDBACK_BOUNCE,
 		VOXEL_GI_SHADER_VERSION_MAX
 	};
 
@@ -238,6 +342,22 @@ private:
 	RID voxel_gi_lighting_shader_version;
 	RID voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_MAX];
 	PipelineDeferredRD voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_MAX];
+
+	enum {
+		VOXEL_GI_MIPMAP_CLEAR,
+		VOXEL_GI_MIPMAP_DOWNSAMPLE,
+		VOXEL_GI_MIPMAP_ANISO_FIRST,
+		VOXEL_GI_MIPMAP_ANISO,
+		VOXEL_GI_MIPMAP_MAX
+	};
+
+	VoxelGiMipmapShaderRD voxel_gi_mipmap_shader;
+	RID voxel_gi_mipmap_shader_version;
+	RID voxel_gi_mipmap_shader_version_shaders[VOXEL_GI_MIPMAP_MAX];
+	PipelineDeferredRD voxel_gi_mipmap_pipelines[VOXEL_GI_MIPMAP_MAX];
+
+	// Stationary dynamic objects are only plotted again after this many frames.
+	uint32_t voxel_gi_dynamic_object_refresh_frames = 4;
 
 	enum {
 		VOXEL_GI_DEBUG_COLOR,
@@ -458,6 +578,7 @@ public:
 
 	public:
 		RID voxel_gi_textures[MAX_VOXEL_GI_INSTANCES];
+		RID voxel_gi_aniso_textures[MAX_VOXEL_GI_INSTANCES];
 
 		RID full_buffer;
 		RID full_dispatch;
@@ -465,6 +586,16 @@ public:
 
 		/* GI buffers */
 		bool using_half_size_gi = false;
+
+		/* Screen probes */
+		uint32_t screen_probe_frame = 0;
+		uint32_t screen_probe_history_index = 0;
+		bool screen_probe_history_valid = false;
+		RID screen_probe_last_frame; // Last frame buffer seen, to know whether it holds a previous frame.
+		Projection screen_probe_prev_projection;
+		Transform3D screen_probe_prev_transform;
+		RID screen_probe_trace_ubo;
+		RID screen_probe_gi_ubo;
 
 		RID uniform_set[RendererSceneRender::MAX_RENDER_VIEWS];
 		RID scene_data_ubo;
@@ -521,6 +652,7 @@ public:
 	virtual uint32_t voxel_gi_get_version(RID p_probe) const override;
 	uint32_t voxel_gi_get_data_version(RID p_probe);
 
+	const LocalVector<uint32_t> &voxel_gi_get_leaf_x_offsets(RID p_voxel_gi) const;
 	RID voxel_gi_get_octree_buffer(RID p_voxel_gi) const;
 	RID voxel_gi_get_data_buffer(RID p_voxel_gi) const;
 
@@ -769,7 +901,9 @@ public:
 		uint32_t blend_ambient; // 4 - 92
 		uint32_t mipmaps; // 4 - 96
 
-		float pad[3]; // 12 - 108
+		float aniso_enabled; // 4 - 100
+		float aniso_slab_axis; // 4 - 104
+		float aniso_slab_size; // 4 - 108
 		float exposure_normalization; // 4 - 112
 	};
 
@@ -810,8 +944,60 @@ public:
 		MODE_SDFGI,
 		MODE_COMBINED,
 		MODE_COMBINED_WITHOUT_SAMPLER,
+		MODE_VOXEL_GI_SCREEN_PROBES,
+		MODE_VOXEL_GI_SCREEN_PROBES_WITHOUT_SAMPLER,
 		MODE_MAX
 	};
+
+	// Must match Params in voxel_gi_screen_probes.glsl.
+	struct ScreenProbeTraceParams {
+		float inv_projection[16];
+		float projection[16];
+		float reprojection[16];
+		float cam_basis[16];
+
+		int32_t screen_size[2];
+		int32_t probe_grid_size[2];
+
+		uint32_t probe_spacing;
+		uint32_t frame;
+		uint32_t max_voxel_gi_instances;
+		uint32_t screen_trace_steps;
+
+		float screen_trace_distance;
+		float z_near;
+		float pixel_size;
+		float last_frame_max_lod;
+
+		uint32_t orthogonal;
+		uint32_t has_last_frame;
+		uint32_t pad0;
+		uint32_t pad1;
+	};
+
+	// Must match ScreenProbeParams in gi.glsl.
+	struct ScreenProbeGIParams {
+		float reprojection[16];
+		float prev_view_z[4];
+
+		int32_t probe_grid_size[2];
+		uint32_t probe_spacing;
+		uint32_t frame;
+
+		int32_t buffer_size[2];
+		float history_blend;
+		uint32_t history_valid;
+	};
+
+	enum {
+		SCREEN_PROBES_TRACE,
+		SCREEN_PROBES_FILTER,
+		SCREEN_PROBES_MAX
+	};
+
+	VoxelGiScreenProbesShaderRD screen_probes_shader;
+	RID screen_probes_shader_version;
+	PipelineDeferredRD screen_probes_pipelines[SCREEN_PROBES_MAX];
 
 	enum ShaderSpecializations {
 		SHADER_SPECIALIZATION_HALF_RES = 1 << 0,
@@ -836,7 +1022,10 @@ public:
 	Ref<SDFGI> create_sdfgi(RID p_env, const Vector3 &p_world_position, uint32_t p_requested_history_size);
 
 	void setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBuffersRD> p_render_buffers, const Transform3D &p_transform, const PagedArray<RID> &p_voxel_gi_instances, uint32_t &r_voxel_gi_instances_used);
-	void process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances);
+	// Screen probes need the last frame buffer (RB_SCOPE_SSLF) to be allocated and copied every frame.
+	static bool is_using_screen_probes();
+	void _setup_screen_probes(Ref<RenderSceneBuffersRD> p_render_buffers, Ref<RenderBuffersGI> p_rbgi, RID p_normal_roughness, RID p_voxel_gi_buffer, const Projection &p_projection, const Transform3D &p_cam_transform, uint32_t p_max_voxel_gi_instances, RID &r_trace_set, RID &r_filter_set, RID &r_gi_set, Size2i &r_probe_grid_size);
+	void process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances, bool p_use_screen_probes = false);
 
 	RID voxel_gi_instance_create(RID p_base);
 	void voxel_gi_instance_set_transform_to_data(RID p_probe, const Transform3D &p_xform);

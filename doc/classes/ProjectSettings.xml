@@ -3109,9 +3109,44 @@
 			The number of rays to throw per frame when computing signed distance field global illumination. Higher values lead to a less noisy result, at the cost of performance. See also [member rendering/global_illumination/sdfgi/frames_to_converge] and [member rendering/global_illumination/sdfgi/frames_to_update_lights].
 			[b]Note:[/b] This property is only read when the project starts. To control SDFGI quality at runtime, call [method RenderingServer.environment_set_sdfgi_ray_count] instead.
 		</member>
+		<member name="rendering/global_illumination/voxel_gi/anisotropic_mipmaps" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], [VoxelGI] keeps a second set of mipmaps that stores light separately for each of the 6 axis directions, only counting voxels whose surfaces face the direction light travels in. Narrow cones (screen probes and glossy reflections) then see less light through thin walls. Wide diffuse cones mostly keep using the regular mipmaps, as their footprint reaches behind the surface they start from.
+			This roughly doubles the video memory used by the 3D texture of each [VoxelGI]. This setting can be changed at run-time.
+		</member>
+		<member name="rendering/global_illumination/voxel_gi/bounce_feedback" type="float" setter="" getter="" default="0.0">
+			If greater than [code]0.0[/code], [VoxelGI] light bounces are computed with feedback: after lights change, bounced light is gathered again over the next 4 updates, each time from the result of the previous one and scaled by this value. This gives up to 4 bounces instead of 2, which brightens enclosed areas. Values close to [code]1.0[/code] can make closed rooms with bright materials too bright.
+			If [code]0.0[/code], [member VoxelGIData.use_two_bounces] decides whether a second bounce is computed. When light updates are spread over several frames (see [member rendering/global_illumination/voxel_gi/light_update_frames]) and [member VoxelGIData.use_two_bounces] is [code]true[/code], a feedback of [code]0.5[/code] is used instead.
+			This setting can be changed at run-time.
+		</member>
+		<member name="rendering/global_illumination/voxel_gi/dynamic_object_refresh_frames" type="int" setter="" getter="" default="4">
+			Dynamic objects (see [constant GeometryInstance3D.GI_MODE_DYNAMIC]) that don't move inside a [VoxelGI] are drawn into it again once every this many frames, so they pick up lighting changes. The refreshes of different objects are spread over these frames. Objects that move, appear or disappear are always updated on the same frame, and only the part of the [VoxelGI] they cover is updated. Lower values make lighting changes on stationary dynamic objects show up faster, at a higher GPU cost.
+			[b]Note:[/b] This property is only read when the project starts.
+		</member>
+		<member name="rendering/global_illumination/voxel_gi/light_update_frames" type="int" setter="" getter="" default="1">
+			The number of frames over which [VoxelGI] recomputes the light of its static voxels after lights change. With [code]1[/code], every voxel is updated on the frame lights change. Higher values update every Nth voxel each frame, which spreads the cost over several frames for scenes with moving or animated lights, but lighting changes take longer to show up fully.
+			When [member VoxelGIData.use_two_bounces] is enabled and [member rendering/global_illumination/voxel_gi/bounce_feedback] is [code]0.0[/code], values above [code]1[/code] use a bounce feedback of [code]0.5[/code].
+			This setting can be changed at run-time.
+		</member>
 		<member name="rendering/global_illumination/voxel_gi/quality" type="int" setter="" getter="" default="0">
 			The VoxelGI quality to use. High quality leads to more precise lighting and better reflections, but is slower to render. This setting does not affect the baked data and doesn't require baking the [VoxelGI] again to apply.
 			[b]Note:[/b] This property is only read when the project starts. To control VoxelGI quality at runtime, call [method RenderingServer.voxel_gi_set_quality] instead.
+		</member>
+		<member name="rendering/global_illumination/voxel_gi/screen_probes/enabled" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], the diffuse indirect light of [VoxelGI] is gathered through probes placed on the screen. Each probe traces rays against the depth buffer, using the previous frame as radiance, and falls back to [VoxelGI] cone tracing when a ray leaves the screen or passes behind geometry. Probes are stored as spherical harmonics, filtered, interpolated for every pixel and accumulated over frames. This adds occlusion and indirect light from details smaller than a voxel. Specular reflections still use [VoxelGI] cone tracing.
+			[b]Note:[/b] Screen probes are only used in the Forward+ rendering method when SDFGI is disabled. They are not used in reflection probes, or when rendering several views at once (such as in XR).
+			This setting can be changed at run-time.
+		</member>
+		<member name="rendering/global_illumination/voxel_gi/screen_probes/probe_spacing" type="int" setter="" getter="" default="1">
+			The distance between screen probes, in pixels. [b]8 Pixels (Slow)[/b] traces 4 times as many probes as [b]16 Pixels (Fast)[/b], which gives more detailed indirect light at a higher GPU cost. Probes are placed at a different position within their tile every frame.
+		</member>
+		<member name="rendering/global_illumination/voxel_gi/screen_probes/screen_trace_distance" type="float" setter="" getter="" default="4.0">
+			The maximum distance (in 3D units) that screen probe rays travel through the depth buffer before switching to [VoxelGI] cone tracing. Longer distances gather more indirect light from surfaces visible on screen.
+		</member>
+		<member name="rendering/global_illumination/voxel_gi/screen_probes/screen_trace_steps" type="int" setter="" getter="" default="12">
+			The number of steps screen probe rays take through the depth buffer. Higher values detect more occluders and thinner objects, at a higher GPU cost. If [code]0[/code], screen tracing is disabled and probes only use [VoxelGI] cone tracing.
+		</member>
+		<member name="rendering/global_illumination/voxel_gi/screen_probes/temporal_frames" type="int" setter="" getter="" default="8">
+			The number of frames screen probe lighting is accumulated over. Higher values reduce noise, but make indirect light react more slowly to changes and can leave trails behind fast-moving objects. The accumulation starts over for pixels whose surface changed since the previous frame.
 		</member>
 		<member name="rendering/lightmapping/bake_performance/max_rays_per_pass" type="int" setter="" getter="" default="4">
 			The maximum number of rays that can be thrown per pass when baking lightmaps with [LightmapGI]. Depending on the scene, adjusting this value may result in higher GPU utilization when baking lightmaps, leading to faster bake times.

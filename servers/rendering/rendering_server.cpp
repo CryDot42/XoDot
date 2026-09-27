@@ -3732,6 +3732,15 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/gi/use_half_resolution", false);
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/quality", PROPERTY_HINT_ENUM, "Low (4 Cones - Fast),High (6 Cones - Slow)"), 0);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/dynamic_object_refresh_frames", PROPERTY_HINT_RANGE, "1,60,1"), 4);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/light_update_frames", PROPERTY_HINT_RANGE, "1,16,1"), 1);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/voxel_gi/bounce_feedback", PROPERTY_HINT_RANGE, "0,1,0.01"), 0.0);
+	GLOBAL_DEF("rendering/global_illumination/voxel_gi/anisotropic_mipmaps", false);
+	GLOBAL_DEF("rendering/global_illumination/voxel_gi/screen_probes/enabled", false);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/screen_probes/probe_spacing", PROPERTY_HINT_ENUM, "8 Pixels (Slow),16 Pixels (Fast)"), 1);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/screen_probes/screen_trace_steps", PROPERTY_HINT_RANGE, "0,64,1"), 12);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/voxel_gi/screen_probes/screen_trace_distance", PROPERTY_HINT_RANGE, "0,64,0.1,suffix:m"), 4.0);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/screen_probes/temporal_frames", PROPERTY_HINT_RANGE, "1,32,1"), 8);
 
 	GLOBAL_DEF_RST("rendering/shading/overrides/force_vertex_shading", false);
 	GLOBAL_DEF("rendering/shading/overrides/force_lambert_over_burley", false);
