@@ -107,10 +107,13 @@ private:
 	RID material;
 	RID height_texture;
 	RID normal_texture;
-	RID weights_texture;
+	RID weights_textures[LandscapeData::MAX_WEIGHTMAPS];
+	RID holes_texture;
+	bool gpu_holes = false;
 	Ref<Texture2DArray> albedo_height_array;
 	Ref<Texture2DArray> normal_roughness_array;
 	static Ref<Shader> builtin_shader;
+	static Ref<Shader> builtin_shader_holes;
 
 #ifdef RD_ENABLED
 	LandscapeGPU *gpu = nullptr;
@@ -130,9 +133,23 @@ private:
 	bool lod_dirty = true;
 	LocalVector<Rect2i> dirty_heights;
 	LocalVector<Rect2i> dirty_weights;
+	LocalVector<Rect2i> dirty_holes;
 	Vector<uint8_t> last_lod_params[2];
 	Vector3 last_lod_camera;
 	Vector4 last_micro_params;
+	int material_micro_levels = -1;
+	int material_max_level = -1;
+
+	// Camera state used for the LOD selection (kept while the LOD is frozen).
+	struct LodCameraState {
+		bool valid = false;
+		Plane planes[6];
+		Vector3 position;
+		real_t projection_factor = 1.0;
+		real_t scale = 1.0;
+		bool orthogonal = false;
+	} lod_camera;
+	bool _update_lod_camera();
 	Vector4 brush_preview;
 	Color brush_color = Color(0.25, 0.6, 1.0);
 
@@ -166,6 +183,7 @@ private:
 	void _full_update();
 	void _upload_heights(const Rect2i &p_rect);
 	void _upload_weights(const Rect2i &p_rect);
+	void _upload_holes(const Rect2i &p_rect);
 	void _upload_bounds(const LocalVector<LandscapeLodTree::Range> &p_ranges);
 	void _update_layer_params();
 	void _rebuild_layer_textures();
@@ -199,7 +217,7 @@ public:
 	int get_layer_texture_size() const { return layer_texture_size; }
 	void set_shader_override(const Ref<Shader> &p_shader);
 	Ref<Shader> get_shader_override() const { return shader_override; }
-	static String get_builtin_shader_code();
+	static String get_builtin_shader_code(bool p_holes = false);
 
 	void set_patch_size(int p_size);
 	int get_patch_size() const { return patch_size; }

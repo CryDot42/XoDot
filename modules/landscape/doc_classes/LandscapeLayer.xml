@@ -65,6 +65,7 @@
 	<signals>
 		<signal name="textures_changed">
 			<description>
+				Emitted when one of the textures of the layer is replaced or changed. [Landscape3D] rebuilds its layer texture arrays in response.
 			</description>
 		</signal>
 	</signals>

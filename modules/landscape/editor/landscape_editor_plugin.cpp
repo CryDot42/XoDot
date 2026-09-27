@@ -149,6 +149,16 @@ Button *LandscapeEditor::_make_tool_button(Container *p_parent, const String &p_
 	return button;
 }
 
+bool LandscapeEditor::_validate_landscape() {
+	if (landscape && !ObjectDB::get_instance(landscape_id)) {
+		// The node was freed while being edited.
+		landscape = nullptr;
+		stroking = false;
+		undo_tiles.clear();
+	}
+	return landscape != nullptr;
+}
+
 LandscapeBrush::Tool LandscapeEditor::_get_current_tool() const {
 	return mode == MODE_PAINT ? paint_tool : sculpt_tool;
 }
@@ -272,8 +282,25 @@ void LandscapeEditor::_size_preset_selected(int p_index) {
 
 /* Layers */
 
+uint64_t LandscapeEditor::_compute_layer_hash() const {
+	if (!landscape) {
+		return 0;
+	}
+	uint64_t hash = hash_murmur3_one_64(landscape->get_layer_count());
+	for (int i = 0; i < landscape->get_layer_count(); i++) {
+		Ref<LandscapeLayer> layer = landscape->get_layer(i);
+		hash = hash_murmur3_one_64(layer.is_valid() ? uint64_t(layer->get_instance_id()) : 0, hash);
+		if (layer.is_valid()) {
+			hash = hash_murmur3_one_64(layer->get_layer_name().hash(), hash);
+			hash = hash_murmur3_one_64(layer->get_albedo_texture().is_valid() ? uint64_t(layer->get_albedo_texture()->get_instance_id()) : 0, hash);
+		}
+	}
+	return hash;
+}
+
 void LandscapeEditor::_update_layer_list() {
 	layer_list->clear();
+	layer_list_hash = _compute_layer_hash();
 	if (!landscape) {
 		return;
 	}
@@ -369,6 +396,38 @@ void LandscapeEditor::_fill_layer() {
 	undo_redo->add_do_method(ldata.ptr(), "fill_layer", selected_layer);
 	undo_redo->add_undo_method(this, "_apply_regions", ldata, before);
 	undo_redo->commit_action();
+	_set_data_edited();
+}
+
+void LandscapeEditor::_import_weights_pressed() {
+	ERR_FAIL_NULL(landscape);
+	Ref<LandscapeData> ldata = landscape->get_data();
+	if (ldata.is_null() || !ldata->is_valid() || selected_layer < 0 || selected_layer >= MAX(landscape->get_layer_count(), 1)) {
+		return;
+	}
+	weights_dialog->popup_file_dialog();
+}
+
+void LandscapeEditor::_import_weights_file_selected(const String &p_path) {
+	ERR_FAIL_NULL(landscape);
+	Ref<LandscapeData> ldata = landscape->get_data();
+	if (ldata.is_null() || !ldata->is_valid()) {
+		return;
+	}
+	const Rect2i full(Point2i(), ldata->get_size());
+	Array before;
+	before.push_back(ldata->get_region(full, false, true));
+	if (ldata->import_layer_weights(selected_layer, p_path) != OK) {
+		EditorNode::get_singleton()->show_warning(vformat(TTR("Failed to import weightmap \"%s\"."), p_path));
+		return;
+	}
+	Array after;
+	after.push_back(ldata->get_region(full, false, true));
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(TTR("Import Layer Weights"), UndoRedo::MERGE_DISABLE, landscape);
+	undo_redo->add_do_method(this, "_apply_regions", ldata, after);
+	undo_redo->add_undo_method(this, "_apply_regions", ldata, before);
+	undo_redo->commit_action(false);
 	_set_data_edited();
 }
 
@@ -499,6 +558,9 @@ void LandscapeEditor::_apply_regions(const Ref<LandscapeData> &p_data, const Arr
 	}
 	p_data->set_edited(true);
 	_update_info();
+	if (_validate_landscape()) {
+		landscape->update_gizmos();
+	}
 }
 
 bool LandscapeEditor::_update_cursor(Camera3D *p_camera, const Point2 &p_position) {
@@ -646,7 +708,7 @@ void LandscapeEditor::_end_stroke() {
 	}
 	undo_tiles.clear();
 
-	static const char *tool_names[] = { "Sculpt", "Smooth", "Flatten", "Ramp", "Noise", "Erosion", "Terrace", "Paint", "Smooth Layers", "Flatten Layers", "Paint Noise" };
+	static const char *tool_names[] = { "Sculpt", "Smooth", "Flatten", "Ramp", "Noise", "Erosion", "Terrace", "Visibility", "Paint", "Smooth Layers", "Flatten Layers", "Paint Noise" };
 	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
 	undo_redo->create_action(vformat(TTR("Landscape: %s"), TTR(tool_names[tool])), UndoRedo::MERGE_DISABLE, landscape);
 	undo_redo->add_do_method(this, "_apply_regions", ldata, after);
@@ -654,6 +716,7 @@ void LandscapeEditor::_end_stroke() {
 	undo_redo->commit_action(false);
 	_set_data_edited();
 	_update_info();
+	landscape->update_gizmos(); // Refresh the selection mesh.
 }
 
 void LandscapeEditor::_cancel_stroke() {
@@ -663,7 +726,7 @@ void LandscapeEditor::_cancel_stroke() {
 }
 
 EditorPlugin::AfterGUIInput LandscapeEditor::forward_3d_gui_input(Camera3D *p_camera, const Ref<InputEvent> &p_event) {
-	if (!landscape || mode == MODE_MANAGE || landscape->get_data().is_null() || !landscape->get_data()->is_valid()) {
+	if (!_validate_landscape() || mode == MODE_MANAGE || landscape->get_data().is_null() || !landscape->get_data()->is_valid()) {
 		return EditorPlugin::AFTER_GUI_INPUT_PASS;
 	}
 
@@ -720,6 +783,7 @@ EditorPlugin::AfterGUIInput LandscapeEditor::forward_3d_gui_input(Camera3D *p_ca
 }
 
 void LandscapeEditor::edit(Landscape3D *p_landscape) {
+	_validate_landscape();
 	if (landscape == p_landscape) {
 		return;
 	}
@@ -728,10 +792,15 @@ void LandscapeEditor::edit(Landscape3D *p_landscape) {
 		landscape->set_brush_preview(false);
 	}
 	landscape = p_landscape;
+	landscape_id = landscape ? landscape->get_instance_id() : ObjectID();
 	cursor_valid = false;
 	selected_layer = 0;
 	_update_layer_list();
 	_update_info();
+	if (landscape && (landscape->get_data().is_null() || !landscape->get_data()->is_valid())) {
+		// Nothing to sculpt yet, start with the creation settings.
+		mode_tabs->set_current_tab(MODE_MANAGE);
+	}
 }
 
 void LandscapeEditor::_notification(int p_what) {
@@ -750,6 +819,9 @@ void LandscapeEditor::_notification(int p_what) {
 		} break;
 
 		case NOTIFICATION_PROCESS: {
+			if (!_validate_landscape()) {
+				break;
+			}
 			stats_timer -= get_process_delta_time();
 			if (stats_timer <= 0.0 && landscape) {
 				stats_timer = 0.5;
@@ -759,6 +831,16 @@ void LandscapeEditor::_notification(int p_what) {
 					text += "\n" + TTR("Patch budget exceeded: increase Max Patches or the LOD Pixel Error.");
 				}
 				stats_label->set_text(text);
+				// Layers may also be edited from the inspector.
+				if (_compute_layer_hash() != layer_list_hash) {
+					_update_layer_list();
+					_update_info();
+				}
+			}
+			if (stroking && !Input::get_singleton()->is_mouse_button_pressed(MouseButton::LEFT)) {
+				// The button was released outside of the viewport.
+				_end_stroke();
+				_update_brush_preview();
 			}
 			if (!stroking || !landscape || landscape->get_data().is_null() || brush->get_tool() == LandscapeBrush::TOOL_RAMP) {
 				break;
@@ -911,6 +993,7 @@ LandscapeEditor::LandscapeEditor() {
 		_make_tool_button(grid, TTR("Noise"), "RandomNumberGenerator", sculpt_tool_group, LandscapeBrush::TOOL_NOISE, TTR("Add procedural noise. Hold Shift to invert."));
 		_make_tool_button(grid, TTR("Erosion"), "Particles", sculpt_tool_group, LandscapeBrush::TOOL_EROSION, TTR("Thermal erosion: material slides down slopes steeper than the talus angle."));
 		_make_tool_button(grid, TTR("Terrace"), "GridLayout", sculpt_tool_group, LandscapeBrush::TOOL_TERRACE, TTR("Create terraces with the given step height."));
+		_make_tool_button(grid, TTR("Visibility"), "GuiVisibilityHidden", sculpt_tool_group, LandscapeBrush::TOOL_HOLES, TTR("Paint holes in the landscape (e.g. for cave entrances). Hold Shift to fill them."));
 		sculpt->set_pressed(true);
 	}
 
@@ -941,6 +1024,10 @@ LandscapeEditor::LandscapeEditor() {
 		fill->set_tooltip_text(TTR("Fill the whole landscape with the selected layer."));
 		fill->connect(SceneStringName(pressed), callable_mp(this, &LandscapeEditor::_fill_layer));
 		layer_hb->add_child(fill);
+		Button *import_weights = memnew(Button(TTR("Import Weights...")));
+		import_weights->set_tooltip_text(TTR("Import a grayscale mask (PNG, RAW/R16, EXR...) as the weights of the selected layer."));
+		import_weights->connect(SceneStringName(pressed), callable_mp(this, &LandscapeEditor::_import_weights_pressed));
+		paint_panel->add_child(import_weights);
 
 		paint_tool_group.instantiate();
 		GridContainer *grid = memnew(GridContainer);
@@ -1073,6 +1160,14 @@ LandscapeEditor::LandscapeEditor() {
 	export_dialog->set_title(TTR("Export Heightmap"));
 	export_dialog->connect("file_selected", callable_mp(this, &LandscapeEditor::_export_file_selected));
 	add_child(export_dialog);
+
+	weights_dialog = memnew(EditorFileDialog);
+	weights_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
+	weights_dialog->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+	weights_dialog->add_filter("*.png,*.exr,*.r16,*.raw,*.tga,*.jpg,*.webp", TTR("Weightmaps"));
+	weights_dialog->set_title(TTR("Import Layer Weights"));
+	weights_dialog->connect("file_selected", callable_mp(this, &LandscapeEditor::_import_weights_file_selected));
+	add_child(weights_dialog);
 
 	mode_tabs->set_current_tab(MODE_SCULPT);
 	_mode_changed(MODE_SCULPT);

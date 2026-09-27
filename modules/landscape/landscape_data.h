@@ -54,7 +54,8 @@ public:
 	enum ChangeFlags {
 		CHANGED_HEIGHTS = 1,
 		CHANGED_WEIGHTS = 2,
-		CHANGED_ALL = CHANGED_HEIGHTS | CHANGED_WEIGHTS,
+		CHANGED_HOLES = 4,
+		CHANGED_ALL = CHANGED_HEIGHTS | CHANGED_WEIGHTS | CHANGED_HOLES,
 	};
 
 private:
@@ -64,6 +65,7 @@ private:
 	Vector<float> heights;
 	Vector<uint8_t> weightmaps[MAX_WEIGHTMAPS];
 	int weightmap_count = 0;
+	Vector<uint8_t> holes; // Empty when there are no holes, otherwise one byte per texel.
 
 	mutable bool height_range_dirty = true;
 	mutable Vector2 height_range;
@@ -77,6 +79,8 @@ private:
 	PackedFloat32Array _get_heights() const;
 	void _set_weightmaps(const Array &p_weightmaps);
 	Array _get_weightmaps() const;
+	void _set_holes(const PackedByteArray &p_holes);
+	PackedByteArray _get_holes() const;
 
 	static Ref<Image> _load_png16(const String &p_path);
 	static Ref<Image> _load_raw16(const String &p_path);
@@ -126,6 +130,15 @@ public:
 	uint8_t *get_weightmap_ptrw(int p_index);
 	const Vector<uint8_t> &get_weightmap_vector(int p_index) const;
 
+	// Holes (visibility), e.g. for caves.
+	bool has_holes() const { return !holes.is_empty(); }
+	bool is_hole(int p_x, int p_z) const;
+	void set_hole(int p_x, int p_z, bool p_hole);
+	const uint8_t *get_holes_ptr() const { return holes.ptr(); }
+	uint8_t *get_holes_ptrw();
+	const Vector<uint8_t> &get_holes_vector() const { return holes; }
+	void clear_holes();
+
 	// Region snapshots (used by undo/redo and runtime scripts).
 	Dictionary get_region(const Rect2i &p_rect, bool p_heights = true, bool p_weights = true) const;
 	void set_region(const Dictionary &p_region);
@@ -138,6 +151,8 @@ public:
 
 	Error import_heightmap(const String &p_path, float p_scale = 1.0, float p_offset = 0.0, bool p_resize = true);
 	Error export_heightmap(const String &p_path) const;
+	Error import_layer_weights(int p_layer, const String &p_path);
+	void set_layer_weights_image(int p_layer, const Ref<Image> &p_image);
 
 	// Change notification. Emits `region_changed`.
 	void notify_region_changed(const Rect2i &p_rect, int p_flags);

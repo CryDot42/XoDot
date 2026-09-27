@@ -30,8 +30,8 @@
 
 #include "landscape_shader.h"
 
-String LandscapeShader::get_code() {
-	return R"(// Built-in Landscape3D material.
+String LandscapeShader::get_code(bool p_holes) {
+	String code = R"(// Built-in Landscape3D material.
 // Uniforms prefixed with "ls_" are driven by the Landscape3D node.
 
 shader_type spatial;
@@ -40,7 +40,13 @@ render_mode depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
 group_uniforms landscape_system;
 uniform highp sampler2D ls_heightmap : filter_nearest, repeat_disable;
 uniform sampler2D ls_normalmap : filter_linear_mipmap_anisotropic, repeat_disable;
-uniform sampler2DArray ls_weightmaps : filter_linear_mipmap, repeat_disable;
+uniform bool ls_normal_rg = false; // Normal X/Z in RG (true) or in RA (false).
+uniform sampler2D ls_weightmap_0 : filter_linear_mipmap, repeat_disable;
+uniform sampler2D ls_weightmap_1 : filter_linear_mipmap, repeat_disable;
+uniform sampler2D ls_weightmap_2 : filter_linear_mipmap, repeat_disable;
+uniform sampler2D ls_weightmap_3 : filter_linear_mipmap, repeat_disable;
+uniform sampler2D ls_holes : filter_linear, repeat_disable;
+uniform bool ls_holes_enabled = false;
 uniform sampler2DArray ls_albedo_height : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2DArray ls_normal_roughness : filter_linear_mipmap_anisotropic, repeat_enable;
 
@@ -101,7 +107,32 @@ vec2 ls_heightmap_uv(vec2 p_local_xz) {
 }
 
 vec3 ls_decode_normal(vec4 p_color) {
-	return normalize(p_color.xyz * 2.0 - 1.0);
+	// The normal map stores X and Z, Y is always positive on a height field.
+	vec2 xz = (ls_normal_rg ? p_color.rg : p_color.ra) * 2.0 - 1.0;
+	return normalize(vec3(xz.x, sqrt(max(1.0 - dot(xz, xz), 0.0)), xz.y));
+}
+
+// Weights of the layers [4 * index, 4 * index + 3]. The index is uniform in all callers.
+vec4 ls_weights(int p_index, vec2 p_uv) {
+	if (p_index == 0) {
+		return texture(ls_weightmap_0, p_uv);
+	} else if (p_index == 1) {
+		return texture(ls_weightmap_1, p_uv);
+	} else if (p_index == 2) {
+		return texture(ls_weightmap_2, p_uv);
+	}
+	return texture(ls_weightmap_3, p_uv);
+}
+
+vec4 ls_weights_lod(int p_index, vec2 p_uv) {
+	if (p_index == 0) {
+		return textureLod(ls_weightmap_0, p_uv, 0.0);
+	} else if (p_index == 1) {
+		return textureLod(ls_weightmap_1, p_uv, 0.0);
+	} else if (p_index == 2) {
+		return textureLod(ls_weightmap_2, p_uv, 0.0);
+	}
+	return textureLod(ls_weightmap_3, p_uv, 0.0);
 }
 
 vec2 ls_layer_coords(int p_layer, vec2 p_pos) {
@@ -113,7 +144,7 @@ vec2 ls_layer_coords(int p_layer, vec2 p_pos) {
 float ls_displacement(vec3 p_pos, vec2 p_hm_uv, float p_dist) {
 	float total = 0.0;
 	for (int w = 0; w < ls_weightmap_count; w++) {
-		vec4 weights = textureLod(ls_weightmaps, vec3(p_hm_uv, float(w)), 0.0);
+		vec4 weights = ls_weights_lod(w, p_hm_uv);
 		for (int c = 0; c < 4; c++) {
 			int layer = w * 4 + c;
 			float weight = weights[c];
@@ -281,6 +312,11 @@ vec3 ls_debug_color(int p_index) {
 void fragment() {
 	vec3 p = v_local;
 	vec2 hm_uv = ls_heightmap_uv(p.xz);
+#ifdef LS_HOLES
+	if (ls_holes_enabled && texture(ls_holes, hm_uv).r > 0.5) {
+		discard; // Visibility tool (holes).
+	}
+#endif
 	vec3 terrain_normal = ls_decode_normal(texture(ls_normalmap, hm_uv));
 
 	// Select the four most important layers of this pixel.
@@ -288,7 +324,7 @@ void fragment() {
 	float weights[4] = float[](0.0, 0.0, 0.0, 0.0);
 	float total = 0.0;
 	for (int w = 0; w < ls_weightmap_count; w++) {
-		vec4 wm = texture(ls_weightmaps, vec3(hm_uv, float(w)));
+		vec4 wm = ls_weights(w, hm_uv);
 		for (int c = 0; c < 4; c++) {
 			int layer = w * 4 + c;
 			float weight = wm[c];
@@ -379,4 +415,9 @@ void fragment() {
 	NORMAL = normalize(mat3(VIEW_MATRIX) * (MODEL_NORMAL_MATRIX * normal));
 }
 )";
+	if (p_holes) {
+		// Only landscapes with holes pay for the discard (it disables early depth testing).
+		code = code.replace("shader_type spatial;", "shader_type spatial;\n#define LS_HOLES");
+	}
+	return code;
 }

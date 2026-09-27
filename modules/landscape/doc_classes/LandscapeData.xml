@@ -11,6 +11,12 @@
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="clear_holes">
+			<return type="void" />
+			<description>
+				Removes all holes.
+			</description>
+		</method>
 		<method name="create">
 			<return type="void" />
 			<param index="0" name="size" type="Vector2i" />
@@ -106,6 +112,12 @@
 				Returns the size of the landscape in meters.
 			</description>
 		</method>
+		<method name="has_holes" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the hole mask is allocated (holes were painted at least once).
+			</description>
+		</method>
 		<method name="import_heightmap">
 			<return type="int" enum="Error" />
 			<param index="0" name="path" type="String" />
@@ -114,6 +126,22 @@
 			<param index="3" name="resize" type="bool" default="true" />
 			<description>
 				Imports a heightmap: 16-bit PNG, RAW/R16 (square, 16-bit little-endian), EXR or any image supported by [Image]. Normalized values are mapped to [code]value * scale + offset[/code]. If [param resize] is [code]true[/code], the landscape takes the resolution of the image, otherwise the image is resampled.
+			</description>
+		</method>
+		<method name="import_layer_weights">
+			<return type="int" enum="Error" />
+			<param index="0" name="layer" type="int" />
+			<param index="1" name="path" type="String" />
+			<description>
+				Imports a grayscale mask (16-bit PNG, RAW/R16, EXR or any image supported by [Image]) as the weights of [param layer]. The other layers share the remaining weight.
+			</description>
+		</method>
+		<method name="is_hole" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="x" type="int" />
+			<param index="1" name="z" type="int" />
+			<description>
+				Returns [code]true[/code] if the given texel is a hole.
 			</description>
 		</method>
 		<method name="is_valid" qualifiers="const">
@@ -178,6 +206,15 @@
 				Replaces the heights with an image (resampled to the current resolution). Values are mapped to [code]value * scale + offset[/code].
 			</description>
 		</method>
+		<method name="set_hole">
+			<return type="void" />
+			<param index="0" name="x" type="int" />
+			<param index="1" name="z" type="int" />
+			<param index="2" name="hole" type="bool" />
+			<description>
+				Makes a texel a hole or solid again. Holes are not rendered and have no collision. The hole mask is allocated on first use. Call [method notify_region_changed] with [constant CHANGED_HOLES] after modifying holes.
+			</description>
+		</method>
 		<method name="set_layer_weight">
 			<return type="void" />
 			<param index="0" name="x" type="int" />
@@ -186,6 +223,14 @@
 			<param index="3" name="weight" type="float" />
 			<description>
 				Sets the weight of [param layer] at a texel. The other layers are rescaled so that the weights still sum to 1. Call [method notify_region_changed] after modifying weights.
+			</description>
+		</method>
+		<method name="set_layer_weights_image">
+			<return type="void" />
+			<param index="0" name="layer" type="int" />
+			<param index="1" name="image" type="Image" />
+			<description>
+				Uses an image (resampled to the current resolution) as the weights of [param layer]. The other layers share the remaining weight.
 			</description>
 		</method>
 		<method name="set_region">
@@ -215,6 +260,9 @@
 		<member name="heights" type="PackedFloat32Array" setter="_set_heights" getter="_get_heights" default="PackedFloat32Array()">
 			The heights of all texels, row by row.
 		</member>
+		<member name="holes" type="PackedByteArray" setter="_set_holes" getter="_get_holes" default="PackedByteArray()">
+			The hole mask, one byte per texel ([code]0[/code]: solid). Empty when the landscape has no holes.
+		</member>
 		<member name="size" type="Vector2i" setter="_set_size" getter="get_size" default="Vector2i(0, 0)">
 			The resolution of the landscape in texels. Use [method create] or [method resize] to change it.
 		</member>
@@ -230,6 +278,7 @@
 			<param index="0" name="rect" type="Rect2i" />
 			<param index="1" name="flags" type="int" />
 			<description>
+				Emitted by [method notify_region_changed] when the texels in [param rect] were modified. [param flags] is a combination of [enum ChangeFlags]. [Landscape3D] only updates the modified parts of the GPU maps, LOD tree and collision.
 			</description>
 		</signal>
 	</signals>
@@ -240,8 +289,11 @@
 		<constant name="CHANGED_WEIGHTS" value="2" enum="ChangeFlags">
 			The layer weights changed.
 		</constant>
-		<constant name="CHANGED_ALL" value="3" enum="ChangeFlags">
-			Heights and weights changed.
+		<constant name="CHANGED_HOLES" value="4" enum="ChangeFlags">
+			The holes changed.
+		</constant>
+		<constant name="CHANGED_ALL" value="7" enum="ChangeFlags">
+			Heights, weights and holes changed.
 		</constant>
 		<constant name="MAX_RESOLUTION" value="16384">
 			Maximum resolution along each axis.

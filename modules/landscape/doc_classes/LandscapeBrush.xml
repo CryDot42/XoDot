@@ -126,19 +126,22 @@
 		<constant name="TOOL_TERRACE" value="6" enum="Tool">
 			Creates terraces of [member terrace_height].
 		</constant>
-		<constant name="TOOL_PAINT" value="7" enum="Tool">
+		<constant name="TOOL_HOLES" value="7" enum="Tool">
+			Visibility tool: carves holes in the landscape (fills them when inverted), e.g. for cave entrances.
+		</constant>
+		<constant name="TOOL_PAINT" value="8" enum="Tool">
 			Paints (or erases when inverted) [member layer].
 		</constant>
-		<constant name="TOOL_PAINT_SMOOTH" value="8" enum="Tool">
+		<constant name="TOOL_PAINT_SMOOTH" value="9" enum="Tool">
 			Smooths the layer weights.
 		</constant>
-		<constant name="TOOL_PAINT_FLATTEN" value="9" enum="Tool">
+		<constant name="TOOL_PAINT_FLATTEN" value="10" enum="Tool">
 			Sets the weight of [member layer] to [member target_weight].
 		</constant>
-		<constant name="TOOL_PAINT_NOISE" value="10" enum="Tool">
+		<constant name="TOOL_PAINT_NOISE" value="11" enum="Tool">
 			Paints [member layer] modulated by noise.
 		</constant>
-		<constant name="TOOL_MAX" value="11" enum="Tool">
+		<constant name="TOOL_MAX" value="12" enum="Tool">
 			Represents the size of the [enum Tool] enum.
 		</constant>
 		<constant name="FALLOFF_SMOOTH" value="0" enum="FalloffType">

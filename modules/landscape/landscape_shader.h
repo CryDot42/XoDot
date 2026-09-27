@@ -37,6 +37,6 @@
 // displacement; the fragment stage blends up to 16 weight-blended material layers.
 namespace LandscapeShader {
 
-String get_code();
+String get_code(bool p_holes = false);
 
 } // namespace LandscapeShader

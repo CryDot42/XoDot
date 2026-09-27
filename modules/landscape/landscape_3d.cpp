@@ -33,6 +33,7 @@
 #include "landscape_shader.h"
 
 #include "core/config/engine.h"
+#include "core/config/project_settings.h"
 #include "core/math/math_funcs_binary.h"
 #include "core/math/triangle_mesh.h"
 #include "core/object/callable_mp.h"
@@ -49,6 +50,7 @@
 
 Landscape3D::EditorCameraCallback Landscape3D::editor_camera_callback = nullptr;
 Ref<Shader> Landscape3D::builtin_shader;
+Ref<Shader> Landscape3D::builtin_shader_holes;
 
 static constexpr int UPLOAD_CHUNK = 1024;
 static constexpr int MAX_DIRTY_RECTS = 16;
@@ -72,6 +74,14 @@ static void _landscape_add_dirty_rect(LocalVector<Rect2i> &r_rects, const Rect2i
 	r_rects.push_back(p_rect);
 }
 
+#ifndef PHYSICS_3D_DISABLED
+// Jolt treats NaN height map samples as holes, Godot Physics doesn't support them reliably.
+static bool _landscape_physics_supports_holes() {
+	const String engine = GLOBAL_GET("physics/3d/physics_engine");
+	return engine == "Jolt Physics" || (PhysicsServer3D::get_singleton() && PhysicsServer3D::get_singleton()->is_class("JoltPhysicsServer3D"));
+}
+#endif // PHYSICS_3D_DISABLED
+
 static uint32_t _landscape_split_words(int p_level) {
 	return MAX((1u << (2 * p_level)) / 32u, 1u);
 }
@@ -80,12 +90,19 @@ static uint32_t _landscape_split_words(int p_level) {
 
 void Landscape3D::_create_render_resources() {
 	RenderingServer *rs = RenderingServer::get_singleton();
+#ifdef RD_ENABLED
 	rendering_supported = rs->get_rendering_device() != nullptr;
+#else
+	rendering_supported = false;
+#endif
 
 	material = rs->material_create();
 	height_texture = rs->texture_2d_placeholder_create();
 	normal_texture = rs->texture_2d_placeholder_create();
-	weights_texture = rs->texture_2d_layered_placeholder_create(RSE::TEXTURE_LAYERED_2D_ARRAY);
+	for (RID &weights : weights_textures) {
+		weights = rs->texture_2d_placeholder_create();
+	}
+	holes_texture = rs->texture_2d_placeholder_create();
 	albedo_height_array.instantiate();
 	normal_roughness_array.instantiate();
 
@@ -125,7 +142,7 @@ void Landscape3D::_free_render_resources() {
 		rs->free_rid(material);
 		material = RID();
 	}
-	RID *textures[] = { &height_texture, &normal_texture, &weights_texture };
+	RID *textures[] = { &height_texture, &normal_texture, &holes_texture, &weights_textures[0], &weights_textures[1], &weights_textures[2], &weights_textures[3] };
 	for (RID *texture : textures) {
 		if (texture->is_valid()) {
 			rs->free_rid(*texture);
@@ -242,17 +259,22 @@ void Landscape3D::_update_material_shader() {
 	RenderingServer *rs = RenderingServer::get_singleton();
 	Ref<Shader> shader = shader_override;
 	if (shader.is_null()) {
-		if (builtin_shader.is_null()) {
-			builtin_shader.instantiate();
-			builtin_shader->set_code(LandscapeShader::get_code());
+		Ref<Shader> &builtin = gpu_holes ? builtin_shader_holes : builtin_shader;
+		if (builtin.is_null()) {
+			builtin.instantiate();
+			builtin->set_code(LandscapeShader::get_code(gpu_holes));
 		}
-		shader = builtin_shader;
+		shader = builtin;
 	}
 	rs->material_set_shader(material, shader->get_rid());
 
 	rs->material_set_param(material, "ls_heightmap", height_texture);
 	rs->material_set_param(material, "ls_normalmap", normal_texture);
-	rs->material_set_param(material, "ls_weightmaps", weights_texture);
+	for (int i = 0; i < LandscapeData::MAX_WEIGHTMAPS; i++) {
+		rs->material_set_param(material, vformat("ls_weightmap_%d", i), weights_textures[i]);
+	}
+	rs->material_set_param(material, "ls_holes", holes_texture);
+	rs->material_set_param(material, "ls_holes_enabled", gpu_holes);
 	rs->material_set_param(material, "ls_albedo_height", albedo_height_array->get_rid());
 	rs->material_set_param(material, "ls_normal_roughness", normal_roughness_array->get_rid());
 	rs->material_set_param(material, "ls_debug_view", int(debug_view));
@@ -307,6 +329,9 @@ void Landscape3D::_data_region_changed(const Rect2i &p_rect, int p_flags) {
 	if (p_flags & LandscapeData::CHANGED_WEIGHTS) {
 		_landscape_add_dirty_rect(dirty_weights, p_rect);
 	}
+	if (p_flags & LandscapeData::CHANGED_HOLES) {
+		_landscape_add_dirty_rect(dirty_holes, p_rect);
+	}
 	RenderingServerDefault::redraw_request();
 }
 
@@ -315,8 +340,10 @@ void Landscape3D::_data_changed() {
 	collision_full_rebuild = true;
 	dirty_heights.clear();
 	dirty_weights.clear();
+	dirty_holes.clear();
 	_update_instances();
 	update_gizmos();
+	update_configuration_warnings();
 	RenderingServerDefault::redraw_request();
 }
 
@@ -408,6 +435,7 @@ void Landscape3D::set_layer_texture_size(int p_size) {
 	layer_texture_size = p_size;
 	layer_textures_dirty = true;
 	layers_dirty = true;
+	RenderingServerDefault::redraw_request();
 }
 
 void Landscape3D::set_shader_override(const Ref<Shader> &p_shader) {
@@ -415,8 +443,8 @@ void Landscape3D::set_shader_override(const Ref<Shader> &p_shader) {
 	_update_material_shader();
 }
 
-String Landscape3D::get_builtin_shader_code() {
-	return LandscapeShader::get_code();
+String Landscape3D::get_builtin_shader_code(bool p_holes) {
+	return LandscapeShader::get_code(p_holes);
 }
 
 void Landscape3D::_update_layer_params() {
@@ -493,14 +521,19 @@ void Landscape3D::_update_micro_detail() {
 		amplitude *= displacement_scale;
 	}
 	const int levels = amplitude > 0.0 ? micro_detail_levels : 0;
-	micro_amplitude = amplitude;
+	if (amplitude != micro_amplitude) {
+		micro_amplitude = amplitude;
+		for (int i = 0; i < 2; i++) {
+			if (multimeshes[i].is_valid()) {
+				RenderingServer::get_singleton()->multimesh_set_custom_aabb(multimeshes[i], _get_local_aabb());
+			}
+		}
+	}
 	if (levels != micro_levels_in_use) {
 		micro_levels_in_use = levels;
 		lod_dirty = true;
 	}
 	max_level_in_use = lod_tree.get_max_level() + micro_levels_in_use;
-	_set_material_param("ls_micro_levels", micro_levels_in_use);
-	_set_material_param("ls_max_level", max_level_in_use);
 	lod_dirty = true;
 }
 
@@ -519,6 +552,7 @@ void Landscape3D::set_patch_size(int p_size) {
 void Landscape3D::set_lod_pixel_error(float p_error) {
 	lod_pixel_error = MAX(p_error, 0.1f);
 	lod_dirty = true;
+	RenderingServerDefault::redraw_request();
 }
 
 void Landscape3D::set_micro_detail_levels(int p_levels) {
@@ -529,11 +563,13 @@ void Landscape3D::set_micro_detail_levels(int p_levels) {
 	micro_detail_levels = p_levels;
 	lod_resources_dirty = true;
 	layers_dirty = true;
+	RenderingServerDefault::redraw_request();
 }
 
 void Landscape3D::set_displacement_scale(float p_scale) {
 	displacement_scale = MAX(p_scale, 0.0f);
 	layers_dirty = true;
+	RenderingServerDefault::redraw_request();
 }
 
 void Landscape3D::set_max_patches(int p_count) {
@@ -548,21 +584,25 @@ void Landscape3D::set_max_patches(int p_count) {
 void Landscape3D::set_shadow_lod_bias(float p_bias) {
 	shadow_lod_bias = MAX(p_bias, 1.0f);
 	lod_dirty = true;
+	RenderingServerDefault::redraw_request();
 }
 
 void Landscape3D::set_shadow_distance(float p_distance) {
 	shadow_distance = MAX(p_distance, 0.0f);
 	lod_dirty = true;
+	RenderingServerDefault::redraw_request();
 }
 
 void Landscape3D::set_lod_camera_path(const NodePath &p_path) {
 	lod_camera_path = p_path;
 	lod_dirty = true;
+	RenderingServerDefault::redraw_request();
 }
 
 void Landscape3D::set_freeze_lod(bool p_freeze) {
 	freeze_lod = p_freeze;
 	lod_dirty = true;
+	RenderingServerDefault::redraw_request();
 }
 
 void Landscape3D::set_debug_view(DebugView p_view) {
@@ -641,6 +681,32 @@ void Landscape3D::_upload_weights(const Rect2i &p_rect) {
 #endif
 }
 
+void Landscape3D::_upload_holes(const Rect2i &p_rect) {
+#ifdef RD_ENABLED
+	if (!gpu || !gpu_holes || !data->has_holes()) {
+		return;
+	}
+	RenderingServer *rs = RenderingServer::get_singleton();
+	const Vector2i size = data->get_size();
+	const uint8_t *holes = data->get_holes_ptr();
+	for (int z = p_rect.position.y; z < p_rect.get_end().y; z += UPLOAD_CHUNK) {
+		for (int x = p_rect.position.x; x < p_rect.get_end().x; x += UPLOAD_CHUNK) {
+			const Rect2i chunk(x, z, MIN(UPLOAD_CHUNK, p_rect.get_end().x - x), MIN(UPLOAD_CHUNK, p_rect.get_end().y - z));
+			Vector<uint8_t> bytes;
+			bytes.resize(int64_t(chunk.size.x) * chunk.size.y);
+			uint8_t *w = bytes.ptrw();
+			for (int row = 0; row < chunk.size.y; row++) {
+				const uint8_t *src = holes + int64_t(chunk.position.y + row) * size.x + chunk.position.x;
+				for (int i = 0; i < chunk.size.x; i++) {
+					w[int64_t(row) * chunk.size.x + i] = src[i] ? 255 : 0;
+				}
+			}
+			rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::upload_holes).bind(chunk, bytes));
+		}
+	}
+#endif
+}
+
 void Landscape3D::_upload_bounds(const LocalVector<LandscapeLodTree::Range> &p_ranges) {
 #ifdef RD_ENABLED
 	if (!gpu) {
@@ -663,17 +729,29 @@ void Landscape3D::_full_update() {
 	full_update_pending = false;
 	dirty_heights.clear();
 	dirty_weights.clear();
+	dirty_holes.clear();
 
 	lod_tree.build(data.ptr(), patch_size);
+	if (gpu_holes != data->has_holes()) {
+		gpu_holes = data->has_holes();
+		_update_material_shader();
+	}
 	const Vector2i size = data->get_size();
 	const Rect2i full(Point2i(), size);
 
 #ifdef RD_ENABLED
 	if (gpu) {
 		RenderingServer *rs = RenderingServer::get_singleton();
-		rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::setup_maps).bind(size, data->get_weightmap_count(), height_texture, normal_texture, weights_texture));
+		Array weights_rs;
+		for (const RID &weights : weights_textures) {
+			weights_rs.push_back(weights);
+		}
+		rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::setup_maps).bind(size, data->get_weightmap_count(), gpu_holes, height_texture, normal_texture, weights_rs, holes_texture));
+		// Depending on its RD format, the normal map is exposed as RG or as luminance-alpha.
+		_set_material_param("ls_normal_rg", rs->texture_get_format(normal_texture) == Image::FORMAT_RG8);
 		_upload_heights(full);
 		_upload_weights(full);
+		_upload_holes(full);
 		rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::update_normals).bind(full, float(data->get_vertex_spacing())));
 		rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::update_weight_mips).bind(full));
 	}
@@ -684,6 +762,7 @@ void Landscape3D::_full_update() {
 	_set_material_param("ls_patch_quads", patch_size);
 	_set_material_param("ls_patch_quads_log2", int(Math::get_shift_from_power_of_2(uint32_t(patch_size))));
 	_set_material_param("ls_weightmap_count", MAX(data->get_weightmap_count(), 1));
+	_set_material_param("ls_holes_enabled", gpu_holes);
 
 	lod_resources_dirty = true;
 	layers_dirty = true;
@@ -756,6 +835,18 @@ void Landscape3D::_process_pending_changes() {
 		}
 		dirty_weights.clear();
 	}
+
+	if (!dirty_holes.is_empty()) {
+		if (data->has_holes() != gpu_holes) {
+			full_update_pending = true; // The hole mask texture must be (re)allocated.
+		} else {
+			for (const Rect2i &rect : dirty_holes) {
+				_upload_holes(rect);
+				_mark_collision_dirty(rect);
+			}
+		}
+		dirty_holes.clear();
+	}
 }
 
 Camera3D *Landscape3D::_get_lod_camera() const {
@@ -774,40 +865,34 @@ Camera3D *Landscape3D::_get_lod_camera() const {
 	return camera;
 }
 
-void Landscape3D::_update_lod() {
-#ifdef RD_ENABLED
-	if (!gpu || !lod_tree.is_valid() || freeze_lod) {
-		return;
-	}
+bool Landscape3D::_update_lod_camera() {
 	Camera3D *camera = _get_lod_camera();
 	if (!camera || !camera->is_inside_tree() || !camera->get_viewport()) {
-		return;
+		return lod_camera.valid;
 	}
 
 	const Transform3D global = get_global_transform();
 	const Transform3D inverse = global.affine_inverse();
-	const Transform3D camera_xform = camera->get_camera_transform();
 	const Projection projection = camera->get_camera_projection();
-	const bool orthogonal = camera->get_projection() == Camera3D::PROJECTION_ORTHOGONAL;
 	const real_t viewport_height = MAX(camera->get_viewport()->get_visible_rect().size.y, real_t(1.0));
 	const Vector3 scale = global.basis.get_scale();
-	const real_t avg_scale = MAX((Math::abs(scale.x) + Math::abs(scale.y) + Math::abs(scale.z)) / 3.0, CMP_EPSILON);
 
+	lod_camera.valid = true;
+	lod_camera.orthogonal = camera->get_projection() == Camera3D::PROJECTION_ORTHOGONAL;
+	lod_camera.scale = MAX((Math::abs(scale.x) + Math::abs(scale.y) + Math::abs(scale.z)) / 3.0, CMP_EPSILON);
 	// Pixels per local unit at distance 1 (perspective) or at any distance (orthogonal).
-	real_t projection_factor = viewport_height * 0.5 * projection.columns[1][1];
-	if (orthogonal) {
-		projection_factor *= avg_scale;
+	lod_camera.projection_factor = viewport_height * 0.5 * projection.columns[1][1];
+	if (lod_camera.orthogonal) {
+		lod_camera.projection_factor *= lod_camera.scale;
 	}
+	lod_camera.position = inverse.xform(camera->get_camera_transform().origin);
 
-	const Vector3 camera_local = inverse.xform(camera_xform.origin);
-	const int micro = micro_levels_in_use;
-	const int heightmap_level = lod_tree.get_max_level();
-	const int max_level = heightmap_level + micro;
-	const Vector2i size = data->get_size();
-
-	LandscapeLodParams params;
 	const Vector<Plane> planes = camera->get_frustum();
-	for (int i = 0; i < 6 && i < planes.size(); i++) {
+	for (int i = 0; i < 6; i++) {
+		if (i >= planes.size()) {
+			lod_camera.planes[i] = Plane(Vector3(0, 0, 0), 1e30); // Never culls.
+			continue;
+		}
 		// Transform the world plane into landscape local space.
 		const Plane &p = planes[i];
 		Vector3 normal = global.basis.xform_inv(p.normal);
@@ -817,10 +902,35 @@ void Landscape3D::_update_lod() {
 			normal /= len;
 			d /= len;
 		}
-		params.planes[i][0] = normal.x;
-		params.planes[i][1] = normal.y;
-		params.planes[i][2] = normal.z;
-		params.planes[i][3] = d;
+		lod_camera.planes[i] = Plane(normal, d);
+	}
+	return true;
+}
+
+void Landscape3D::_update_lod() {
+#ifdef RD_ENABLED
+	if (!gpu || !lod_tree.is_valid()) {
+		return;
+	}
+	// A frozen LOD keeps the last camera, but still follows data and setting changes.
+	if ((!freeze_lod || !lod_camera.valid) && !_update_lod_camera()) {
+		return;
+	}
+
+	const real_t projection_factor = lod_camera.projection_factor;
+	const bool orthogonal = lod_camera.orthogonal;
+	const Vector3 camera_local = lod_camera.position;
+	const int micro = micro_levels_in_use;
+	const int heightmap_level = lod_tree.get_max_level();
+	const int max_level = heightmap_level + micro;
+	const Vector2i size = data->get_size();
+
+	LandscapeLodParams params;
+	for (int i = 0; i < 6; i++) {
+		params.planes[i][0] = lod_camera.planes[i].normal.x;
+		params.planes[i][1] = lod_camera.planes[i].normal.y;
+		params.planes[i][2] = lod_camera.planes[i].normal.z;
+		params.planes[i][3] = lod_camera.planes[i].d;
 	}
 	params.camera[0] = camera_local.x;
 	params.camera[1] = camera_local.y;
@@ -849,6 +959,7 @@ void Landscape3D::_update_lod() {
 	}
 
 	RenderingServer *rs = RenderingServer::get_singleton();
+	bool dispatched = false;
 	for (int list = 0; list < 2; list++) {
 		if (list == LandscapeGPU::LIST_SHADOW) {
 			if (!cast_shadows) {
@@ -856,7 +967,7 @@ void Landscape3D::_update_lod() {
 			}
 			params.lod[0] = lod_pixel_error * shadow_lod_bias;
 			params.flags[0] = 0; // Shadow casters outside of the view frustum still matter.
-			params.unit[1] = shadow_distance / avg_scale;
+			params.unit[1] = shadow_distance / lod_camera.scale;
 		}
 		Vector<uint8_t> bytes;
 		bytes.resize(sizeof(LandscapeLodParams));
@@ -864,9 +975,18 @@ void Landscape3D::_update_lod() {
 		if (lod_dirty || bytes != last_lod_params[list]) {
 			last_lod_params[list] = bytes;
 			rs->call_on_render_thread(callable_mp(gpu, &LandscapeGPU::run_lod).bind(list, bytes, max_level));
+			dispatched = true;
 		}
 	}
 	lod_dirty = false;
+
+	// The vertex shader must interpret the patches with the settings used by the traversal.
+	if (dispatched && (material_micro_levels != micro || material_max_level != max_level)) {
+		material_micro_levels = micro;
+		material_max_level = max_level;
+		_set_material_param("ls_micro_levels", micro);
+		_set_material_param("ls_max_level", max_level);
+	}
 
 	if (!camera_local.is_equal_approx(last_lod_camera)) {
 		last_lod_camera = camera_local;
@@ -956,15 +1076,21 @@ void Landscape3D::_build_collision_tile(const Vector2i &p_tile, CollisionTile &r
 	const int width = (x1 - x0 + step - 1) / step + 1;
 	const int depth = (z1 - z0 + step - 1) / step + 1;
 
-	PackedFloat32Array heights;
+	Vector<real_t> heights;
 	heights.resize(width * depth);
-	float *w = heights.ptrw();
+	real_t *w = heights.ptrw();
 	float min_h = Math::INF;
 	float max_h = -Math::INF;
+	const bool cut_holes = data->has_holes() && _landscape_physics_supports_holes();
 	for (int j = 0; j < depth; j++) {
 		const int z = MIN(z0 + j * step, z1);
 		for (int i = 0; i < width; i++) {
 			const int x = MIN(x0 + i * step, x1);
+			if (cut_holes && data->is_hole(x, z)) {
+				// NaN samples are holes in the Jolt height field.
+				w[j * width + i] = Math::NaN;
+				continue;
+			}
 			const float h = data->get_height_fast(x, z);
 			w[j * width + i] = h;
 			min_h = MIN(min_h, h);
@@ -972,6 +1098,11 @@ void Landscape3D::_build_collision_tile(const Vector2i &p_tile, CollisionTile &r
 		}
 	}
 
+	if (min_h > max_h) {
+		// The whole tile is a hole.
+		min_h = 0.0;
+		max_h = 0.0;
+	}
 	if (r_tile.shape.is_null()) {
 		r_tile.shape = ps->heightmap_shape_create();
 	}
@@ -1235,6 +1366,15 @@ bool Landscape3D::intersect_ray(const Vector3 &p_from, const Vector3 &p_directio
 		const real_t tc = MIN(t, t_end);
 		p = from + dir * tc;
 		const real_t diff = p.y - data->sample_height(p.x, p.z);
+		if (diff <= 0.0 && data->has_holes() && data->is_hole(int(Math::round(p.x / data->get_vertex_spacing())), int(Math::round(p.z / data->get_vertex_spacing())))) {
+			// Falling through a hole.
+			prev_t = tc;
+			prev_diff = diff;
+			if (tc >= t_end) {
+				break;
+			}
+			continue;
+		}
 		if (diff <= 0.0) {
 			// Refine the intersection with a few bisection steps.
 			real_t a = prev_t;
@@ -1331,7 +1471,18 @@ PackedStringArray Landscape3D::get_configuration_warnings() const {
 	} else if (!data->is_valid()) {
 		warnings.push_back(RTR("The assigned LandscapeData is empty."));
 	}
-	if (!rendering_supported && RenderingServer::get_singleton()->get_rendering_device() == nullptr && !OS::get_singleton()->get_current_rendering_method().is_empty() && OS::get_singleton()->get_current_rendering_method() == "gl_compatibility") {
+	if (data.is_valid() && data->is_valid() && collision_enabled && collision_radius <= 0.0) {
+		const Vector2i size = data->get_size();
+		if (int64_t(size.x) * size.y > int64_t(4097) * 4097) {
+			warnings.push_back(RTR("Collision is generated for the whole landscape, which uses a lot of memory for large terrains. Consider setting a Collision Radius to only build collision around the camera."));
+		}
+	}
+#ifndef PHYSICS_3D_DISABLED
+	if (data.is_valid() && data->has_holes() && collision_enabled && !_landscape_physics_supports_holes()) {
+		warnings.push_back(RTR("Holes are only cut in the collision with Jolt Physics (Project Settings > Physics > 3D > Physics Engine). With the current physics engine the collision stays solid under holes."));
+	}
+#endif // PHYSICS_3D_DISABLED
+	if (!rendering_supported && OS::get_singleton()->get_current_rendering_method() == "gl_compatibility") {
 		warnings.push_back(RTR("Landscape3D uses GPU compute (quadtree traversal and indirect drawing) and requires the Forward+ or Mobile renderer."));
 	}
 	return warnings;
@@ -1339,6 +1490,7 @@ PackedStringArray Landscape3D::get_configuration_warnings() const {
 
 void Landscape3D::cleanup_shared_resources() {
 	builtin_shader.unref();
+	builtin_shader_holes.unref();
 }
 
 /* Scene */
@@ -1410,7 +1562,7 @@ void Landscape3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_layer_texture_size"), &Landscape3D::get_layer_texture_size);
 	ClassDB::bind_method(D_METHOD("set_shader_override", "shader"), &Landscape3D::set_shader_override);
 	ClassDB::bind_method(D_METHOD("get_shader_override"), &Landscape3D::get_shader_override);
-	ClassDB::bind_static_method("Landscape3D", D_METHOD("get_builtin_shader_code"), &Landscape3D::get_builtin_shader_code);
+	ClassDB::bind_static_method("Landscape3D", D_METHOD("get_builtin_shader_code", "holes"), &Landscape3D::get_builtin_shader_code, DEFVAL(false));
 
 	ClassDB::bind_method(D_METHOD("set_patch_size", "size"), &Landscape3D::set_patch_size);
 	ClassDB::bind_method(D_METHOD("get_patch_size"), &Landscape3D::get_patch_size);

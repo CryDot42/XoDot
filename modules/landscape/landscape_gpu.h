@@ -72,6 +72,7 @@ public:
 
 	static constexpr int MAX_LEVELS = 16;
 	static constexpr int COUNTER_COUNT = 32;
+	static constexpr int MAX_WEIGHTMAPS = 4;
 
 private:
 	enum LodShaderMode {
@@ -81,8 +82,10 @@ private:
 	};
 
 	enum MapsShaderMode {
-		MAPS_MODE_NORMALS,
-		MAPS_MODE_DOWNSAMPLE,
+		MAPS_MODE_NORMALS_RG8,
+		MAPS_MODE_NORMALS_RGBA8,
+		MAPS_MODE_DOWNSAMPLE_RGBA8,
+		MAPS_MODE_DOWNSAMPLE_RG8,
 		MAPS_MODE_MAX,
 	};
 
@@ -104,14 +107,21 @@ private:
 	bool initialized = false;
 
 	// Maps.
-	Vector2i size;
-	int mipmaps = 1;
-	int weight_layers = 0;
-	RID height_texture;
-	RID normal_texture;
-	RID weight_texture;
-	LocalVector<RID> normal_views; // One per mipmap.
-	LocalVector<RID> weight_views; // layer * mipmaps + mipmap.
+	struct Maps {
+		Vector2i size;
+		int mipmaps = 1;
+		RID height; // R32F.
+		RID normal; // Normal X and Z in RG (RG8, or RGBA8 if RG8 storage isn't supported), with mipmaps.
+		RenderingDevice::DataFormat normal_format = RenderingDevice::DATA_FORMAT_R8G8_UNORM;
+		RID weights[MAX_WEIGHTMAPS]; // RGBA8 with mipmaps, 1x1 when unused.
+		int weightmap_count = 0;
+		RID holes; // R8, 1x1 when the landscape has no holes.
+		bool has_holes = false;
+		LocalVector<RID> normal_views; // One per mipmap.
+		LocalVector<RID> weight_views[MAX_WEIGHTMAPS];
+	};
+	Maps maps;
+	bool maps_valid = false;
 
 	// LOD.
 	RID bounds_buffer;
@@ -137,18 +147,20 @@ private:
 	void _stats_received(const Vector<uint8_t> &p_data, int p_list);
 
 	void _ensure_initialized();
-	void _free_maps();
+	void _free_maps(Maps &r_maps);
+	RID _create_map_texture(RenderingDevice::DataFormat p_format, const Vector2i &p_size, int p_mipmaps, bool p_storage, const String &p_name);
 	void _free_lod();
 	void _upload_rect(RID p_texture, RenderingDevice::DataFormat p_format, const Rect2i &p_rect, int p_layer, const Vector<uint8_t> &p_data);
-	void _downsample(const LocalVector<RID> &p_views, int p_view_offset, const Rect2i &p_rect);
+	void _downsample(const LocalVector<RID> &p_views, int p_view_offset, const Rect2i &p_rect, bool p_rg8);
 
 protected:
 	static void _bind_methods() {}
 
 public:
-	void setup_maps(const Vector2i &p_size, int p_weight_layers, RID p_height_rs, RID p_normal_rs, RID p_weights_rs);
+	void setup_maps(const Vector2i &p_size, int p_weightmap_count, bool p_holes, RID p_height_rs, RID p_normal_rs, const Array &p_weights_rs, RID p_holes_rs);
 	void upload_heights(const Rect2i &p_rect, const Vector<uint8_t> &p_data);
-	void upload_weights(const Rect2i &p_rect, int p_layer, const Vector<uint8_t> &p_data);
+	void upload_weights(const Rect2i &p_rect, int p_weightmap, const Vector<uint8_t> &p_data);
+	void upload_holes(const Rect2i &p_rect, const Vector<uint8_t> &p_data);
 	void update_normals(const Rect2i &p_rect, float p_spacing);
 	void update_weight_mips(const Rect2i &p_rect);
 

@@ -58,6 +58,7 @@ void LandscapeData::create(const Vector2i &p_size, real_t p_vertex_spacing, floa
 	for (int i = 0; i < MAX_WEIGHTMAPS; i++) {
 		weightmaps[i].clear();
 	}
+	holes.clear();
 	weightmap_count = 1;
 	_allocate_weightmap(0);
 	fill_layer(0);
@@ -88,8 +89,17 @@ void LandscapeData::resize(const Vector2i &p_size) {
 		weight_images.push_back(img);
 	}
 
+	Ref<Image> holes_image;
+	if (has_holes()) {
+		holes_image = Image::create_from_data(size.x, size.y, false, Image::FORMAT_R8, holes);
+		holes_image->resize(p_size.x, p_size.y, Image::INTERPOLATE_NEAREST);
+	}
+
 	size = p_size;
 	vertex_spacing = MAX(world_size.x / real_t(size.x - 1), CMP_EPSILON);
+	if (holes_image.is_valid()) {
+		holes = holes_image->get_data();
+	}
 
 	const Vector<uint8_t> height_bytes = height_image->get_data();
 	heights.resize(int64_t(size.x) * size.y);
@@ -350,6 +360,45 @@ void LandscapeData::remove_layer(int p_layer) {
 	notify_region_changed(Rect2i(Point2i(), size), CHANGED_WEIGHTS);
 }
 
+bool LandscapeData::is_hole(int p_x, int p_z) const {
+	if (holes.is_empty()) {
+		return false;
+	}
+	p_x = CLAMP(p_x, 0, size.x - 1);
+	p_z = CLAMP(p_z, 0, size.y - 1);
+	return holes[_index(p_x, p_z)] != 0;
+}
+
+void LandscapeData::set_hole(int p_x, int p_z, bool p_hole) {
+	ERR_FAIL_INDEX(p_x, size.x);
+	ERR_FAIL_INDEX(p_z, size.y);
+	if (holes.is_empty()) {
+		if (!p_hole) {
+			return;
+		}
+		get_holes_ptrw();
+	}
+	holes.write[_index(p_x, p_z)] = p_hole ? 1 : 0;
+}
+
+uint8_t *LandscapeData::get_holes_ptrw() {
+	if (holes.is_empty() && is_valid()) {
+		// Allocated on first use. Landscapes using this data need to recreate their GPU resources.
+		holes.resize(int64_t(size.x) * size.y);
+		memset(holes.ptrw(), 0, holes.size());
+		emit_changed();
+	}
+	return holes.ptrw();
+}
+
+void LandscapeData::clear_holes() {
+	if (holes.is_empty()) {
+		return;
+	}
+	holes.clear();
+	emit_changed();
+}
+
 const uint8_t *LandscapeData::get_weightmap_ptr(int p_index) const {
 	ERR_FAIL_INDEX_V(p_index, weightmap_count, nullptr);
 	return weightmaps[p_index].ptr();
@@ -387,6 +436,16 @@ Dictionary LandscapeData::get_region(const Rect2i &p_rect, bool p_heights, bool 
 			memcpy(w + z * rect.size.x, h + _index(rect.position.x, rect.position.y + z), sizeof(float) * rect.size.x);
 		}
 		region["heights"] = data;
+
+		if (has_holes()) {
+			PackedByteArray hole_data;
+			hole_data.resize(rect.size.x * rect.size.y);
+			uint8_t *hw = hole_data.ptrw();
+			for (int z = 0; z < rect.size.y; z++) {
+				memcpy(hw + z * rect.size.x, holes.ptr() + _index(rect.position.x, rect.position.y + z), rect.size.x);
+			}
+			region["holes"] = hole_data;
+		}
 	}
 
 	if (p_weights) {
@@ -425,6 +484,23 @@ void LandscapeData::set_region(const Dictionary &p_region) {
 		}
 		flags |= CHANGED_HEIGHTS;
 		height_range_dirty = true;
+	}
+
+	if (p_region.has("holes") || (p_region.has("heights") && has_holes())) {
+		// Snapshots taken before the first hole was painted don't contain holes: restore them as solid.
+		const PackedByteArray data = p_region.get("holes", PackedByteArray());
+		ERR_FAIL_COND(!data.is_empty() && data.size() != rect.size.x * rect.size.y);
+		if (!data.is_empty() || has_holes()) {
+			uint8_t *hw = get_holes_ptrw();
+			for (int z = 0; z < rect.size.y; z++) {
+				if (data.is_empty()) {
+					memset(hw + _index(rect.position.x, rect.position.y + z), 0, rect.size.x);
+				} else {
+					memcpy(hw + _index(rect.position.x, rect.position.y + z), data.ptr() + z * rect.size.x, rect.size.x);
+				}
+			}
+			flags |= CHANGED_HOLES;
+		}
 	}
 
 	if (p_region.has("weightmaps")) {
@@ -519,23 +595,39 @@ Ref<Image> LandscapeData::_load_png16(const String &p_path) {
 		ERR_FAIL_V_MSG(Ref<Image>(), vformat("Invalid PNG file '%s': %s.", p_path, png_img.message));
 	}
 
-	// 16-bit linear grayscale keeps the full precision of the source heightmap.
-	png_img.format = PNG_FORMAT_LINEAR_Y;
 	const int width = png_img.width;
 	const int height = png_img.height;
-	Vector<uint16_t> pixels;
-	pixels.resize(int64_t(width) * height);
-	if (!png_image_finish_read(&png_img, nullptr, pixels.ptrw(), 0, nullptr)) {
-		png_image_free(&png_img);
-		ERR_FAIL_V_MSG(Ref<Image>(), vformat("Failed to decode PNG file '%s': %s.", p_path, png_img.message));
-	}
+	const bool is_16_bit = (png_img.format & PNG_FORMAT_FLAG_LINEAR) != 0;
 
 	Vector<uint8_t> data;
-	data.resize(pixels.size() * sizeof(float));
+	data.resize(int64_t(width) * height * sizeof(float));
 	float *dst = reinterpret_cast<float *>(data.ptrw());
-	const uint16_t *src = pixels.ptr();
-	for (int64_t i = 0; i < pixels.size(); i++) {
-		dst[i] = src[i] / 65535.0f;
+	if (is_16_bit) {
+		// 16-bit linear grayscale keeps the full precision of the source heightmap.
+		png_img.format = PNG_FORMAT_LINEAR_Y;
+		Vector<uint16_t> pixels;
+		pixels.resize(int64_t(width) * height);
+		if (!png_image_finish_read(&png_img, nullptr, pixels.ptrw(), 0, nullptr)) {
+			png_image_free(&png_img);
+			ERR_FAIL_V_MSG(Ref<Image>(), vformat("Failed to decode PNG file '%s': %s.", p_path, png_img.message));
+		}
+		const uint16_t *src = pixels.ptr();
+		for (int64_t i = 0; i < pixels.size(); i++) {
+			dst[i] = src[i] / 65535.0f;
+		}
+	} else {
+		// 8-bit files are read as stored (no gamma conversion), heightmaps are linear data.
+		png_img.format = PNG_FORMAT_GRAY;
+		Vector<uint8_t> pixels;
+		pixels.resize(int64_t(width) * height);
+		if (!png_image_finish_read(&png_img, nullptr, pixels.ptrw(), 0, nullptr)) {
+			png_image_free(&png_img);
+			ERR_FAIL_V_MSG(Ref<Image>(), vformat("Failed to decode PNG file '%s': %s.", p_path, png_img.message));
+		}
+		const uint8_t *src = pixels.ptr();
+		for (int64_t i = 0; i < pixels.size(); i++) {
+			dst[i] = src[i] / 255.0f;
+		}
 	}
 	return Image::create_from_data(width, height, false, Image::FORMAT_RF, data);
 }
@@ -663,6 +755,68 @@ Error LandscapeData::export_heightmap(const String &p_path) const {
 	ERR_FAIL_V_MSG(ERR_FILE_UNRECOGNIZED, vformat("Unsupported heightmap export format: '%s'. Use .exr, .png, .r16 or .raw.", ext));
 }
 
+void LandscapeData::set_layer_weights_image(int p_layer, const Ref<Image> &p_image) {
+	ERR_FAIL_INDEX(p_layer, MAX_LAYERS);
+	ERR_FAIL_COND(p_image.is_null() || p_image->is_empty());
+	ERR_FAIL_COND(!is_valid());
+	ensure_layer_capacity(p_layer + 1);
+
+	Ref<Image> img = p_image->duplicate();
+	if (img->is_compressed()) {
+		img->decompress();
+	}
+	img->clear_mipmaps();
+	img->convert(Image::FORMAT_RF);
+	if (img->get_width() != size.x || img->get_height() != size.y) {
+		img->resize(size.x, size.y, Image::INTERPOLATE_BILINEAR);
+	}
+	const Vector<uint8_t> bytes = img->get_data();
+	const float *mask = reinterpret_cast<const float *>(bytes.ptr());
+
+	// The imported mask becomes the weight of the layer, the other layers share the rest.
+	float w[MAX_LAYERS];
+	for (int z = 0; z < size.y; z++) {
+		for (int x = 0; x < size.x; x++) {
+			const float target = CLAMP(mask[z * size.x + x], 0.0f, 1.0f);
+			get_weights(x, z, w);
+			float others = 0.0;
+			for (int l = 0; l < MAX_LAYERS; l++) {
+				if (l != p_layer) {
+					others += w[l];
+				}
+			}
+			for (int l = 0; l < MAX_LAYERS; l++) {
+				if (l == p_layer) {
+					w[l] = target;
+				} else if (others > 0.0f) {
+					w[l] = w[l] / others * (1.0f - target);
+				}
+			}
+			if (others <= 0.0f && target < 1.0f) {
+				w[p_layer == 0 ? 1 : 0] = 1.0f - target;
+			}
+			set_weights(x, z, w);
+		}
+	}
+	notify_region_changed(Rect2i(Point2i(), size), CHANGED_WEIGHTS);
+}
+
+Error LandscapeData::import_layer_weights(int p_layer, const String &p_path) {
+	ERR_FAIL_COND_V(!is_valid(), ERR_UNCONFIGURED);
+	const String ext = p_path.get_extension().to_lower();
+	Ref<Image> img;
+	if (ext == "png") {
+		img = _load_png16(p_path);
+	} else if (ext == "r16" || ext == "raw") {
+		img = _load_raw16(p_path);
+	} else {
+		img = Image::load_from_file(p_path);
+	}
+	ERR_FAIL_COND_V_MSG(img.is_null() || img->is_empty(), ERR_FILE_CORRUPT, vformat("Can't load weightmap: '%s'.", p_path));
+	set_layer_weights_image(p_layer, img);
+	return OK;
+}
+
 void LandscapeData::notify_region_changed(const Rect2i &p_rect, int p_flags) {
 	const Rect2i rect = clip_rect(p_rect);
 	if (!rect.has_area()) {
@@ -692,6 +846,15 @@ void LandscapeData::_set_weightmaps(const Array &p_weightmaps) {
 			weightmaps[i].clear();
 		}
 	}
+}
+
+void LandscapeData::_set_holes(const PackedByteArray &p_holes) {
+	ERR_FAIL_COND_MSG(!p_holes.is_empty() && p_holes.size() != int64_t(size.x) * size.y, "The hole mask doesn't match the landscape resolution.");
+	holes = p_holes;
+}
+
+PackedByteArray LandscapeData::_get_holes() const {
+	return holes;
 }
 
 Array LandscapeData::_get_weightmaps() const {
@@ -737,6 +900,13 @@ void LandscapeData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_weightmap_image", "index", "image"), &LandscapeData::set_weightmap_image);
 	ClassDB::bind_method(D_METHOD("import_heightmap", "path", "scale", "offset", "resize"), &LandscapeData::import_heightmap, DEFVAL(1.0), DEFVAL(0.0), DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("export_heightmap", "path"), &LandscapeData::export_heightmap);
+	ClassDB::bind_method(D_METHOD("import_layer_weights", "layer", "path"), &LandscapeData::import_layer_weights);
+	ClassDB::bind_method(D_METHOD("set_layer_weights_image", "layer", "image"), &LandscapeData::set_layer_weights_image);
+
+	ClassDB::bind_method(D_METHOD("has_holes"), &LandscapeData::has_holes);
+	ClassDB::bind_method(D_METHOD("is_hole", "x", "z"), &LandscapeData::is_hole);
+	ClassDB::bind_method(D_METHOD("set_hole", "x", "z", "hole"), &LandscapeData::set_hole);
+	ClassDB::bind_method(D_METHOD("clear_holes"), &LandscapeData::clear_holes);
 
 	ClassDB::bind_method(D_METHOD("notify_region_changed", "rect", "flags"), &LandscapeData::notify_region_changed);
 
@@ -744,16 +914,20 @@ void LandscapeData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_get_heights"), &LandscapeData::_get_heights);
 	ClassDB::bind_method(D_METHOD("_set_weightmaps", "weightmaps"), &LandscapeData::_set_weightmaps);
 	ClassDB::bind_method(D_METHOD("_get_weightmaps"), &LandscapeData::_get_weightmaps);
+	ClassDB::bind_method(D_METHOD("_set_holes", "holes"), &LandscapeData::_set_holes);
+	ClassDB::bind_method(D_METHOD("_get_holes"), &LandscapeData::_get_holes);
 
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2I, "size", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY), "_set_size", "get_size");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "vertex_spacing", PROPERTY_HINT_RANGE, "0.01,100,0.001,or_greater,suffix:m"), "set_vertex_spacing", "get_vertex_spacing");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_FLOAT32_ARRAY, "heights", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "_set_heights", "_get_heights");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "weightmaps", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "_set_weightmaps", "_get_weightmaps");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "holes", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "_set_holes", "_get_holes");
 
 	ADD_SIGNAL(MethodInfo("region_changed", PropertyInfo(Variant::RECT2I, "rect"), PropertyInfo(Variant::INT, "flags")));
 
 	BIND_ENUM_CONSTANT(CHANGED_HEIGHTS);
 	BIND_ENUM_CONSTANT(CHANGED_WEIGHTS);
+	BIND_ENUM_CONSTANT(CHANGED_HOLES);
 	BIND_ENUM_CONSTANT(CHANGED_ALL);
 
 	BIND_CONSTANT(MAX_RESOLUTION);

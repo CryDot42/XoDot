@@ -78,6 +78,7 @@ private:
 	static constexpr int UNDO_TILE = 64;
 
 	Landscape3D *landscape = nullptr;
+	ObjectID landscape_id;
 	Ref<LandscapeBrush> brush;
 	Mode mode = MODE_SCULPT;
 	LandscapeBrush::Tool sculpt_tool = LandscapeBrush::TOOL_SCULPT;
@@ -116,6 +117,7 @@ private:
 	EditorFileDialog *create_dialog = nullptr;
 	EditorFileDialog *import_dialog = nullptr;
 	EditorFileDialog *export_dialog = nullptr;
+	EditorFileDialog *weights_dialog = nullptr;
 	SpinBox *resize_x = nullptr;
 	SpinBox *resize_z = nullptr;
 
@@ -124,6 +126,8 @@ private:
 	Ref<ButtonGroup> paint_tool_group;
 	ItemList *layer_list = nullptr;
 	int selected_layer = 0;
+	uint64_t layer_list_hash = 0;
+	uint64_t _compute_layer_hash() const;
 
 	// Brush settings.
 	SpinBox *brush_size = nullptr;
@@ -170,6 +174,8 @@ private:
 	void _add_layer();
 	void _remove_layer();
 	void _fill_layer();
+	void _import_weights_pressed();
+	void _import_weights_file_selected(const String &p_path);
 
 	void _create_pressed();
 	void _create_file_selected(const String &p_path);
@@ -188,6 +194,7 @@ private:
 	void _snapshot(const Rect2i &p_rect);
 	void _pick(const Vector3 &p_local);
 	LandscapeBrush::Tool _get_current_tool() const;
+	bool _validate_landscape();
 	void _set_data_edited();
 
 	void _apply_regions(const Ref<LandscapeData> &p_data, const Array &p_regions);

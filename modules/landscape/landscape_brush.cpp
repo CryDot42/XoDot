@@ -179,6 +179,23 @@ Rect2i LandscapeBrush::_apply_heights(LandscapeData *p_data, const Vector2 &p_ce
 		return Rect2i();
 	}
 
+	if (tool == TOOL_HOLES) {
+		// Visibility: carve holes (or fill them when inverted) where the brush weight is above one half.
+		if (invert && !p_data->has_holes()) {
+			return Rect2i();
+		}
+		uint8_t *holes = p_data->get_holes_ptrw();
+		for (int z = rect.position.y; z < rect.get_end().y; z++) {
+			for (int x = rect.position.x; x < rect.get_end().x; x++) {
+				if (get_weight((x - p_center.x) / radius, (z - p_center.y) / radius) > 0.5f) {
+					holes[int64_t(z) * size_texels.x + x] = invert ? 0 : 1;
+				}
+			}
+		}
+		p_data->notify_region_changed(rect, LandscapeData::CHANGED_HOLES);
+		return rect;
+	}
+
 	float *heights = p_data->get_heights_ptrw();
 	const float sign = invert ? -1.0f : 1.0f;
 	const float rate = float(strength * p_delta);
@@ -581,7 +598,7 @@ void LandscapeBrush::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("apply", "data", "local_center", "delta"), &LandscapeBrush::apply, DEFVAL(1.0));
 	ClassDB::bind_method(D_METHOD("apply_ramp", "data", "local_from", "local_to"), &LandscapeBrush::apply_ramp);
 
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "tool", PROPERTY_HINT_ENUM, "Sculpt,Smooth,Flatten,Ramp,Noise,Erosion,Terrace,Paint,Paint Smooth,Paint Flatten,Paint Noise"), "set_tool", "get_tool");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "tool", PROPERTY_HINT_ENUM, "Sculpt,Smooth,Flatten,Ramp,Noise,Erosion,Terrace,Holes,Paint,Paint Smooth,Paint Flatten,Paint Noise"), "set_tool", "get_tool");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "size", PROPERTY_HINT_RANGE, "0.01,4096,0.01,or_greater,suffix:m"), "set_size", "get_size");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "falloff", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_falloff", "get_falloff");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "strength", PROPERTY_HINT_RANGE, "0,10,0.01"), "set_strength", "get_strength");
@@ -608,6 +625,7 @@ void LandscapeBrush::_bind_methods() {
 	BIND_ENUM_CONSTANT(TOOL_NOISE);
 	BIND_ENUM_CONSTANT(TOOL_EROSION);
 	BIND_ENUM_CONSTANT(TOOL_TERRACE);
+	BIND_ENUM_CONSTANT(TOOL_HOLES);
 	BIND_ENUM_CONSTANT(TOOL_PAINT);
 	BIND_ENUM_CONSTANT(TOOL_PAINT_SMOOTH);
 	BIND_ENUM_CONSTANT(TOOL_PAINT_FLATTEN);

@@ -30,8 +30,9 @@
 		</method>
 		<method name="get_builtin_shader_code" qualifiers="static">
 			<return type="String" />
+			<param index="0" name="holes" type="bool" default="false" />
 			<description>
-				Returns the code of the built-in landscape shader. It can be used as a starting point for a custom [member shader_override].
+				Returns the code of the built-in landscape shader. It can be used as a starting point for a custom [member shader_override]. If [param holes] is [code]true[/code], the variant supporting holes is returned.
 			</description>
 		</method>
 		<method name="get_dominant_layer_at" qualifiers="const">

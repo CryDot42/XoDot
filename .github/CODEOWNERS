@@ -195,6 +195,10 @@
 /modules/gridmap/doc_classes/                 @godotengine/3d-nodes @godotengine/documentation
 /modules/gridmap/editor/                      @godotengine/3d-nodes @godotengine/editor
 /modules/gridmap/tests/                       @godotengine/3d-nodes @godotengine/tests
+/modules/landscape/                           @godotengine/3d-nodes @godotengine/rendering
+/modules/landscape/doc_classes/               @godotengine/3d-nodes @godotengine/documentation
+/modules/landscape/editor/                    @godotengine/3d-nodes @godotengine/editor
+/modules/landscape/tests/                     @godotengine/3d-nodes @godotengine/tests
 /modules/navigation_2d/                       @godotengine/navigation
 /modules/navigation_2d/editor/                @godotengine/navigation @godotengine/editor
 /modules/navigation_3d/                       @godotengine/navigation
