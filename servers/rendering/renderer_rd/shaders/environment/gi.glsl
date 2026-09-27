@@ -736,11 +736,39 @@ vec4 screen_probes_temporal(ivec2 p_pixel, vec3 p_position, vec3 p_normal, float
 		vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
 		if (all(greaterThanEqual(prev_uv, vec2(0.0))) && all(lessThan(prev_uv, vec2(1.0)))) {
 			float prev_depth = dot(screen_probes.prev_view_z, vec4(p_position, 1.0));
-			ivec2 prev_pos = clamp(ivec2(prev_uv * vec2(screen_probes.buffer_size)), ivec2(0), screen_probes.buffer_size - 1);
-			vec4 history_surface = texelFetch(sampler2D(probe_history_surface, linear_sampler), prev_pos, 0);
-			// Only reuse history of the same surface: similar depth and normal.
-			if (abs(history_surface.x - prev_depth) < prev_depth * 0.05 + 0.02 && dot(history_surface.yzw, p_normal) > 0.9) {
-				vec4 history = textureLod(sampler2D(probe_history, linear_sampler), prev_uv, 0.0);
+
+			// Positions are reconstructed at the corner of their pixel, so texel N of the history holds the value of the
+			// point that projects exactly to pixel N (2 * N at half resolution). Filtering around texel centers instead
+			// would shift the history by half a texel every frame, which makes it drift even with a still camera.
+			vec2 history_pos = prev_uv * vec2(scene_data.screen_size);
+			if (sc_half_res) {
+				history_pos *= 0.5;
+			}
+			ivec2 base = ivec2(floor(history_pos));
+			vec2 f = history_pos - vec2(base);
+
+			// Bilinear filtering that only uses texels of the same surface (similar depth and normal), so history
+			// doesn't leak across edges when the camera moves.
+			vec4 history = vec4(0.0);
+			float weight_accum = 0.0;
+			for (int i = 0; i < 4; i++) {
+				ivec2 offset = ivec2(i & 1, i >> 1);
+				ivec2 texel = base + offset;
+				if (any(lessThan(texel, ivec2(0))) || any(greaterThanEqual(texel, screen_probes.buffer_size))) {
+					continue;
+				}
+				vec4 history_surface = texelFetch(sampler2D(probe_history_surface, linear_sampler), texel, 0);
+				if (abs(history_surface.x - prev_depth) >= prev_depth * 0.05 + 0.02 || dot(history_surface.yzw, p_normal) <= 0.9) {
+					continue;
+				}
+				vec2 weights = mix(1.0 - f, f, vec2(offset));
+				float weight = weights.x * weights.y;
+				history += texelFetch(sampler2D(probe_history, linear_sampler), texel, 0) * weight;
+				weight_accum += weight;
+			}
+
+			if (weight_accum > 0.01) {
+				history /= weight_accum;
 				// Reprojection only follows the camera, so moving objects keep less history.
 				float blend = p_dynamic_object ? max(screen_probes.history_blend, 0.5) : screen_probes.history_blend;
 				result = mix(history, p_ambient, blend);
