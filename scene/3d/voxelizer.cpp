@@ -33,6 +33,7 @@
 #include "core/config/project_settings.h"
 #include "core/io/image.h"
 #include "core/math/geometry_3d.h"
+#include "core/math/math_funcs_binary.h"
 #include "scene/resources/texture.h"
 
 static _FORCE_INLINE_ void get_uv_and_normal(const Vector3 &p_pos, const Vector3 *p_vtx, const Vector2 *p_uv, const Vector3 *p_normal, Vector2 &r_uv, Vector3 &r_normal) {
@@ -663,47 +664,72 @@ void Voxelizer::_fixup_plot(int p_idx, int p_level) {
 	}
 }
 
+int Voxelizer::snap_subdiv(int p_subdiv) {
+	uint32_t subdiv = CLAMP(p_subdiv, (int)MIN_SUBDIV, (int)MAX_SUBDIV);
+	if (Math::is_power_of_2(subdiv)) {
+		return subdiv;
+	}
+	// Keep 8 steps per octave. A count that is a multiple of 1/8 of its octave halves exactly until the mipmap
+	// is 8 to 16 cells wide, which is all cone tracing needs from the coarsest level.
+	uint32_t step = Math::previous_power_of_2(subdiv) / 8;
+	subdiv = ((subdiv + step / 2) / step) * step;
+	return MIN(subdiv, (uint32_t)MAX_SUBDIV);
+}
+
+Vector3i Voxelizer::get_axis_cell_count(int p_subdiv, const Vector3 &p_size) {
+	int subdiv = snap_subdiv(p_subdiv);
+	int longest_axis = AABB(Vector3(), p_size).get_longest_axis_index();
+	real_t cell_size = p_size[longest_axis] / subdiv;
+
+	// Largest power of two dividing the longest axis: the mipmap chain only stays exact while every axis
+	// either is a power of two or a multiple of it.
+	uint32_t mipmap_align = uint32_t(subdiv) & ~(uint32_t(subdiv) - 1);
+
+	Vector3i cells;
+	for (int i = 0; i < 3; i++) {
+		if (i == longest_axis) {
+			cells[i] = subdiv;
+			continue;
+		}
+		// Small tolerance so sizes that are an exact fraction of the longest axis don't round up.
+		uint32_t needed = MAX(1, (int)Math::ceil(p_size[i] / cell_size - 0.001));
+		uint32_t po2 = Math::next_power_of_2(needed);
+		uint32_t aligned = ((needed + mipmap_align - 1) / mipmap_align) * mipmap_align;
+		cells[i] = MIN(MIN(po2, aligned), uint32_t(subdiv));
+	}
+	return cells;
+}
+
 void Voxelizer::begin_bake(int p_subdiv, const AABB &p_bounds, float p_exposure_normalization) {
 	sorted = false;
 	original_bounds = p_bounds;
-	cell_subdiv = p_subdiv;
 	exposure_normalization = p_exposure_normalization;
 	bake_cells.resize(1);
 	material_cache.clear();
-
-	//find out the actual real bounds, power of 2, which gets the highest subdivision
-	po2_bounds = p_bounds;
-	int longest_axis = po2_bounds.get_longest_axis_index();
-	axis_cell_size[longest_axis] = 1 << cell_subdiv;
 	leaf_voxel_count = 0;
 
+	int subdiv = snap_subdiv(p_subdiv);
+	Vector3i cells = get_axis_cell_count(subdiv, p_bounds.size);
 	for (int i = 0; i < 3; i++) {
-		if (i == longest_axis) {
-			continue;
-		}
-
-		axis_cell_size[i] = axis_cell_size[longest_axis];
-		real_t axis_size = po2_bounds.size[longest_axis];
-
-		//shrink until fit subdiv
-		while (axis_size / 2.0 >= po2_bounds.size[i]) {
-			axis_size /= 2.0;
-			axis_cell_size[i] >>= 1;
-		}
-
-		po2_bounds.size[i] = po2_bounds.size[longest_axis];
+		axis_cell_size[i] = cells[i];
 	}
 
+	int longest_axis = p_bounds.get_longest_axis_index();
+	cell_size = p_bounds.size[longest_axis] / subdiv;
+
+	// The octree always spans a power of two cube, cells beyond axis_cell_size are never created.
+	cell_subdiv = Math::get_shift_from_power_of_2(Math::next_power_of_2(uint32_t(subdiv)));
+	real_t octree_size = cell_size * (1 << cell_subdiv);
+	po2_bounds = AABB(p_bounds.position, Vector3(octree_size, octree_size, octree_size));
+
 	Transform3D to_bounds;
-	to_bounds.basis.scale(Vector3(po2_bounds.size[longest_axis], po2_bounds.size[longest_axis], po2_bounds.size[longest_axis]));
+	to_bounds.basis.scale(Vector3(octree_size, octree_size, octree_size));
 	to_bounds.origin = po2_bounds.position;
 
 	Transform3D to_grid;
-	to_grid.basis.scale(Vector3(axis_cell_size[longest_axis], axis_cell_size[longest_axis], axis_cell_size[longest_axis]));
+	to_grid.basis.scale(Vector3(1 << cell_subdiv, 1 << cell_subdiv, 1 << cell_subdiv));
 
 	to_cell_space = to_grid * to_bounds.affine_inverse();
-
-	cell_size = po2_bounds.size[longest_axis] / axis_cell_size[longest_axis];
 }
 
 void Voxelizer::end_bake() {

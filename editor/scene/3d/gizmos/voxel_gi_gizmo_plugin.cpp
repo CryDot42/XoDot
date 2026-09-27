@@ -104,10 +104,8 @@ void VoxelGIGizmoPlugin::redraw(EditorNode3DGizmo *p_gizmo) {
 		Vector<Vector3> lines;
 		Vector3 size = probe->get_size();
 
-		static const int subdivs[VoxelGI::SUBDIV_MAX] = { 64, 128, 256, 512 };
-
 		AABB aabb = AABB(-size / 2, size);
-		int subdiv = subdivs[probe->get_subdiv()];
+		int subdiv = probe->get_subdiv_value();
 		float cell_size = aabb.get_longest_axis_size() / subdiv;
 
 		for (int i = 0; i < 12; i++) {

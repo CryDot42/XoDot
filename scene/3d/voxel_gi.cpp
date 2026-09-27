@@ -30,6 +30,7 @@
 
 #include "voxel_gi.h"
 
+#include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/object/class_db.h"
 #include "core/os/os.h"
@@ -290,16 +291,38 @@ void VoxelGI::set_subdiv(Subdiv p_subdiv) {
 	ERR_FAIL_INDEX(p_subdiv, SUBDIV_MAX);
 	subdiv = p_subdiv;
 	update_gizmos();
+	update_configuration_warnings();
+	notify_property_list_changed();
 }
 
 VoxelGI::Subdiv VoxelGI::get_subdiv() const {
 	return subdiv;
 }
 
+void VoxelGI::set_custom_subdiv(int p_subdiv) {
+	// Only some counts keep an exact mipmap chain, so store the one that will actually be baked.
+	custom_subdiv = Voxelizer::snap_subdiv(p_subdiv);
+	update_gizmos();
+	update_configuration_warnings();
+}
+
+int VoxelGI::get_custom_subdiv() const {
+	return custom_subdiv;
+}
+
+int VoxelGI::get_subdiv_value() const {
+	static const int subdiv_value[SUBDIV_CUSTOM] = { 64, 128, 256, 512 };
+	if (subdiv == SUBDIV_CUSTOM) {
+		return custom_subdiv;
+	}
+	return subdiv_value[subdiv];
+}
+
 void VoxelGI::set_size(const Vector3 &p_size) {
 	// Prevent very small size dimensions as these breaks baking if other size dimensions are set very high.
 	size = p_size.maxf(1.0);
 	update_gizmos();
+	update_configuration_warnings();
 }
 
 Vector3 VoxelGI::get_size() const {
@@ -406,34 +429,10 @@ static bool voxelizer_sdf_bake_step_function(int current, int total) {
 }
 
 Vector3i VoxelGI::get_estimated_cell_size() const {
-	static const int subdiv_value[SUBDIV_MAX] = { 6, 7, 8, 9 };
-	int cell_subdiv = subdiv_value[subdiv];
-	int axis_cell_size[3];
-	AABB bounds = AABB(-size / 2, size);
-	int longest_axis = bounds.get_longest_axis_index();
-	axis_cell_size[longest_axis] = 1 << cell_subdiv;
-
-	for (int i = 0; i < 3; i++) {
-		if (i == longest_axis) {
-			continue;
-		}
-
-		axis_cell_size[i] = axis_cell_size[longest_axis];
-		float axis_size = bounds.size[longest_axis];
-
-		//shrink until fit subdiv
-		while (axis_size / 2.0 >= bounds.size[i]) {
-			axis_size /= 2.0;
-			axis_cell_size[i] >>= 1;
-		}
-	}
-
-	return Vector3i(axis_cell_size[0], axis_cell_size[1], axis_cell_size[2]);
+	return Voxelizer::get_axis_cell_count(get_subdiv_value(), size);
 }
 
 void VoxelGI::bake(Node *p_from_node, bool p_create_visual_debug) {
-	static const int subdiv_value[SUBDIV_MAX] = { 6, 7, 8, 9 };
-
 	p_from_node = p_from_node ? p_from_node : get_parent();
 	ERR_FAIL_NULL(p_from_node);
 
@@ -441,7 +440,7 @@ void VoxelGI::bake(Node *p_from_node, bool p_create_visual_debug) {
 
 	Voxelizer baker;
 
-	baker.begin_bake(subdiv_value[subdiv], AABB(-size / 2, size), exposure_normalization);
+	baker.begin_bake(get_subdiv_value(), AABB(-size / 2, size), exposure_normalization);
 
 	List<PlotMesh> mesh_list;
 
@@ -551,7 +550,23 @@ PackedStringArray VoxelGI::get_configuration_warnings() const {
 	} else if (probe_data.is_null()) {
 		warnings.push_back(RTR("No VoxelGI data set, so this node is disabled. Bake static objects to enable GI."));
 	}
+
+	// The 3D texture with its mipmaps, and the signed distance field.
+	Vector3i cells = get_estimated_cell_size();
+	double video_memory_mb = double(cells.x) * cells.y * cells.z * (4.0 * 8.0 / 7.0 + 1.0) / (1024.0 * 1024.0);
+	if (video_memory_mb > 1024.0) {
+		warnings.push_back(vformat(RTR("This VoxelGI needs about %d MB of video memory (%d × %d × %d voxels), which many GPUs can't allocate. Reduce the subdivisions or the size along the shortest axes."), int(video_memory_mb), cells.x, cells.y, cells.z));
+	}
 	return warnings;
+}
+
+void VoxelGI::_validate_property(PropertyInfo &p_property) const {
+	if (!Engine::get_singleton()->is_editor_hint()) {
+		return;
+	}
+	if (p_property.name == "custom_subdiv" && subdiv != SUBDIV_CUSTOM) {
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+	}
 }
 
 void VoxelGI::_bind_methods() {
@@ -560,6 +575,9 @@ void VoxelGI::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_subdiv", "subdiv"), &VoxelGI::set_subdiv);
 	ClassDB::bind_method(D_METHOD("get_subdiv"), &VoxelGI::get_subdiv);
+
+	ClassDB::bind_method(D_METHOD("set_custom_subdiv", "subdiv"), &VoxelGI::set_custom_subdiv);
+	ClassDB::bind_method(D_METHOD("get_custom_subdiv"), &VoxelGI::get_custom_subdiv);
 
 	ClassDB::bind_method(D_METHOD("set_size", "size"), &VoxelGI::set_size);
 	ClassDB::bind_method(D_METHOD("get_size"), &VoxelGI::get_size);
@@ -571,7 +589,8 @@ void VoxelGI::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("debug_bake"), &VoxelGI::_debug_bake);
 	ClassDB::set_method_flags(get_class_static(), StringName("debug_bake"), METHOD_FLAGS_DEFAULT | METHOD_FLAG_EDITOR);
 
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "subdiv", PROPERTY_HINT_ENUM, "64,128,256,512"), "set_subdiv", "get_subdiv");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "subdiv", PROPERTY_HINT_ENUM, "64,128,256,512,Custom"), "set_subdiv", "get_subdiv");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "custom_subdiv", PROPERTY_HINT_RANGE, itos(Voxelizer::MIN_SUBDIV) + "," + itos(Voxelizer::MAX_SUBDIV) + ",1"), "set_custom_subdiv", "get_custom_subdiv");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "size", PROPERTY_HINT_NONE, "suffix:m"), "set_size", "get_size");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "camera_attributes", PROPERTY_HINT_RESOURCE_TYPE, "CameraAttributesPractical,CameraAttributesPhysical"), "set_camera_attributes", "get_camera_attributes");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "data", PROPERTY_HINT_RESOURCE_TYPE, VoxelGIData::get_class_static(), PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_ALWAYS_DUPLICATE), "set_probe_data", "get_probe_data");
@@ -580,6 +599,7 @@ void VoxelGI::_bind_methods() {
 	BIND_ENUM_CONSTANT(SUBDIV_128);
 	BIND_ENUM_CONSTANT(SUBDIV_256);
 	BIND_ENUM_CONSTANT(SUBDIV_512);
+	BIND_ENUM_CONSTANT(SUBDIV_CUSTOM);
 	BIND_ENUM_CONSTANT(SUBDIV_MAX);
 }
 

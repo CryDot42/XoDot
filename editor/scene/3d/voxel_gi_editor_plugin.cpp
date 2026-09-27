@@ -108,10 +108,14 @@ void VoxelGIEditorPlugin::_notification(int p_what) {
 
 			const Vector3i cell_size = voxel_gi->get_estimated_cell_size();
 
-			const Vector3 half_size = voxel_gi->get_size() / 2;
+			// Cells are cubes, sized after the longest axis.
+			const Vector3 size = voxel_gi->get_size();
+			const int longest_axis = AABB(Vector3(), size).get_longest_axis_index();
+			const real_t cell_length = size[longest_axis] / cell_size[longest_axis];
 
 			const int data_size = 4;
-			const double size_mb = cell_size.x * cell_size.y * cell_size.z * data_size / (1024.0 * 1024.0);
+			// The mipmap chain adds up to 1/7 of the base level.
+			const double size_mb = double(cell_size.x) * cell_size.y * cell_size.z * data_size * (8.0 / 7.0) / (1024.0 * 1024.0);
 			// Add a qualitative measurement to help the user assess whether a VoxelGI node is using a lot of VRAM.
 			String size_quality;
 			if (size_mb < 16.0) {
@@ -124,7 +128,7 @@ void VoxelGIEditorPlugin::_notification(int p_what) {
 
 			String text;
 			text += vformat(TTR("Subdivisions: %s"), vformat(U"%d × %d × %d", cell_size.x, cell_size.y, cell_size.z)) + "\n";
-			text += vformat(TTR("Cell size: %s"), vformat(U"%.3f × %.3f × %.3f", half_size.x / cell_size.x, half_size.y / cell_size.y, half_size.z / cell_size.z)) + "\n";
+			text += vformat(TTR("Cell size: %s"), vformat(U"%.3f × %.3f × %.3f", cell_length, cell_length, cell_length)) + "\n";
 			text += vformat(TTR("Video RAM size: %s MB (%s)"), String::num(size_mb, 2), size_quality);
 
 			// Only update the tooltip when needed to avoid constant redrawing.
