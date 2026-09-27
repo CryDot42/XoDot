@@ -2570,7 +2570,9 @@ void main() {
 		vec3 ref_vec = reflect(-view, indirect_normal);
 #endif
 		ref_vec = mix(ref_vec, indirect_normal, roughness * roughness);
-		float horizon = min(1.0 + dot(ref_vec, indirect_normal), 1.0);
+		// Occlude reflections that point below the geometric surface. This must use the geometric normal,
+		// as a vector reflected around the shading normal never points below the shading normal's horizon.
+		float horizon = min(1.0 + dot(ref_vec, geo_normal), 1.0);
 		ref_vec = mat3(scene_data_block.data.radiance_inverse_xform) * ref_vec;
 		specular_light = textureLod(radiance_map, ref_vec, sqrt(roughness) * RADIANCE_MAX_LOD).rgb;
 		specular_light = srgb_to_linear(specular_light);

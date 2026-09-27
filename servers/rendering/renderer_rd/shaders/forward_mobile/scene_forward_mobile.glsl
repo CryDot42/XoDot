@@ -1612,7 +1612,9 @@ void main() {
 		hvec3 ref_vec = reflect(-view, indirect_normal);
 		ref_vec = mix(ref_vec, indirect_normal, roughness * roughness);
 #endif
-		half horizon = min(half(1.0) + dot(ref_vec, indirect_normal), half(1.0));
+		// Occlude reflections that point below the geometric surface. This must use the geometric normal,
+		// as a vector reflected around the shading normal never points below the shading normal's horizon.
+		half horizon = min(half(1.0) + dot(ref_vec, geo_normal), half(1.0));
 		ref_vec = hvec3(scene_data.radiance_inverse_xform * vec3(ref_vec));
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 		float lod;

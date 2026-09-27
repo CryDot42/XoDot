@@ -1714,7 +1714,9 @@ void fragment_shader(in SceneData scene_data) {
 		ref_vec = mix(ref_vec, normal, roughness * roughness);
 #endif
 
-		float horizon = min(1.0 + dot(ref_vec, normal), 1.0);
+		// Occlude reflections that point below the geometric surface. This must use the geometric normal,
+		// as a vector reflected around the shading normal never points below the shading normal's horizon.
+		float horizon = min(1.0 + dot(ref_vec, geo_normal), 1.0);
 		ref_vec = scene_data.radiance_inverse_xform * ref_vec;
 
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
