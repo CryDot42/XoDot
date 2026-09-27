@@ -53,24 +53,11 @@ vec3 importance_sample_ggx(vec2 Xi, vec3 N, float roughness) {
 	return normalize(sampleVec);
 }
 
-float geometry_schlick_ggx(float NdotV, float roughness) {
-	// note that we use a different k for IBL
-	float a = roughness;
-	float k = (a * a) / 2.0;
-
-	float nom = NdotV;
-	float denom = NdotV * (1.0 - k) + k;
-
-	return nom / denom;
-}
-
-float geometry_smith(vec3 N, vec3 V, vec3 L, float roughness) {
-	float NdotV = saturate(dot(N, V));
-	float NdotL = saturate(dot(N, L));
-	float ggx2 = geometry_schlick_ggx(NdotV, roughness);
-	float ggx1 = geometry_schlick_ggx(NdotL, roughness);
-
-	return ggx1 * ggx2;
+// Must match V_GGX() in scene_forward_lights_inc.glsl: the multiscattering energy compensation
+// derived from this LUT is only energy conserving for the visibility term it was integrated with.
+// From Earl Hammon, Jr. "PBR Diffuse Lighting for GGX+Smith Microsurfaces" https://www.gdcvault.com/play/1024478/PBR-Diffuse-Lighting-for-GGX
+float v_ggx(float n_dot_l, float n_dot_v, float alpha) {
+	return 0.5 / mix(2.0 * n_dot_l * n_dot_v, n_dot_l + n_dot_v, alpha);
 }
 
 vec2 integrate_brdf(float n_dot_v, float roughness) {
@@ -90,8 +77,8 @@ vec2 integrate_brdf(float n_dot_v, float roughness) {
 		float v_dot_h = saturate(dot(v, h));
 
 		if (n_dot_l > 0.0) {
-			float G = geometry_smith(n, v, l, roughness);
-			float G_Vis = (G * v_dot_h) / (n_dot_h * n_dot_v);
+			// Visibility term divided by the pdf of the GGX importance sampling: V * 4 * NdotL * VdotH / NdotH.
+			float G_Vis = v_ggx(n_dot_l, n_dot_v, roughness * roughness) * 4.0 * n_dot_l * v_dot_h / n_dot_h;
 			float Fc = pow(1.0 - v_dot_h, 5.0);
 
 			// LDFG term for multiscattering
@@ -109,7 +96,8 @@ vec2 integrate_brdf(float n_dot_v, float roughness) {
 
 void main() {
 	ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-	float roughness = float(SIZE - pos.y + 0.5f) / SIZE;
+	// Texel centers, matching the lookup in prefiltered_dfg(): row y is sampled at v = 1.0 - roughness.
+	float roughness = float(SIZE - pos.y - 0.5f) / SIZE;
 	float NdotV = float(pos.x + 0.5f) / SIZE;
 	vec2 brdf = integrate_brdf(NdotV, roughness);
 	imageStore(current_image, pos, vec4(brdf, 0.0, 1.0));

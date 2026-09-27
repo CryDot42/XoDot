@@ -1714,7 +1714,9 @@ void fragment_shader(in SceneData scene_data) {
 		ref_vec = mix(ref_vec, normal, roughness * roughness);
 #endif
 
-		float horizon = min(1.0 + dot(ref_vec, normal), 1.0);
+		// Occlude reflections that point below the geometric surface. This must use the geometric normal,
+		// as a vector reflected around the shading normal never points below the shading normal's horizon.
+		float horizon = min(1.0 + dot(ref_vec, geo_normal), 1.0);
 		ref_vec = scene_data.radiance_inverse_xform * ref_vec;
 
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
@@ -1780,7 +1782,9 @@ void fragment_shader(in SceneData scene_data) {
 		cc_ref_vec = mix(cc_ref_vec, geo_normal, mix(0.001, 0.1, clearcoat_roughness));
 
 		vec3 cc_radiance_ref_vec = scene_data.radiance_inverse_xform * cc_ref_vec;
-		float roughness_lod = sqrt(mix(0.001, 0.1, clearcoat_roughness)) * MAX_ROUGHNESS_LOD;
+		// mix(0.001, 0.1, clearcoat_roughness) is the clearcoat's GGX alpha (as in light_compute()),
+		// but the radiance LOD is sqrt(perceptual roughness) and perceptual roughness is sqrt(alpha).
+		float roughness_lod = sqrt(sqrt(mix(0.001, 0.1, clearcoat_roughness))) * MAX_ROUGHNESS_LOD;
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 
 		float lod, blend;
@@ -1903,12 +1907,14 @@ void fragment_shader(in SceneData scene_data) {
 						vec3 specular_light_color = max(specular_irradiance, vec3(0.0)) / max(NdotL, 0.1);
 
 						vec3 f0 = F0(metallic, specular, albedo);
+						// The main energy_compensation is only computed after GI, so compute it for this light here.
+						vec3 lightmap_energy_compensation = get_energy_compensation(f0, prefiltered_dfg(roughness, clamp(dot(normal, view), 0.0001, 1.0)).y);
 
 						vec3 diffuse_light_discarded = diffuse_light;
 						float directionality = clamp(l1_len / l0_luminance, 0.0, 1.0);
 						float specular_intensity = directionality * lightmaps.data[ofs].normal_xform_and_specular_intensity[0][3] * 2.0;
 
-						light_compute(normal, L_view, view, 0.0, specular_light_color, true, 1.0, f0, roughness, metallic, specular_intensity, albedo, alpha, screen_uv, energy_compensation,
+						light_compute(normal, L_view, view, 0.0, specular_light_color, true, 1.0, f0, roughness, metallic, specular_intensity, albedo, alpha, screen_uv, lightmap_energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 								backlight,
 #endif
@@ -2171,7 +2177,7 @@ void fragment_shader(in SceneData scene_data) {
 
 				reflection_process(reflection_index, vertex, ref_vec, normal, roughness, ambient_light,
 #ifdef LIGHT_CLEARCOAT_USED
-						cc_ref_vec, mix(0.001, 0.1, clearcoat_roughness), cc_reflection_accum,
+						cc_ref_vec, sqrt(mix(0.001, 0.1, clearcoat_roughness)), cc_reflection_accum,
 #endif
 						ambient_accum, reflection_accum);
 			}
@@ -2328,21 +2334,25 @@ void fragment_shader(in SceneData scene_data) {
 	f0 = mix(f0, f0_Clear_Coat_To_Surface(f0), clearcoat);
 #endif
 
+	// Base Layer
+	vec2 envBRDF = prefiltered_dfg(roughness, clamp(dot(normal, view), 0.0001, 1.0));
+	// Multiscattering
+	// This is a property of the specular BRDF, so direct lights need it even when ambient light is disabled.
+	energy_compensation = get_energy_compensation(f0, envBRDF.y);
+
 #ifndef AMBIENT_LIGHT_DISABLED
 	{
 #if defined(DIFFUSE_TOON)
 		//simplify for toon, as
 		indirect_specular_light *= specular * metallic * albedo * 2.0;
 #else
-		// Base Layer
-		float NdotV = clamp(dot(normal, view), 0.0001, 1.0);
-		vec2 envBRDF = prefiltered_dfg(roughness, NdotV);
-		// Multiscattering
-		energy_compensation = get_energy_compensation(f0, envBRDF.y);
-
 		// cheap luminance approximation
 		float f90 = clamp(50.0 * f0.g, metallic, 1.0);
-		indirect_specular_light *= energy_compensation * ((f90 - f0) * envBRDF.x + f0 * envBRDF.y);
+		vec3 specular_albedo = (f90 - f0) * envBRDF.x + f0 * envBRDF.y;
+		indirect_specular_light *= energy_compensation * specular_albedo;
+
+		// Light reflected by the specular lobe is not available to the diffuse lobe.
+		ambient_light *= max(1.0 - specular_albedo, 0.0);
 
 #ifdef LIGHT_CLEARCOAT_USED
 		float geo_NdotV = max(dot(geo_normal, view), 0.0001); // We want to use geometric normal, not normal_map

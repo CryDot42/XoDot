@@ -1605,14 +1605,16 @@ void main() {
 		hvec3 anisotropic_direction = anisotropy >= 0.0 ? binormal : tangent;
 		hvec3 anisotropic_tangent = cross(anisotropic_direction, view);
 		hvec3 anisotropic_normal = cross(anisotropic_tangent, anisotropic_direction);
-		hvec3 bent_normal = normalize(mix(indirect_normal, anisotropic_normal, anisotropy * clamp(half(5.0) * roughness, half(0.0), half(1.0))));
+		hvec3 bent_normal = normalize(mix(indirect_normal, anisotropic_normal, abs(anisotropy) * clamp(half(5.0) * roughness, half(0.0), half(1.0))));
 		hvec3 ref_vec = reflect(-view, bent_normal);
 		ref_vec = mix(ref_vec, bent_normal, roughness * roughness);
 #else
 		hvec3 ref_vec = reflect(-view, indirect_normal);
 		ref_vec = mix(ref_vec, indirect_normal, roughness * roughness);
 #endif
-		half horizon = min(half(1.0) + dot(ref_vec, indirect_normal), half(1.0));
+		// Occlude reflections that point below the geometric surface. This must use the geometric normal,
+		// as a vector reflected around the shading normal never points below the shading normal's horizon.
+		half horizon = min(half(1.0) + dot(ref_vec, geo_normal), half(1.0));
 		ref_vec = hvec3(scene_data.radiance_inverse_xform * vec3(ref_vec));
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 		float lod;
@@ -1675,7 +1677,9 @@ void main() {
 		cc_ref_vec = mix(cc_ref_vec, geo_normal, mix(half(0.001), half(0.1), clearcoat_roughness));
 
 		hvec3 cc_radiance_ref_vec = hvec3(scene_data.radiance_inverse_xform * vec3(cc_ref_vec));
-		float roughness_lod = sqrt(mix(0.001, 0.1, float(clearcoat_roughness))) * MAX_ROUGHNESS_LOD;
+		// mix(0.001, 0.1, clearcoat_roughness) is the clearcoat's GGX alpha (as in light_compute()),
+		// but the radiance LOD is sqrt(perceptual roughness) and perceptual roughness is sqrt(alpha).
+		float roughness_lod = sqrt(sqrt(mix(0.001, 0.1, float(clearcoat_roughness)))) * MAX_ROUGHNESS_LOD;
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 
 		float lod;
@@ -1876,7 +1880,7 @@ void main() {
 
 			reflection_process(reflection_index, vertex, ref_vec, normal, roughness, ambient_light,
 #ifdef LIGHT_CLEARCOAT_USED
-					cc_ref_vec, mix(half(0.001), half(0.1), clearcoat_roughness), cc_reflection_accum,
+					cc_ref_vec, sqrt(mix(half(0.001), half(0.1), clearcoat_roughness)), cc_reflection_accum,
 #endif
 					ambient_accum, reflection_accum);
 		}
@@ -1968,7 +1972,12 @@ void main() {
 		half a004 = min(r.x * r.x, exp2(half(-9.28) * ndotv)) * r.x + r.y;
 		hvec2 env = hvec2(-1.04, 1.04) * a004 + r.zw;
 
-		indirect_specular_light *= env.x * f0 + env.y * clamp(half(50.0) * f0.g, metallic, half(1.0));
+		hvec3 specular_albedo = env.x * f0 + env.y * clamp(half(50.0) * f0.g, metallic, half(1.0));
+		indirect_specular_light *= specular_albedo;
+
+		// Light reflected by the specular lobe is not available to the diffuse lobe.
+		// The approximation above can slightly exceed 1.0 at grazing angles.
+		ambient_light *= max(half(1.0) - specular_albedo, half(0.0));
 
 #ifdef LIGHT_CLEARCOAT_USED
 		half geo_NdotV = max(dot(geo_normal, view), half(0.0001)); // We want to use geometric normal, not normal_map
