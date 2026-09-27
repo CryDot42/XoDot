@@ -1782,7 +1782,9 @@ void fragment_shader(in SceneData scene_data) {
 		cc_ref_vec = mix(cc_ref_vec, geo_normal, mix(0.001, 0.1, clearcoat_roughness));
 
 		vec3 cc_radiance_ref_vec = scene_data.radiance_inverse_xform * cc_ref_vec;
-		float roughness_lod = sqrt(mix(0.001, 0.1, clearcoat_roughness)) * MAX_ROUGHNESS_LOD;
+		// mix(0.001, 0.1, clearcoat_roughness) is the clearcoat's GGX alpha (as in light_compute()),
+		// but the radiance LOD is sqrt(perceptual roughness) and perceptual roughness is sqrt(alpha).
+		float roughness_lod = sqrt(sqrt(mix(0.001, 0.1, clearcoat_roughness))) * MAX_ROUGHNESS_LOD;
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 
 		float lod, blend;
@@ -2175,7 +2177,7 @@ void fragment_shader(in SceneData scene_data) {
 
 				reflection_process(reflection_index, vertex, ref_vec, normal, roughness, ambient_light,
 #ifdef LIGHT_CLEARCOAT_USED
-						cc_ref_vec, mix(0.001, 0.1, clearcoat_roughness), cc_reflection_accum,
+						cc_ref_vec, sqrt(mix(0.001, 0.1, clearcoat_roughness)), cc_reflection_accum,
 #endif
 						ambient_accum, reflection_accum);
 			}
