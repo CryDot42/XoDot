@@ -1305,7 +1305,7 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 #elif defined(SPECULAR_DISABLED)
 	// do nothing
 #else
-	hvec3 spec = half(ltc_specular) * hvec3(ltc_specular_tex_color) * color * fresnel_color;
+	hvec3 spec = half(ltc_specular) * hvec3(ltc_specular_tex_color) * color * fresnel_color * energy_compensation;
 	specular_light += spec * specular_amount * light_attenuation_ltc * cc_attenuation;
 #endif // SPECULAR_TOON
 

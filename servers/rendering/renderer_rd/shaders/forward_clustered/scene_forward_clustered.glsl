@@ -1903,12 +1903,14 @@ void fragment_shader(in SceneData scene_data) {
 						vec3 specular_light_color = max(specular_irradiance, vec3(0.0)) / max(NdotL, 0.1);
 
 						vec3 f0 = F0(metallic, specular, albedo);
+						// The main energy_compensation is only computed after GI, so compute it for this light here.
+						vec3 lightmap_energy_compensation = get_energy_compensation(f0, prefiltered_dfg(roughness, clamp(dot(normal, view), 0.0001, 1.0)).y);
 
 						vec3 diffuse_light_discarded = diffuse_light;
 						float directionality = clamp(l1_len / l0_luminance, 0.0, 1.0);
 						float specular_intensity = directionality * lightmaps.data[ofs].normal_xform_and_specular_intensity[0][3] * 2.0;
 
-						light_compute(normal, L_view, view, 0.0, specular_light_color, true, 1.0, f0, roughness, metallic, specular_intensity, albedo, alpha, screen_uv, energy_compensation,
+						light_compute(normal, L_view, view, 0.0, specular_light_color, true, 1.0, f0, roughness, metallic, specular_intensity, albedo, alpha, screen_uv, lightmap_energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 								backlight,
 #endif
@@ -2328,18 +2330,18 @@ void fragment_shader(in SceneData scene_data) {
 	f0 = mix(f0, f0_Clear_Coat_To_Surface(f0), clearcoat);
 #endif
 
+	// Base Layer
+	vec2 envBRDF = prefiltered_dfg(roughness, clamp(dot(normal, view), 0.0001, 1.0));
+	// Multiscattering
+	// This is a property of the specular BRDF, so direct lights need it even when ambient light is disabled.
+	energy_compensation = get_energy_compensation(f0, envBRDF.y);
+
 #ifndef AMBIENT_LIGHT_DISABLED
 	{
 #if defined(DIFFUSE_TOON)
 		//simplify for toon, as
 		indirect_specular_light *= specular * metallic * albedo * 2.0;
 #else
-		// Base Layer
-		float NdotV = clamp(dot(normal, view), 0.0001, 1.0);
-		vec2 envBRDF = prefiltered_dfg(roughness, NdotV);
-		// Multiscattering
-		energy_compensation = get_energy_compensation(f0, envBRDF.y);
-
 		// cheap luminance approximation
 		float f90 = clamp(50.0 * f0.g, metallic, 1.0);
 		indirect_specular_light *= energy_compensation * ((f90 - f0) * envBRDF.x + f0 * envBRDF.y);
