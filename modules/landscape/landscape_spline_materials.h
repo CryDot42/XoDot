@@ -34,6 +34,47 @@
 #include "scene/resources/image_texture.h"
 #include "scene/resources/material.h"
 
+// Setter and typed getters of the parameters (typed, so that the properties have their real type
+// in the API). Declared and bound in each material class, because the properties are declared there.
+#define LANDSCAPE_SPLINE_MATERIAL_PARAMETER_ACCESSORS(m_class) \
+	void _set_parameter_bool(int p_index, bool p_value) { \
+		set_parameter_by_index(p_index, p_value); \
+	} \
+	bool _get_parameter_bool(int p_index) const { \
+		return get_parameter_by_index(p_index); \
+	} \
+	void _set_parameter_int(int p_index, int p_value) { \
+		set_parameter_by_index(p_index, p_value); \
+	} \
+	int _get_parameter_int(int p_index) const { \
+		return get_parameter_by_index(p_index); \
+	} \
+	void _set_parameter_float(int p_index, float p_value) { \
+		set_parameter_by_index(p_index, p_value); \
+	} \
+	float _get_parameter_float(int p_index) const { \
+		return get_parameter_by_index(p_index); \
+	} \
+	void _set_parameter_vector2(int p_index, const Vector2 &p_value) { \
+		set_parameter_by_index(p_index, p_value); \
+	} \
+	Vector2 _get_parameter_vector2(int p_index) const { \
+		return get_parameter_by_index(p_index); \
+	} \
+	void _set_parameter_color(int p_index, const Color &p_value) { \
+		set_parameter_by_index(p_index, p_value); \
+	} \
+	Color _get_parameter_color(int p_index) const { \
+		return get_parameter_by_index(p_index); \
+	} \
+	void _set_parameter_texture(int p_index, const Ref<Texture2D> &p_value) { \
+		set_parameter_by_index(p_index, p_value); \
+	} \
+	Ref<Texture2D> _get_parameter_texture(int p_index) const { \
+		return get_parameter_by_index(p_index); \
+	} \
+	static void _bind_parameter_accessors();
+
 // Base of the built-in materials of landscape splines: a fixed shader shared by all instances,
 // whose uniforms are exposed as typed properties (like FogMaterial or StandardMaterial3D).
 class LandscapeSplineMaterial : public Material {
@@ -66,14 +107,6 @@ protected:
 	virtual String _get_source_code() const { return String(); }
 	static RID _create_shader(const String &p_code);
 
-	// Typed getters of the parameters, so that the properties have their real type in the API.
-	bool _get_parameter_bool(int p_index) const { return get_parameter_by_index(p_index); }
-	int _get_parameter_int(int p_index) const { return get_parameter_by_index(p_index); }
-	float _get_parameter_float(int p_index) const { return get_parameter_by_index(p_index); }
-	Vector2 _get_parameter_vector2(int p_index) const { return get_parameter_by_index(p_index); }
-	Color _get_parameter_color(int p_index) const { return get_parameter_by_index(p_index); }
-	Ref<Texture2D> _get_parameter_texture(int p_index) const { return get_parameter_by_index(p_index); }
-
 public:
 	void set_parameter_by_index(int p_index, const Variant &p_value);
 	Variant get_parameter_by_index(int p_index) const;
@@ -98,6 +131,7 @@ public:
 // rapids foam, soft intersection with the ground and an optional swell.
 class LandscapeWaterMaterial : public LandscapeSplineMaterial {
 	GDCLASS(LandscapeWaterMaterial, LandscapeSplineMaterial);
+	LANDSCAPE_SPLINE_MATERIAL_PARAMETER_ACCESSORS(LandscapeWaterMaterial)
 
 	static Mutex shader_mutex;
 	static RID shader;
@@ -128,6 +162,7 @@ public:
 // puddles. Optional albedo and normal textures (U across the road, V along it).
 class LandscapeRoadMaterial : public LandscapeSplineMaterial {
 	GDCLASS(LandscapeRoadMaterial, LandscapeSplineMaterial);
+	LANDSCAPE_SPLINE_MATERIAL_PARAMETER_ACCESSORS(LandscapeRoadMaterial)
 
 	static Mutex shader_mutex;
 	static RID shader;

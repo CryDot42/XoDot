@@ -35,6 +35,26 @@
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/shader_preprocessor.h"
 
+// Binds the accessors declared by LANDSCAPE_SPLINE_MATERIAL_PARAMETER_ACCESSORS.
+#define LANDSCAPE_SPLINE_MATERIAL_BIND_PARAMETER_ACCESSORS(m_class) \
+	void m_class::_bind_parameter_accessors() { \
+		ClassDB::bind_method(D_METHOD("_set_parameter_bool", "index", "value"), &m_class::_set_parameter_bool); \
+		ClassDB::bind_method(D_METHOD("_get_parameter_bool", "index"), &m_class::_get_parameter_bool); \
+		ClassDB::bind_method(D_METHOD("_set_parameter_int", "index", "value"), &m_class::_set_parameter_int); \
+		ClassDB::bind_method(D_METHOD("_get_parameter_int", "index"), &m_class::_get_parameter_int); \
+		ClassDB::bind_method(D_METHOD("_set_parameter_float", "index", "value"), &m_class::_set_parameter_float); \
+		ClassDB::bind_method(D_METHOD("_get_parameter_float", "index"), &m_class::_get_parameter_float); \
+		ClassDB::bind_method(D_METHOD("_set_parameter_vector2", "index", "value"), &m_class::_set_parameter_vector2); \
+		ClassDB::bind_method(D_METHOD("_get_parameter_vector2", "index"), &m_class::_get_parameter_vector2); \
+		ClassDB::bind_method(D_METHOD("_set_parameter_color", "index", "value"), &m_class::_set_parameter_color); \
+		ClassDB::bind_method(D_METHOD("_get_parameter_color", "index"), &m_class::_get_parameter_color); \
+		ClassDB::bind_method(D_METHOD("_set_parameter_texture", "index", "value"), &m_class::_set_parameter_texture); \
+		ClassDB::bind_method(D_METHOD("_get_parameter_texture", "index"), &m_class::_get_parameter_texture); \
+	}
+
+LANDSCAPE_SPLINE_MATERIAL_BIND_PARAMETER_ACCESSORS(LandscapeWaterMaterial)
+LANDSCAPE_SPLINE_MATERIAL_BIND_PARAMETER_ACCESSORS(LandscapeRoadMaterial)
+
 /* LandscapeSplineMaterial */
 
 void LandscapeSplineMaterial::_init_parameters() {
@@ -130,41 +150,34 @@ void LandscapeSplineMaterial::_bind_parameters(const StringName &p_class, const 
 			group = info.group;
 			ClassDB::add_property_group(p_class, group, "");
 		}
-		StringName getter;
+		String suffix;
 		switch (info.type) {
 			case Variant::BOOL:
-				getter = "_get_parameter_bool";
+				suffix = "bool";
 				break;
 			case Variant::INT:
-				getter = "_get_parameter_int";
+				suffix = "int";
 				break;
 			case Variant::FLOAT:
-				getter = "_get_parameter_float";
+				suffix = "float";
 				break;
 			case Variant::VECTOR2:
-				getter = "_get_parameter_vector2";
+				suffix = "vector2";
 				break;
 			case Variant::COLOR:
-				getter = "_get_parameter_color";
+				suffix = "color";
 				break;
 			case Variant::OBJECT:
-				getter = "_get_parameter_texture";
+				suffix = "texture";
 				break;
 			default:
 				ERR_FAIL_MSG(vformat("Unsupported type of the parameter \"%s\".", info.name));
 		}
-		ClassDB::add_property(p_class, PropertyInfo(info.type, info.name, info.hint, info.hint_string), "_set_parameter", getter, i);
+		ClassDB::add_property(p_class, PropertyInfo(info.type, info.name, info.hint, info.hint_string), "_set_parameter_" + suffix, "_get_parameter_" + suffix, i);
 	}
 }
 
 void LandscapeSplineMaterial::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("_set_parameter", "index", "value"), &LandscapeSplineMaterial::set_parameter_by_index);
-	ClassDB::bind_method(D_METHOD("_get_parameter_bool", "index"), &LandscapeSplineMaterial::_get_parameter_bool);
-	ClassDB::bind_method(D_METHOD("_get_parameter_int", "index"), &LandscapeSplineMaterial::_get_parameter_int);
-	ClassDB::bind_method(D_METHOD("_get_parameter_float", "index"), &LandscapeSplineMaterial::_get_parameter_float);
-	ClassDB::bind_method(D_METHOD("_get_parameter_vector2", "index"), &LandscapeSplineMaterial::_get_parameter_vector2);
-	ClassDB::bind_method(D_METHOD("_get_parameter_color", "index"), &LandscapeSplineMaterial::_get_parameter_color);
-	ClassDB::bind_method(D_METHOD("_get_parameter_texture", "index"), &LandscapeSplineMaterial::_get_parameter_texture);
 	ClassDB::bind_method(D_METHOD("get_shader_code"), &LandscapeSplineMaterial::get_shader_code);
 }
 
@@ -457,6 +470,7 @@ void LandscapeWaterMaterial::_bind_methods() {
 	ClassDB::bind_static_method("LandscapeWaterMaterial", D_METHOD("get_builtin_shader_code"), &LandscapeWaterMaterial::get_builtin_shader_code);
 	ClassDB::bind_static_method("LandscapeWaterMaterial", D_METHOD("get_default_normal_texture"), &LandscapeWaterMaterial::get_default_normal_texture);
 	ClassDB::bind_static_method("LandscapeWaterMaterial", D_METHOD("get_default_foam_texture"), &LandscapeWaterMaterial::get_default_foam_texture);
+	_bind_parameter_accessors();
 	_bind_parameters(get_class_static(), water_parameters, WATER_MAX);
 }
 
@@ -768,6 +782,7 @@ void LandscapeRoadMaterial::cleanup_shared_resources() {
 void LandscapeRoadMaterial::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("apply_preset", "preset"), &LandscapeRoadMaterial::apply_preset);
 	ClassDB::bind_static_method("LandscapeRoadMaterial", D_METHOD("get_builtin_shader_code"), &LandscapeRoadMaterial::get_builtin_shader_code);
+	_bind_parameter_accessors();
 	_bind_parameters(get_class_static(), road_parameters, ROAD_MAX);
 
 	BIND_ENUM_CONSTANT(PRESET_ASPHALT);

@@ -29,73 +29,73 @@
 		</method>
 	</methods>
 	<members>
-		<member name="albedo_color" type="Color" setter="_set_parameter" getter="_get_parameter_color" default="Color(0.16, 0.16, 0.17, 1)">
+		<member name="albedo_color" type="Color" setter="_set_parameter_color" getter="_get_parameter_color" default="Color(0.16, 0.16, 0.17, 1)">
 			Base color of the road.
 		</member>
-		<member name="albedo_texture" type="Texture2D" setter="_set_parameter" getter="_get_parameter_texture">
+		<member name="albedo_texture" type="Texture2D" setter="_set_parameter_texture" getter="_get_parameter_texture">
 			Optional albedo texture, multiplied with [member albedo_color].
 		</member>
-		<member name="center_line" type="int" setter="_set_parameter" getter="_get_parameter_int" default="1">
+		<member name="center_line" type="int" setter="_set_parameter_int" getter="_get_parameter_int" default="1">
 			The line in the middle of roads with an even [member lane_count]: [code]0[/code] none, [code]1[/code] dashed, [code]2[/code] solid, [code]3[/code] double solid.
 		</member>
-		<member name="center_line_color" type="Color" setter="_set_parameter" getter="_get_parameter_color" default="Color(0.86, 0.86, 0.82, 1)">
+		<member name="center_line_color" type="Color" setter="_set_parameter_color" getter="_get_parameter_color" default="Color(0.86, 0.86, 0.82, 1)">
 			Color of the center line (e.g. yellow).
 		</member>
-		<member name="dash_gap" type="float" setter="_set_parameter" getter="_get_parameter_float" default="6.0">
+		<member name="dash_gap" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="6.0">
 			Gap between the dashes of the dashed lines.
 		</member>
-		<member name="dash_length" type="float" setter="_set_parameter" getter="_get_parameter_float" default="3.0">
+		<member name="dash_length" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="3.0">
 			Length of the dashes of the dashed lines.
 		</member>
-		<member name="edge_color" type="Color" setter="_set_parameter" getter="_get_parameter_color" default="Color(0.3, 0.26, 0.2, 1)">
+		<member name="edge_color" type="Color" setter="_set_parameter_color" getter="_get_parameter_color" default="Color(0.3, 0.26, 0.2, 1)">
 			Color of the dirt along the edges of the road and on its skirts.
 		</member>
-		<member name="edge_line_offset" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.25">
+		<member name="edge_line_offset" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.25">
 			Distance between the edge lines and the edges of the road.
 		</member>
-		<member name="edge_noise" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.3">
+		<member name="edge_noise" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.3">
 			Irregularity of the edges of the road and of the dirt along them.
 		</member>
-		<member name="edge_width" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.5">
+		<member name="edge_width" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.5">
 			Width of the dirt along the edges of the road.
 		</member>
-		<member name="grain" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.35">
+		<member name="grain" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.35">
 			Contrast of the procedural aggregate grain.
 		</member>
-		<member name="grain_scale" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.06">
+		<member name="grain_scale" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.06">
 			Size of the procedural aggregate grain.
 		</member>
-		<member name="lane_count" type="int" setter="_set_parameter" getter="_get_parameter_int" default="2">
+		<member name="lane_count" type="int" setter="_set_parameter_int" getter="_get_parameter_int" default="2">
 			Number of lanes, separated by dashed lines (and the [member center_line] in the middle).
 		</member>
-		<member name="lane_markings" type="bool" setter="_set_parameter" getter="_get_parameter_bool" default="true">
+		<member name="lane_markings" type="bool" setter="_set_parameter_bool" getter="_get_parameter_bool" default="true">
 			If [code]true[/code], lane markings are painted on the road.
 		</member>
-		<member name="marking_color" type="Color" setter="_set_parameter" getter="_get_parameter_color" default="Color(0.86, 0.86, 0.82, 1)">
+		<member name="marking_color" type="Color" setter="_set_parameter_color" getter="_get_parameter_color" default="Color(0.86, 0.86, 0.82, 1)">
 			Color of the lane markings.
 		</member>
-		<member name="marking_width" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.12">
+		<member name="marking_width" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.12">
 			Width of the lane markings.
 		</member>
-		<member name="normal_strength" type="float" setter="_set_parameter" getter="_get_parameter_float" default="1.0">
+		<member name="normal_strength" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="1.0">
 			Strength of [member normal_texture].
 		</member>
-		<member name="normal_texture" type="Texture2D" setter="_set_parameter" getter="_get_parameter_texture">
+		<member name="normal_texture" type="Texture2D" setter="_set_parameter_texture" getter="_get_parameter_texture">
 			Optional normal map.
 		</member>
-		<member name="puddles" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.0">
+		<member name="puddles" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.0">
 			Amount of puddles on the road.
 		</member>
-		<member name="roughness" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.82">
+		<member name="roughness" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.82">
 			Roughness of the dry road.
 		</member>
-		<member name="texture_scale" type="Vector2" setter="_set_parameter" getter="_get_parameter_vector2" default="Vector2(1, 4)">
+		<member name="texture_scale" type="Vector2" setter="_set_parameter_vector2" getter="_get_parameter_vector2" default="Vector2(1, 4)">
 			Size of the textures: [code]x[/code] across the road ([code]1[/code] is the width of the road), [code]y[/code] along the road, in meters.
 		</member>
-		<member name="wear" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.25">
+		<member name="wear" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.25">
 			Wear of the road: darker wheel tracks and worn lane markings.
 		</member>
-		<member name="wetness" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.0">
+		<member name="wetness" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.0">
 			Wetness of the road: darker and glossier surface.
 		</member>
 	</members>
