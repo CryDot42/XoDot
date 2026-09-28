@@ -1361,6 +1361,15 @@ void RendererSceneRenderRD::_post_prepass_render(RenderDataRD *p_render_data, bo
 	}
 }
 
+const RendererSceneOcclusionCull::DepthReadback *RendererSceneRenderRD::hzb_occlusion_request_depth(const Ref<RenderSceneBuffers> &p_render_buffers, const Size2i &p_size) {
+	ERR_FAIL_NULL_V(hzb_occlusion, nullptr);
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	if (rb.is_null()) {
+		return nullptr; // Not rendered by us (e.g. render buffers provided by an extension).
+	}
+	return hzb_occlusion->request_depth(rb, p_size);
+}
+
 void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderSDFGIData *p_render_sdfgi_regions, int p_render_sdfgi_region_count, float p_window_output_max_value, const RenderSDFGIUpdateData *p_sdfgi_update_data, RenderingServerTypes::RenderInfo *r_render_info) {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
@@ -1890,6 +1899,7 @@ void RendererSceneRenderRD::init() {
 	mfx_spatial = memnew(RendererRD::MFXSpatialEffect);
 #endif
 	resolve_effects = memnew(RendererRD::Resolve(!can_use_storage));
+	hzb_occlusion = memnew(RendererRD::HZBOcclusion);
 }
 
 RendererSceneRenderRD::~RendererSceneRenderRD() {
@@ -1908,6 +1918,7 @@ RendererSceneRenderRD::~RendererSceneRenderRD() {
 #endif
 
 	memdelete(resolve_effects);
+	memdelete(hzb_occlusion);
 
 	if (sky.sky_scene_state.uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(sky.sky_scene_state.uniform_set)) {
 		RD::get_singleton()->free_rid(sky.sky_scene_state.uniform_set);

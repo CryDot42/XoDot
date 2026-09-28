@@ -1724,6 +1724,11 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 		}
 	}
 
+	if (p_instance->indexer_id.is_valid()) {
+		// Depth buffers rendered before this update can't be trusted where this instance was.
+		_hzb_occlusion_record_change(p_instance);
+	}
+
 	AABB new_aabb;
 	new_aabb = instance_xform->xform(p_instance->aabb);
 	p_instance->transformed_aabb = new_aabb;
@@ -1941,6 +1946,9 @@ void RendererSceneCull::_unpair_instance(Instance *p_instance) {
 	if (!p_instance->indexer_id.is_valid()) {
 		return; //nothing to do
 	}
+
+	// The instance is being hidden or removed, depth buffers rendered before can't be trusted where it was.
+	_hzb_occlusion_record_change(p_instance);
 
 	while (p_instance->pairs.first()) {
 		InstancePair *pair = p_instance->pairs.first()->self();
@@ -2698,6 +2706,56 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 	return animated_material_found;
 }
 
+void RendererSceneCull::_hzb_occlusion_record_change(Instance *p_instance) const {
+	if (!hzb_occlusion_used || p_instance->scenario == nullptr || !((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK)) {
+		return;
+	}
+
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+	if (frame - hzb_occlusion_last_used_frame > HZB_OCCLUSION_MAX_DEPTH_AGE) {
+		return; // No longer used.
+	}
+
+	_hzb_occlusion_prune_changes(p_instance->scenario, frame);
+	p_instance->scenario->hzb_changed_bounds.push_back(p_instance->transformed_aabb);
+	p_instance->scenario->hzb_changed_frames.push_back(frame);
+}
+
+void RendererSceneCull::_hzb_occlusion_prune_changes(Scenario *p_scenario, uint64_t p_frame) {
+	// Forget changes older than any depth buffer that can be used.
+	LocalVector<AABB> &bounds = p_scenario->hzb_changed_bounds;
+	LocalVector<uint64_t> &frames = p_scenario->hzb_changed_frames;
+	if (frames.is_empty() || frames[0] + HZB_OCCLUSION_MAX_DEPTH_AGE >= p_frame) {
+		return;
+	}
+
+	uint32_t expired = 0;
+	while (expired < frames.size() && frames[expired] + HZB_OCCLUSION_MAX_DEPTH_AGE < p_frame) {
+		expired++;
+	}
+	const uint32_t remaining = frames.size() - expired;
+	for (uint32_t i = 0; i < remaining; i++) {
+		bounds[i] = bounds[i + expired];
+		frames[i] = frames[i + expired];
+	}
+	bounds.resize(remaining);
+	frames.resize(remaining);
+}
+
+Span<AABB> RendererSceneCull::_hzb_occlusion_get_changes_since(Scenario *p_scenario, uint64_t p_frame) {
+	_hzb_occlusion_prune_changes(p_scenario, RSG::rasterizer->get_frame_number());
+
+	const LocalVector<AABB> &bounds = p_scenario->hzb_changed_bounds;
+	const LocalVector<uint64_t> &frames = p_scenario->hzb_changed_frames;
+
+	// Changes made while (or before) the depth buffer was rendered are included, to remain conservative.
+	uint32_t first = frames.size();
+	while (first > 0 && frames[first - 1] >= p_frame) {
+		first--;
+	}
+	return Span<AABB>(bounds.ptr() + first, bounds.size() - first);
+}
+
 void RendererSceneCull::render_camera(const Ref<RenderSceneBuffers> &p_render_buffers, RID p_camera, RID p_scenario, RID p_viewport, Size2 p_viewport_size, uint32_t p_jitter_phase_count, float p_screen_mesh_lod_threshold, RID p_shadow_atlas, float p_window_output_max_value, RenderingServerTypes::RenderInfo *r_render_info) {
 #ifndef _3D_DISABLED
 
@@ -2796,8 +2854,33 @@ void RendererSceneCull::render_camera(const Ref<RenderSceneBuffers> &p_render_bu
 
 	RENDER_TIMESTAMP("Update Occlusion Buffer")
 
+	const RendererSceneOcclusionCull::DepthReadback *depth_readback = nullptr;
+	Span<AABB> changed_bounds;
+	{
+		// HZB occlusion culling: request the depth buffer of this frame for later frames, and use the latest one read back.
+		const RendererSceneOcclusionCull::HZBuffer *occlusion_buffer = RendererSceneOcclusionCull::get_singleton()->buffer_get_ptr(p_viewport);
+		Scenario *scenario = scenario_owner.get_or_null(p_scenario);
+		if (occlusion_buffer && occlusion_buffer->is_using_depth_readback() && !occlusion_buffer->is_empty() && p_render_buffers.is_valid() && scenario) {
+			if (scene_render->hzb_occlusion_is_supported()) {
+				const uint64_t frame = RSG::rasterizer->get_frame_number();
+				hzb_occlusion_used = true;
+				hzb_occlusion_last_used_frame = frame;
+
+				depth_readback = scene_render->hzb_occlusion_request_depth(p_render_buffers, occlusion_buffer->get_occlusion_buffer_size());
+				if (depth_readback && frame - depth_readback->frame > HZB_OCCLUSION_MAX_DEPTH_AGE) {
+					depth_readback = nullptr; // Too old to be reliable.
+				}
+				if (depth_readback) {
+					changed_bounds = _hzb_occlusion_get_changes_since(scenario, depth_readback->frame);
+				}
+			} else {
+				WARN_PRINT_ONCE("HZB occlusion culling is not supported by the current rendering method.");
+			}
+		}
+	}
+
 	// For now just cull on the first camera
-	RendererSceneOcclusionCull::get_singleton()->buffer_update(p_viewport, camera_data.main_transform, camera_data.main_projection, camera_data.is_orthogonal);
+	RendererSceneOcclusionCull::get_singleton()->buffer_update(p_viewport, camera_data.main_transform, camera_data.main_projection, camera_data.is_orthogonal, depth_readback, changed_bounds);
 
 	_render_scene(&camera_data, p_render_buffers, environment, camera->attributes, compositor, camera->visible_layers, p_scenario, p_viewport, p_shadow_atlas, RID(), -1, p_screen_mesh_lod_threshold, p_window_output_max_value, true, r_render_info);
 #endif

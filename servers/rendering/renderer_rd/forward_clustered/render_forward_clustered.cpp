@@ -2355,6 +2355,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_OPAQUE, p_render_data);
 	}
 
+	if (rb_data.is_valid() && hzb_occlusion->is_depth_requested(rb)) {
+		// Only opaque objects can occlude, so capture the depth buffer before transparent objects are drawn.
+		RENDER_TIMESTAMP("HZB Occlusion Depth");
+		hzb_occlusion->capture_depth(rb, p_render_data->scene_data, use_msaa);
+	}
+
 	if (debug_voxelgis) {
 		Projection dc;
 		dc.set_depth_correction(true);

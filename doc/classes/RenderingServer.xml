@@ -4534,6 +4534,14 @@
 				Practically speaking, this means that the end result of the Viewport will not be clamped to the [code]0-1[/code] range and can be used in 3D rendering without color encoding adjustments. This allows 2D rendering to take advantage of effects requiring high dynamic range (e.g. 2D glow) as well as substantially improves the appearance of effects requiring highly detailed gradients. This setting has the same effect as [member Viewport.use_hdr_2d].
 			</description>
 		</method>
+		<method name="viewport_set_use_hzb_occlusion_culling">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<param index="1" name="enable" type="bool" />
+			<description>
+				If [code]true[/code], enables HZB (Hierarchical Z-Buffer) occlusion culling on the specified viewport. The depth buffer of previously rendered frames is reprojected to the current camera and used to cull objects hidden behind other objects, without requiring occluders. Equivalent to [member ProjectSettings.rendering/occlusion_culling/use_hzb_occlusion_culling]. See also [member Viewport.use_hzb_occlusion_culling].
+			</description>
+		</method>
 		<method name="viewport_set_use_occlusion_culling">
 			<return type="void" />
 			<param index="0" name="viewport" type="RID" />
@@ -5678,7 +5686,7 @@
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="VIEWPORT_DEBUG_DRAW_OCCLUDERS" value="24" enum="ViewportDebugDraw">
-			Draws the occlusion culling buffer. This low-resolution occlusion culling buffer is rasterized on the CPU and is used to check whether instances are occluded by other objects.
+			Draws the occlusion culling buffer. This low-resolution occlusion culling buffer is rasterized on the CPU (or reprojected from the depth buffer, when using HZB occlusion culling) and is used to check whether instances are occluded by other objects.
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering methods.
 		</constant>
 		<constant name="VIEWPORT_DEBUG_DRAW_MOTION_VECTORS" value="25" enum="ViewportDebugDraw">

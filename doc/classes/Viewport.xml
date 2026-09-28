@@ -471,6 +471,12 @@
 			If [code]true[/code], 2D rendering will use a high dynamic range (HDR) [code]RGBA16[/code] format framebuffer. Additionally, 2D rendering will be performed on linear values and will be converted using the appropriate transfer function immediately before blitting to the screen (if the Viewport is attached to the screen).
 			Practically speaking, this means that the end result of the Viewport will not be clamped to the [code]0-1[/code] range and can be used in 3D rendering without color encoding adjustments. This allows 2D rendering to take advantage of effects requiring high dynamic range (e.g. 2D glow) as well as substantially improves the appearance of effects requiring highly detailed gradients.
 		</member>
+		<member name="use_hzb_occlusion_culling" type="bool" setter="set_use_hzb_occlusion_culling" getter="is_using_hzb_occlusion_culling" default="false">
+			If [code]true[/code], the depth buffer rendered by the GPU is used for occlusion culling in 3D for this viewport (HZB, or Hierarchical Z-Buffer occlusion culling). Unlike [member use_occlusion_culling], this doesn't require placing [OccluderInstance3D] nodes, as every opaque object can hide the objects behind it. Both can be enabled at the same time. For the root viewport, [member ProjectSettings.rendering/occlusion_culling/use_hzb_occlusion_culling] must be set to [code]true[/code] instead.
+			The depth buffer is downsampled on the GPU and read back asynchronously, so it's a few frames old by the time it's used. It is reprojected to match the current camera, and the areas where objects moved, were animated or were hidden since then don't occlude anything, so that the objects they reveal appear immediately. Movement that isn't done by updating instances (such as particles, or vertex animation done in shaders) can still cause objects behind to appear a few frames late. Objects with [member GeometryInstance3D.ignore_occlusion_culling] enabled are never culled.
+			[b]Note:[/b] HZB occlusion culling has a small cost on both the CPU and the GPU. Its resolution can be adjusted with [member ProjectSettings.rendering/occlusion_culling/hzb_buffer_height].
+			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering methods. When using the Mobile rendering method, transparent materials using [constant BaseMaterial3D.DEPTH_DRAW_ALWAYS] can also occlude objects.
+		</member>
 		<member name="use_occlusion_culling" type="bool" setter="set_use_occlusion_culling" getter="is_using_occlusion_culling" default="false">
 			If [code]true[/code], [OccluderInstance3D] nodes will be usable for occlusion culling in 3D for this viewport. For the root viewport, [member ProjectSettings.rendering/occlusion_culling/use_occlusion_culling] must be set to [code]true[/code] instead.
 			[b]Note:[/b] Enabling occlusion culling has a cost on the CPU. Only enable occlusion culling if you actually plan to use it, and think whether your scene can actually benefit from occlusion culling. Large, open scenes with few or no objects blocking the view will generally not benefit much from occlusion culling. Large open scenes generally benefit more from mesh LOD and visibility ranges ([member GeometryInstance3D.visibility_range_begin] and [member GeometryInstance3D.visibility_range_end]) compared to occlusion culling.
@@ -748,7 +754,7 @@
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="DEBUG_DRAW_OCCLUDERS" value="24" enum="DebugDraw">
-			Draws the buffer used for occlusion culling.
+			Draws the buffer used for occlusion culling (see [member use_occlusion_culling] and [member use_hzb_occlusion_culling]).
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering methods.
 		</constant>
 		<constant name="DEBUG_DRAW_MOTION_VECTORS" value="25" enum="DebugDraw">

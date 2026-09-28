@@ -330,6 +330,7 @@ private:
 	bool use_debanding = false;
 	float mesh_lod_threshold = 1.0;
 	bool use_occlusion_culling = false;
+	bool use_hzb_occlusion_culling = false;
 
 	Ref<ViewportTexture> default_texture;
 	HashSet<ViewportTexture *> viewport_textures;
@@ -626,6 +627,9 @@ public:
 
 	void set_use_occlusion_culling(bool p_us_occlusion_culling);
 	bool is_using_occlusion_culling() const;
+
+	void set_use_hzb_occlusion_culling(bool p_use_hzb_occlusion_culling);
+	bool is_using_hzb_occlusion_culling() const;
 
 	Vector2 get_camera_coords(const Vector2 &p_viewport_coords) const;
 	Vector2 get_camera_rect_size() const;
