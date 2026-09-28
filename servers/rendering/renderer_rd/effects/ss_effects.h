@@ -31,6 +31,9 @@
 #pragma once
 
 #include "servers/rendering/renderer_rd/pipeline_deferred_rd.h"
+#include "servers/rendering/renderer_rd/shaders/effects/gtao.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/gtao_denoise.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/gtao_prefilter_depths.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/screen_space_contact_shadows.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/screen_space_reflection.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/screen_space_reflection_downsample.glsl.gen.h"
@@ -38,10 +41,6 @@
 #include "servers/rendering/renderer_rd/shaders/effects/screen_space_reflection_hiz.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/screen_space_reflection_resolve.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ss_effects_downsample.glsl.gen.h"
-#include "servers/rendering/renderer_rd/shaders/effects/ssao.glsl.gen.h"
-#include "servers/rendering/renderer_rd/shaders/effects/ssao_blur.glsl.gen.h"
-#include "servers/rendering/renderer_rd/shaders/effects/ssao_importance_map.glsl.gen.h"
-#include "servers/rendering/renderer_rd/shaders/effects/ssao_interleave.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ssil.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ssil_blur.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ssil_importance_map.glsl.gen.h"
@@ -63,6 +62,10 @@
 #define RB_EDGES SNAME("edges")
 #define RB_IMPORTANCE_MAP SNAME("importance_map")
 #define RB_IMPORTANCE_PONG SNAME("importance_pong")
+
+#define RB_GTAO_DEPTH SNAME("gtao_depth")
+#define RB_GTAO_TERM SNAME("gtao_term")
+#define RB_GTAO_TERM_PONG SNAME("gtao_term_pong")
 
 #define RB_NORMAL_ROUGHNESS SNAME("normal_roughness")
 #define RB_HIZ SNAME("hiz")
@@ -119,24 +122,20 @@ public:
 	void ssil_allocate_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, SSILRenderBuffers &p_ssil_buffers, const SSILSettings &p_settings);
 	void screen_space_indirect_lighting(Ref<RenderSceneBuffersRD> p_render_buffers, SSILRenderBuffers &p_ssil_buffers, uint32_t p_view, RID p_normal_buffer, const Projection &p_projection, const Projection &p_last_projection, const SSILSettings &p_settings);
 
-	/* SSAO */
-	void ssao_set_quality(RSE::EnvironmentSSAOQuality p_quality, bool p_half_size, float p_adaptive_target, int p_blur_passes, float p_fadeout_from, float p_fadeout_to);
+	/* SSAO (XeGTAO) */
+	void ssao_set_quality(RSE::EnvironmentSSAOQuality p_quality, int p_denoise_passes, bool p_bent_normals);
+	bool ssao_is_using_bent_normals() const { return ssao_bent_normals; }
 
 	struct SSAORenderBuffers {
-		bool half_size = false;
-		int buffer_width;
-		int buffer_height;
-		int half_buffer_width;
-		int half_buffer_height;
+		bool bent_normals = false;
 	};
 
 	struct SSAOSettings {
-		float radius = 1.0;
-		float intensity = 2.0;
-		float power = 1.5;
-		float detail = 0.5;
-		float horizon = 0.06;
-		float sharpness = 0.98;
+		float radius = 0.5;
+		float intensity = 1.0;
+		float thin_occluder_compensation = 0.0;
+		// Index of the current frame in the TAA jitter sequence, 0 when TAA isn't used.
+		uint32_t noise_index = 0;
 
 		Size2i full_screen_size;
 	};
@@ -180,12 +179,9 @@ public:
 private:
 	/* Settings */
 
-	RSE::EnvironmentSSAOQuality ssao_quality = RSE::ENV_SSAO_QUALITY_MEDIUM;
-	bool ssao_half_size = false;
-	float ssao_adaptive_target = 0.5;
-	int ssao_blur_passes = 2;
-	float ssao_fadeout_from = 50.0;
-	float ssao_fadeout_to = 300.0;
+	RSE::EnvironmentSSAOQuality ssao_quality = RSE::ENV_SSAO_QUALITY_HIGH;
+	int ssao_denoise_passes = 2;
+	bool ssao_bent_normals = true;
 
 	RSE::EnvironmentSSILQuality ssil_quality = RSE::ENV_SSIL_QUALITY_MEDIUM;
 	bool ssil_half_size = false;
@@ -218,7 +214,6 @@ private:
 		SS_EFFECTS_DOWNSAMPLE_MIPMAP_HALF_RES,
 		SS_EFFECTS_DOWNSAMPLE_HALF,
 		SS_EFFECTS_DOWNSAMPLE_HALF_RES_HALF,
-		SS_EFFECTS_DOWNSAMPLE_FULL_MIPS,
 		SS_EFFECTS_MAX
 	};
 
@@ -232,7 +227,6 @@ private:
 		RID downsample_shader_version;
 		bool used_half_size_last_frame = false;
 		bool used_mips_last_frame = false;
-		bool used_full_mips_last_frame = false;
 
 		RID gather_constants_buffer;
 
@@ -340,99 +334,79 @@ private:
 
 	void gather_ssil(RD::ComputeListID p_compute_list, const RID *p_ssil_slices, const RID *p_edges_slices, const SSILSettings &p_settings, bool p_adaptive_base_pass, RID p_gather_uniform_set, RID p_importance_map_uniform_set, RID p_projection_uniform_set);
 
-	/* SSAO */
+	/* SSAO (XeGTAO) */
 
-	enum SSAOMode {
-		SSAO_GATHER,
-		SSAO_GATHER_BASE,
-		SSAO_GATHER_ADAPTIVE,
-		SSAO_GENERATE_IMPORTANCE_MAP,
-		SSAO_PROCESS_IMPORTANCE_MAPA,
-		SSAO_PROCESS_IMPORTANCE_MAPB,
-		SSAO_BLUR_PASS,
-		SSAO_BLUR_PASS_SMART,
-		SSAO_BLUR_PASS_WIDE,
-		SSAO_INTERLEAVE,
-		SSAO_INTERLEAVE_SMART,
-		SSAO_INTERLEAVE_HALF,
-		SSAO_MAX
+	static constexpr uint32_t SSAO_DEPTH_MIP_LEVELS = 5;
+
+	static uint32_t _ssao_get_depth_mip_count(const Size2i &p_size);
+
+	enum SSAOGTAOMode {
+		SSAO_GTAO_LOW,
+		SSAO_GTAO_MEDIUM,
+		SSAO_GTAO_HIGH,
+		SSAO_GTAO_ULTRA,
+		SSAO_GTAO_LOW_BENT_NORMALS,
+		SSAO_GTAO_MEDIUM_BENT_NORMALS,
+		SSAO_GTAO_HIGH_BENT_NORMALS,
+		SSAO_GTAO_ULTRA_BENT_NORMALS,
+		SSAO_GTAO_MAX
 	};
 
-	struct SSAOGatherPushConstant {
-		int32_t screen_size[2];
-		int pass;
-		int quality;
-
-		float half_screen_pixel_size[2];
-		int size_multiplier;
-		float detail_intensity;
-
-		float NDC_to_view_mul[2];
-		float NDC_to_view_add[2];
-
-		float pad[2];
-		float half_screen_pixel_size_x025[2];
-
-		float radius;
-		float intensity;
-		float shadow_power;
-		float shadow_clamp;
-
-		float fade_out_mul;
-		float fade_out_add;
-		float horizon_angle_threshold;
-		float inv_radius_near_limit;
-
-		uint32_t is_orthogonal;
-		float neg_inv_radius;
-		float load_counter_avg_div;
-		float adaptive_sample_limit;
-
-		int32_t pass_coord_offset[2];
-		float pass_uv_offset[2];
+	enum SSAODenoiseMode {
+		SSAO_DENOISE,
+		SSAO_DENOISE_FINAL,
+		SSAO_DENOISE_BENT_NORMALS,
+		SSAO_DENOISE_FINAL_BENT_NORMALS,
+		SSAO_DENOISE_MAX
 	};
 
-	struct SSAOImportanceMapPushConstant {
-		float half_screen_pixel_size[2];
-		float intensity;
-		float power;
-	};
+	// Shared by all XeGTAO passes, must match gtao_inc.glsl.
+	struct SSAOPushConstant {
+		int32_t viewport_size[2];
+		float viewport_pixel_size[2];
 
-	struct SSAOBlurPushConstant {
-		float edge_sharpness;
-		float pad;
-		float half_screen_pixel_size[2];
-	};
+		float depth_unpack_consts[2];
+		float ndc_to_view_mul[2];
 
-	struct SSAOInterleavePushConstant {
-		float inv_sharpness;
-		uint32_t size_modifier;
-		float pixel_size[2];
+		float ndc_to_view_add[2];
+		float ndc_to_view_mul_x_pixel_size[2];
+
+		float effect_radius;
+		float effect_falloff_range;
+		float radius_multiplier;
+		float final_value_power;
+
+		float denoise_blur_beta;
+		float sample_distribution_power;
+		float thin_occluder_compensation;
+		float depth_mip_sampling_offset;
+
+		uint32_t noise_index;
+		uint32_t orthogonal;
+		uint32_t depth_mip_count;
+		uint32_t pad;
 	};
 
 	struct SSAO {
-		SSAOGatherPushConstant gather_push_constant;
-		SsaoShaderRD gather_shader;
-		RID gather_shader_version;
+		SSAOPushConstant push_constant;
 
-		SSAOImportanceMapPushConstant importance_map_push_constant;
-		SsaoImportanceMapShaderRD importance_map_shader;
-		RID importance_map_shader_version;
-		RID importance_map_load_counter;
-		RID counter_uniform_set;
+		GtaoPrefilterDepthsShaderRD prefilter_depths_shader;
+		RID prefilter_depths_shader_version;
+		PipelineDeferredRD prefilter_depths_pipeline;
 
-		SSAOBlurPushConstant blur_push_constant;
-		SsaoBlurShaderRD blur_shader;
-		RID blur_shader_version;
+		GtaoShaderRD gtao_shader;
+		RID gtao_shader_version;
+		PipelineDeferredRD gtao_pipelines[SSAO_GTAO_MAX];
 
-		SSAOInterleavePushConstant interleave_push_constant;
-		SsaoInterleaveShaderRD interleave_shader;
-		RID interleave_shader_version;
+		GtaoDenoiseShaderRD denoise_shader;
+		RID denoise_shader_version;
+		PipelineDeferredRD denoise_pipelines[SSAO_DENOISE_MAX];
 
-		PipelineDeferredRD pipelines[SSAO_MAX];
+		// 64x64 lookup table of Hilbert curve indices used to drive the R2 noise sequence.
+		RID hilbert_lut;
+		// XeGTAO requires point sampling (for min, mag and mip) with clamp to edge addressing.
+		RID point_clamp_sampler;
 	} ssao;
-
-	void gather_ssao(RD::ComputeListID p_compute_list, const RID *p_ao_slices, const SSAOSettings &p_settings, bool p_adaptive_base_pass, RID p_gather_uniform_set, RID p_importance_map_uniform_set);
 
 	/* Screen Space Reflection */
 

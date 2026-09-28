@@ -1321,19 +1321,16 @@ public:
 	PASS1(environment_set_ssr_roughness_quality, RSE::EnvironmentSSRRoughnessQuality)
 
 	// SSAO
-	PASS10(environment_set_ssao, RID, bool, float, float, float, float, float, float, float, float)
+	PASS7(environment_set_ssao, RID, bool, float, float, float, float, float)
 
 	PASS1RC(bool, environment_get_ssao_enabled, RID)
 	PASS1RC(float, environment_get_ssao_radius, RID)
 	PASS1RC(float, environment_get_ssao_intensity, RID)
-	PASS1RC(float, environment_get_ssao_power, RID)
-	PASS1RC(float, environment_get_ssao_detail, RID)
-	PASS1RC(float, environment_get_ssao_horizon, RID)
-	PASS1RC(float, environment_get_ssao_sharpness, RID)
+	PASS1RC(float, environment_get_ssao_thin_occluder_compensation, RID)
 	PASS1RC(float, environment_get_ssao_direct_light_affect, RID)
 	PASS1RC(float, environment_get_ssao_ao_channel_affect, RID)
 
-	PASS6(environment_set_ssao_quality, RSE::EnvironmentSSAOQuality, bool, float, int, float, float)
+	PASS3(environment_set_ssao_quality, RSE::EnvironmentSSAOQuality, int, bool)
 
 	// SSIL
 	PASS6(environment_set_ssil, RID, bool, float, float, float, float)

@@ -13,7 +13,6 @@ USE_1D_LUT = false
 USE_SSAO_ABYSS = false
 USE_SSAO_LOW = false
 USE_SSAO_MED = false
-USE_SSAO_HIGH = false
 USE_SSAO_MEGA = false
 
 #[vertex]
@@ -91,7 +90,7 @@ vec3 apply_color_correction(vec3 color) {
 #endif // USE_1D_LUT
 #endif // USE_COLOR_CORRECTION
 
-#if defined(USE_SSAO_ABYSS) || defined(USE_SSAO_LOW) || defined(USE_SSAO_MED) || defined(USE_SSAO_HIGH) || defined(USE_SSAO_MEGA)
+#if defined(USE_SSAO_ABYSS) || defined(USE_SSAO_LOW) || defined(USE_SSAO_MED) || defined(USE_SSAO_MEGA)
 #define USE_SOME_SSAO
 uniform float ssao_intensity;
 uniform float ssao_radius_frac;
@@ -105,8 +104,8 @@ uniform sampler2D depth_buffer; // texunit:3
 #if defined(USE_SSAO_ABYSS)
 // Use the tiny 2-sample version.
 #include "../s4ao_micro_inc.glsl"
-#elif defined(USE_SSAO_HIGH) || defined(USE_SSAO_MEGA)
-// Use the rings version for the higher qualities.
+#elif defined(USE_SSAO_MEGA)
+// Use the rings version for the highest quality.
 #include "../s4ao_mega_inc.glsl"
 #else
 // Use the more generic NxN grid version.

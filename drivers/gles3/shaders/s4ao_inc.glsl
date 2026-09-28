@@ -4,8 +4,6 @@
 // Takes sample_width^2 samples in a grid, with the corners notched.
 #if defined(USE_SSAO_LOW)
 const int sample_width = 2;
-#elif defined(USE_SSAO_HIGH)
-const int sample_width = 6;
 #else
 const int sample_width = 4;
 #endif

@@ -344,40 +344,13 @@ float Environment::get_ssao_intensity() const {
 	return ssao_intensity;
 }
 
-void Environment::set_ssao_power(float p_power) {
-	ssao_power = p_power;
+void Environment::set_ssao_thin_occluder_compensation(float p_thin_occluder_compensation) {
+	ssao_thin_occluder_compensation = p_thin_occluder_compensation;
 	_update_ssao();
 }
 
-float Environment::get_ssao_power() const {
-	return ssao_power;
-}
-
-void Environment::set_ssao_detail(float p_detail) {
-	ssao_detail = p_detail;
-	_update_ssao();
-}
-
-float Environment::get_ssao_detail() const {
-	return ssao_detail;
-}
-
-void Environment::set_ssao_horizon(float p_horizon) {
-	ssao_horizon = p_horizon;
-	_update_ssao();
-}
-
-float Environment::get_ssao_horizon() const {
-	return ssao_horizon;
-}
-
-void Environment::set_ssao_sharpness(float p_sharpness) {
-	ssao_sharpness = p_sharpness;
-	_update_ssao();
-}
-
-float Environment::get_ssao_sharpness() const {
-	return ssao_sharpness;
+float Environment::get_ssao_thin_occluder_compensation() const {
+	return ssao_thin_occluder_compensation;
 }
 
 void Environment::set_ssao_direct_light_affect(float p_direct_light_affect) {
@@ -404,10 +377,7 @@ void Environment::_update_ssao() {
 			ssao_enabled,
 			ssao_radius,
 			ssao_intensity,
-			ssao_power,
-			ssao_detail,
-			ssao_horizon,
-			ssao_sharpness,
+			ssao_thin_occluder_compensation,
 			ssao_direct_light_affect,
 			ssao_ao_channel_affect);
 }
@@ -1344,14 +1314,8 @@ void Environment::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_ssao_radius"), &Environment::get_ssao_radius);
 	ClassDB::bind_method(D_METHOD("set_ssao_intensity", "intensity"), &Environment::set_ssao_intensity);
 	ClassDB::bind_method(D_METHOD("get_ssao_intensity"), &Environment::get_ssao_intensity);
-	ClassDB::bind_method(D_METHOD("set_ssao_power", "power"), &Environment::set_ssao_power);
-	ClassDB::bind_method(D_METHOD("get_ssao_power"), &Environment::get_ssao_power);
-	ClassDB::bind_method(D_METHOD("set_ssao_detail", "detail"), &Environment::set_ssao_detail);
-	ClassDB::bind_method(D_METHOD("get_ssao_detail"), &Environment::get_ssao_detail);
-	ClassDB::bind_method(D_METHOD("set_ssao_horizon", "horizon"), &Environment::set_ssao_horizon);
-	ClassDB::bind_method(D_METHOD("get_ssao_horizon"), &Environment::get_ssao_horizon);
-	ClassDB::bind_method(D_METHOD("set_ssao_sharpness", "sharpness"), &Environment::set_ssao_sharpness);
-	ClassDB::bind_method(D_METHOD("get_ssao_sharpness"), &Environment::get_ssao_sharpness);
+	ClassDB::bind_method(D_METHOD("set_ssao_thin_occluder_compensation", "thin_occluder_compensation"), &Environment::set_ssao_thin_occluder_compensation);
+	ClassDB::bind_method(D_METHOD("get_ssao_thin_occluder_compensation"), &Environment::get_ssao_thin_occluder_compensation);
 	ClassDB::bind_method(D_METHOD("set_ssao_direct_light_affect", "amount"), &Environment::set_ssao_direct_light_affect);
 	ClassDB::bind_method(D_METHOD("get_ssao_direct_light_affect"), &Environment::get_ssao_direct_light_affect);
 	ClassDB::bind_method(D_METHOD("set_ssao_ao_channel_affect", "amount"), &Environment::set_ssao_ao_channel_affect);
@@ -1359,12 +1323,9 @@ void Environment::_bind_methods() {
 
 	ADD_GROUP("SSAO", "ssao_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ssao_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_ssao_enabled", "is_ssao_enabled");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_radius", PROPERTY_HINT_RANGE, "0.01,16,0.01,or_greater"), "set_ssao_radius", "get_ssao_radius");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_intensity", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_ssao_intensity", "get_ssao_intensity");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_power", PROPERTY_HINT_EXP_EASING, "positive_only"), "set_ssao_power", "get_ssao_power");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_detail", PROPERTY_HINT_RANGE, "0,5,0.01"), "set_ssao_detail", "get_ssao_detail");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_horizon", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_ssao_horizon", "get_ssao_horizon");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_sharpness", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_ssao_sharpness", "get_ssao_sharpness");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_radius", PROPERTY_HINT_RANGE, "0.01,16,0.01,or_greater,suffix:m"), "set_ssao_radius", "get_ssao_radius");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_intensity", PROPERTY_HINT_RANGE, "0,4,0.01,or_greater"), "set_ssao_intensity", "get_ssao_intensity");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_thin_occluder_compensation", PROPERTY_HINT_RANGE, "0,0.7,0.01"), "set_ssao_thin_occluder_compensation", "get_ssao_thin_occluder_compensation");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_light_affect", PROPERTY_HINT_RANGE, "0.00,1,0.01"), "set_ssao_direct_light_affect", "get_ssao_direct_light_affect");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ssao_ao_channel_affect", PROPERTY_HINT_RANGE, "0.00,1,0.01"), "set_ssao_ao_channel_affect", "get_ssao_ao_channel_affect");
 
