@@ -31,6 +31,7 @@
 #include "hzb_occlusion.h"
 
 #include "core/object/callable_mp.h"
+#include "servers/rendering/renderer_compositor.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_server_globals.h"
