@@ -42,6 +42,18 @@
 #include "core/templates/hash_map.h"
 #include "core/variant/typed_array.h"
 
+class LandscapeData;
+
+// Composites the final terrain under the landscape splines from the base layer of the data
+// (implemented by the spline system of Landscape3D).
+class LandscapeDataCompositor {
+public:
+	// Recomputes the final heights and/or weights (LandscapeData::ChangeFlags) of the texels
+	// of the rect that are under splines, without notifying the change.
+	virtual void composite_region(LandscapeData *p_data, const Rect2i &p_rect, int p_flags) = 0;
+	virtual ~LandscapeDataCompositor() {}
+};
+
 // Terrain source data: a regular grid of heights (in meters) plus up to
 // 16 weight-blended material layers stored as four RGBA8 weightmaps, and an optional hole mask.
 //
@@ -51,6 +63,11 @@
 //
 // The data lives in a tiled LandscapeStorage. Saved as a .lsdata file, it is streamed:
 // tiles are only loaded when they are needed (rendering, collision, queries, editing).
+//
+// Landscape splines (roads, rivers, lakes...) modify the terrain non-destructively: the tiles
+// under splines keep a base layer (the terrain as sculpted and painted), and their final heights
+// and weights are composited from the base and the splines. Editing tools (LandscapeBrush,
+// imports, layer operations) edit the base layer, which is the final data everywhere else.
 class LandscapeData : public Resource {
 	GDCLASS(LandscapeData, Resource);
 
@@ -75,6 +92,15 @@ private:
 	Dictionary saved_lod_trees; // Patch size -> nodes, as loaded from the data file.
 	void _clear_lod_trees();
 
+	// Splines.
+	LandscapeDataCompositor *compositor = nullptr;
+	Rect2i pending_composite;
+	int pending_composite_flags = 0;
+	bool compositing = false;
+	Dictionary spline_records; // Spline id -> record of what was applied (see Landscape3D).
+	void _request_composite(const Rect2i &p_rect, int p_flags);
+	void _flush_composite(Rect2i &r_rect, int &r_flags);
+
 	// Serialization helpers (embedded resources, .lsdata files are handled by ResourceFormatLandscapeData).
 	void _set_size(const Vector2i &p_size);
 	void _set_heights(const PackedFloat32Array &p_heights);
@@ -83,8 +109,12 @@ private:
 	Array _get_weightmaps() const;
 	void _set_holes(const PackedByteArray &p_holes);
 	PackedByteArray _get_holes() const;
+	void _set_base_tiles(const Dictionary &p_tiles);
+	Dictionary _get_base_tiles() const;
 
-	void _write_image_rows(int p_layer, const Vector<uint8_t> &p_data, int p_texel_size);
+	// Writes a full resolution image in bands. Edit writes also go to the base layer.
+	void _write_image_rows(int p_layer, const Vector<uint8_t> &p_data, int p_texel_size, bool p_edit = false);
+	Vector<uint8_t> _read_layer_rows(int p_layer, int p_texel_size) const;
 
 	static Ref<Image> _load_png16(const String &p_path);
 	static Ref<Image> _load_raw16(const String &p_path);
@@ -104,7 +134,7 @@ public:
 	real_t get_vertex_spacing() const { return vertex_spacing; }
 	Vector2 get_world_size() const;
 
-	// Heights.
+	// Heights (final data).
 	float get_height(int p_x, int p_z) const;
 	void set_height(int p_x, int p_z, float p_height);
 	float sample_height(real_t p_local_x, real_t p_local_z) const;
@@ -113,6 +143,29 @@ public:
 	// Bulk access to mip 0 heights (the rect must be inside the landscape for writes).
 	void read_heights(const Rect2i &p_rect, float *r_heights) const;
 	void write_heights(const Rect2i &p_rect, const float *p_heights);
+
+	// Edit layer: the base layer under splines, the final data elsewhere. Writes are composited
+	// with the splines (when a compositor is registered) on the next notify_region_changed().
+	float get_edit_height(int p_x, int p_z) const;
+	float sample_edit_height(real_t p_local_x, real_t p_local_z) const;
+	void read_edit_heights(const Rect2i &p_rect, float *r_heights) const;
+	void write_edit_heights(const Rect2i &p_rect, const float *p_heights);
+	void get_edit_weights(int p_x, int p_z, float *r_weights) const;
+	void set_edit_weights(int p_x, int p_z, const float *p_weights);
+
+	// Base layer management (used by the spline system). Tiles are LandscapeStorage mip 0 tiles.
+	bool has_base() const { return storage.get_base_tile_count() > 0; }
+	bool has_base_in_rect(const Rect2i &p_rect) const { return storage.has_base_in_rect(p_rect); }
+	Vector2i get_tile_count() const;
+	bool tile_has_base(const Vector2i &p_tile) const { return storage.tile_has_base(p_tile.x, p_tile.y); }
+	void capture_base(const Vector2i &p_tile); // The base becomes a copy of the final data.
+	void release_base(const Vector2i &p_tile); // The final data is restored from the base, which is dropped.
+	void clear_base(); // Drops all base tiles, keeping the final data.
+	void set_compositor(LandscapeDataCompositor *p_compositor);
+	LandscapeDataCompositor *get_compositor() const { return compositor; }
+	// What the splines applied to this data (see Landscape3D), saved with it.
+	void set_spline_records(const Dictionary &p_records);
+	Dictionary get_spline_records() const { return spline_records; }
 
 	// Weights (layer painting).
 	void set_weightmap_count(int p_count);
@@ -124,6 +177,8 @@ public:
 	void set_layer_weight(int p_x, int p_z, int p_layer, float p_weight);
 	void get_weights(int p_x, int p_z, float *r_weights) const;
 	void set_weights(int p_x, int p_z, const float *p_weights);
+	// Normalized 8-bit weights (the sum is exactly 255) of p_layers float weights.
+	static void quantize_weights(const float *p_weights, int p_layers, uint8_t *r_quantized);
 	int get_dominant_layer(int p_x, int p_z) const;
 	void fill_layer(int p_layer);
 	void remove_layer(int p_layer);
@@ -138,7 +193,7 @@ public:
 	Dictionary get_region(const Rect2i &p_rect, bool p_heights = true, bool p_weights = true) const;
 	void set_region(const Dictionary &p_region);
 
-	// Images.
+	// Images (the heightmap and weightmaps images are the final data, set_* functions edit the base layer).
 	Ref<Image> get_heightmap_image() const;
 	void set_heightmap_image(const Ref<Image> &p_image, float p_scale = 1.0, float p_offset = 0.0);
 	Ref<Image> get_weightmap_image(int p_index) const;

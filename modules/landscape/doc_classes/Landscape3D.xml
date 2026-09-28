@@ -9,7 +9,8 @@
 		Close to the camera the quadtree can keep subdividing below the heightmap resolution ([member micro_detail_levels]) to add micro detail displacement from the height maps of the painted layers ([member LandscapeLayer.displacement]).
 		Shadows use a separate patch list that is not frustum culled (see [member shadow_lod_bias] and [member shadow_distance]).
 		Collision is generated as [HeightMapShape3D] tiles, optionally only around the camera for very large worlds (see [member collision_radius]).
-		The editor provides a "Landscape" dock (similar to the Landscape Mode of Unreal Engine) with Manage, Sculpt and Paint tools when a [Landscape3D] is selected.
+		The editor provides a "Landscape" dock (similar to the Landscape Mode of Unreal Engine) with Manage, Sculpt, Paint and Splines tools when a [Landscape3D] is selected.
+		[LandscapeSpline3D] descendants (roads, rivers, streams, lakes) modify the terrain non-destructively: the terrain under them is composited from the sculpted terrain and the splines, by [member LandscapeSpline3D.terrain_priority]. Only the parts of the splines that changed are applied again (see [method update_splines]).
 		[b]Note:[/b] [Landscape3D] requires the Forward+ or Mobile renderer. Physics collision and CPU queries also work with the Compatibility renderer, but nothing is drawn.
 		[b]Note:[/b] Save the [LandscapeData] as a binary [code].res[/code] file, text resources are very large and slow for heightmaps.
 	</description>
@@ -69,6 +70,12 @@
 				Returns the global normal of the terrain at the given global position.
 			</description>
 		</method>
+		<method name="get_splines" qualifiers="const">
+			<return type="LandscapeSpline3D[]" />
+			<description>
+				Returns the [LandscapeSpline3D] descendants modifying the terrain.
+			</description>
+		</method>
 		<method name="get_statistics" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
@@ -79,6 +86,9 @@
 				- [code]budget_exceeded[/code]: [code]true[/code] if [member max_patches] was too small to hold the selected patches.
 				- [code]heightmap_levels[/code]: number of quadtree levels over the heightmap.
 				- [code]micro_levels[/code]: number of micro detail levels currently in use.
+				- [code]splines[/code]: number of [LandscapeSpline3D] modifying the terrain.
+				- [code]spline_base_tiles[/code]: number of storage tiles keeping a base layer under splines.
+				- [code]spline_composited_tiles[/code]: number of tiles composited by the last spline update.
 			</description>
 		</method>
 		<method name="global_to_local" qualifiers="const">
@@ -104,6 +114,12 @@
 				Intersects a ray with the terrain on the CPU (no physics needed). Returns a dictionary with [code]position[/code] and [code]normal[/code] (global space), or an empty dictionary if nothing was hit.
 			</description>
 		</method>
+		<method name="rebuild_splines">
+			<return type="void" />
+			<description>
+				Applies every spline to the terrain again, and restores the terrain of the tiles keeping a base layer that no spline covers anymore. Nothing is lost: the terrain under splines is always composited from the sculpted terrain.
+			</description>
+		</method>
 		<method name="set_brush_preview">
 			<return type="void" />
 			<param index="0" name="visible" type="bool" />
@@ -119,6 +135,12 @@
 			<return type="void" />
 			<description>
 				Rebuilds all collision tiles immediately.
+			</description>
+		</method>
+		<method name="update_splines">
+			<return type="void" />
+			<description>
+				Applies the pending spline changes to the terrain now. This happens automatically every frame (in the editor, after a short delay while splines are being edited). Only the blocks of the splines that changed since they were applied are composited again (see [member LandscapeData.spline_records]).
 			</description>
 		</method>
 	</methods>

@@ -7,10 +7,17 @@
 		Stores the terrain as a regular grid of heights (in meters, 32-bit float) and up to 16 weight-blended material layers stored as four RGBA8 weightmaps (one channel per layer, the weights of a texel sum to 1).
 		The texel [code](x, z)[/code] is located at [code](x * vertex_spacing, height, z * vertex_spacing)[/code] in the local space of the [Landscape3D], so the landscape covers [code](size - 1) * vertex_spacing[/code] meters along each axis (see [member size]). The resolution is limited to 16384 texels per side, e.g. 16 x 16 km with a vertex spacing of 1 m.
 		When modifying the data directly, call [method notify_region_changed] so that the landscapes using it update their GPU data, LOD tree and collision.
+		[b]Splines:[/b] [LandscapeSpline3D] nodes (roads, rivers, streams, lakes) modify the terrain non-destructively. The tiles under splines keep a base layer, the terrain as sculpted and painted, and their final heights and weights are composited from the base and the splines. The editing tools ([LandscapeBrush], [method set_heightmap_image], [method fill_layer], [method set_layer_weights_image]...) edit this base layer, which is the final data everywhere else: in the editor, the splines stay on top of the sculpted terrain. At runtime, brush edits are written through the base and the final data. The getters such as [method get_height] return the final data, [method get_edit_height] the base layer.
 	</description>
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="clear_base_layer">
+			<return type="void" />
+			<description>
+				Drops the base layer kept under splines, keeping the final data: the current spline deformations become part of the sculpted terrain. The splines are applied again on top of it when they change or when [method Landscape3D.rebuild_splines] is called.
+			</description>
+		</method>
 		<method name="clear_holes">
 			<return type="void" />
 			<description>
@@ -53,6 +60,14 @@
 			<param index="1" name="z" type="int" />
 			<description>
 				Returns the layer with the highest weight at the given texel.
+			</description>
+		</method>
+		<method name="get_edit_height" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="x" type="int" />
+			<param index="1" name="z" type="int" />
+			<description>
+				Returns the height of a texel in the edit layer: the terrain without the splines under splines (see [LandscapeSpline3D]), the final height elsewhere.
 			</description>
 		</method>
 		<method name="get_height" qualifiers="const">
@@ -102,7 +117,7 @@
 			<param index="1" name="heights" type="bool" default="true" />
 			<param index="2" name="weights" type="bool" default="true" />
 			<description>
-				Returns a copy of the heights and/or weights of a region, as a dictionary with the keys [code skip-lint]rect[/code], [code skip-lint]heights[/code] ([PackedFloat32Array]) and [code skip-lint]weightmaps[/code] (array of [PackedByteArray]). The result can be restored with [method set_region], e.g. for undo.
+				Returns a copy of the heights and/or weights of a region, as a dictionary with the keys [code skip-lint]rect[/code], [code skip-lint]heights[/code] ([PackedFloat32Array]) and [code skip-lint]weightmaps[/code] (array of [PackedByteArray]). Under splines, the edit layer is also stored ([code skip-lint]base_heights[/code] and [code skip-lint]base_weightmaps[/code]). The result can be restored with [method set_region], e.g. for undo.
 			</description>
 		</method>
 		<method name="get_weightmap_count" qualifiers="const">
@@ -122,6 +137,12 @@
 			<return type="Vector2" />
 			<description>
 				Returns the size of the landscape in meters.
+			</description>
+		</method>
+		<method name="has_base_layer" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if tiles keep a base layer, i.e. splines modify the terrain.
 			</description>
 		</method>
 		<method name="has_holes" qualifiers="const">
@@ -301,6 +322,9 @@
 		</method>
 	</methods>
 	<members>
+		<member name="base_tiles" type="Dictionary" setter="_set_base_tiles" getter="_get_base_tiles" default="{}">
+			The base layer of the tiles under splines, for embedded resources ([code].lsdata[/code] files store it in their tiles): storage tile coordinates → base heights and weightmaps of the tile.
+		</member>
 		<member name="heights" type="PackedFloat32Array" setter="_set_heights" getter="_get_heights" default="PackedFloat32Array()">
 			The heights of all texels, row by row.
 		</member>
@@ -309,6 +333,9 @@
 		</member>
 		<member name="size" type="Vector2i" setter="_set_size" getter="get_size" default="Vector2i(0, 0)">
 			The resolution of the landscape in texels. Use [method create] or [method resize] to change it.
+		</member>
+		<member name="spline_records" type="Dictionary" setter="set_spline_records" getter="get_spline_records" default="{}">
+			What the splines applied to this data: spline id → hash and texel rect of each block of the spline (see [LandscapeSpline3D]). Used by [Landscape3D] to only apply again the parts of the splines that changed, also when the scene was edited while the data wasn't loaded.
 		</member>
 		<member name="vertex_spacing" type="float" setter="set_vertex_spacing" getter="get_vertex_spacing" default="1.0">
 			The distance in meters between two heightmap texels.

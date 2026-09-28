@@ -1,0 +1,402 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LandscapeSpline3D" inherits="Node3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		A road, river, stream or lake following a spline, modifying the terrain of a [Landscape3D].
+	</brief_description>
+	<description>
+		A smooth curve through control points, similar to the landscape splines and water bodies of Unreal Engine. Each point has its own width, depth, banking and flow speed, interpolated smoothly along the curve.
+		- A mesh is extruded along the curve (road surface with skirts, water surface of rivers and streams) or fills it (flat surface of lakes). It is split in chunks of [member chunk_length] that are culled and LODed separately, only built near the camera and hidden beyond [member visibility_range].
+		- The terrain of the [Landscape3D] ancestor is modified under the spline: flattened road bed, channel carved below the water with its banks, or lake basin. A material layer can also be painted ([member paint_layer]).
+		The terrain is modified non-destructively: the terrain of the storage tiles under splines is kept in a base layer of the [LandscapeData], and the splines are composited on top of it, in the order of their [member terrain_priority]. Moving or deleting a spline restores the terrain it covered, and sculpting or painting under splines edits the base layer. Only the parts of the splines that changed are applied again (see [member LandscapeData.spline_records]). At runtime, splines aren't composited again unless they change, and brushes modify the terrain directly.
+		Points are drawn and edited with the Splines tab of the Landscape dock: select them in the viewport and move them with the transform gizmo, and drag the handles on their sides to change the width.
+		Water and road surfaces use [LandscapeWaterMaterial] and [LandscapeRoadMaterial] by default (see [method get_default_material]).
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="add_point">
+			<return type="void" />
+			<param index="0" name="position" type="Vector3" />
+			<param index="1" name="index" type="int" default="-1" />
+			<description>
+				Adds a point at [param position] (local space). If [param index] is [code]-1[/code], the point is added at the end, otherwise it is inserted before the point at [param index]. The attributes of the new point take the default values ([member width], [member depth], [member flow_speed]).
+			</description>
+		</method>
+		<method name="apply_type_defaults">
+			<return type="void" />
+			<description>
+				Sets the typical dimensions and settings of the [member type] of the spline: width, depth, flow speed, mesh density, terrain falloff and priority, paint and visibility range. The attributes of the existing points are reset to the new defaults.
+			</description>
+		</method>
+		<method name="clear_points">
+			<return type="void" />
+			<description>
+				Removes all points.
+			</description>
+		</method>
+		<method name="create_curve">
+			<return type="Curve3D" />
+			<description>
+				Returns a [Curve3D] following the spline exactly (Bézier control points computed from the curve), e.g. to move objects along a road with [PathFollow3D]. The tilt of the points is the banking of the road.
+			</description>
+		</method>
+		<method name="create_mesh">
+			<return type="ArrayMesh" />
+			<description>
+				Returns the whole mesh of the spline (every chunk, full detail) in a single surface, e.g. to bake navigation meshes or to export it.
+			</description>
+		</method>
+		<method name="get_closest_distance">
+			<return type="float" />
+			<param index="0" name="local_position" type="Vector3" />
+			<description>
+				Returns the distance along the spline (in meters, from the first point) of the point of the curve closest to [param local_position].
+			</description>
+		</method>
+		<method name="get_default_material" qualifiers="static">
+			<return type="Material" />
+			<param index="0" name="type" type="int" enum="LandscapeSpline3D.SplineType" />
+			<description>
+				Returns the shared material used when [member material] isn't set: a [LandscapeRoadMaterial] for roads, a [LandscapeWaterMaterial] for rivers, streams and lakes.
+			</description>
+		</method>
+		<method name="get_length">
+			<return type="float" />
+			<description>
+				Returns the length of the spline in meters (local space).
+			</description>
+		</method>
+		<method name="get_point_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of points.
+			</description>
+		</method>
+		<method name="get_point_depth" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the depth of the channel below the water at the point [param index].
+			</description>
+		</method>
+		<method name="get_point_flow_speed" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the speed of the water at the point [param index], in meters per second.
+			</description>
+		</method>
+		<method name="get_point_position" qualifiers="const">
+			<return type="Vector3" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the position of the point [param index] (local space).
+			</description>
+		</method>
+		<method name="get_point_tilt" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the banking of the road at the point [param index], in radians.
+			</description>
+		</method>
+		<method name="get_point_width" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the width at the point [param index].
+			</description>
+		</method>
+		<method name="get_spline_id" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the unique identifier of the spline, used by [member LandscapeData.spline_records] to find the terrain it modified. It is random for new splines, and regenerated when a spline with the same identifier is already registered (duplicated nodes).
+			</description>
+		</method>
+		<method name="get_statistics" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns statistics about the spline:
+				- [code]samples[/code]: number of cross sections of the tessellated curve.
+				- [code]length[/code]: length in meters.
+				- [code]chunks[/code]: number of mesh chunks.
+				- [code]chunks_built[/code]: number of chunks built (the others are too far from the camera).
+				- [code]vertices[/code] and [code]triangles[/code]: size of the built chunks (full detail).
+			</description>
+		</method>
+		<method name="get_surface_info">
+			<return type="Dictionary" />
+			<param index="0" name="global_position" type="Vector3" />
+			<description>
+				Returns information about the surface of the spline at the horizontal position of [param global_position], or an empty dictionary if the spline has less than 2 points:
+				- [code]inside[/code]: [code]true[/code] if the position is over the road, the water of the river or stream, or inside the lake.
+				- [code]position[/code], [code]height[/code] and [code]normal[/code]: point of the surface (road or water) at this position, in global space.
+				- [code]distance[/code]: distance along the spline of the closest point of the curve.
+				- [code]lateral[/code]: signed distance to the curve (positive on the right), or for lakes, the distance to the shore (negative inside).
+				- [code skip-lint]width[/code] and [code skip-lint]depth[/code]: width and depth at the closest point.
+				- [code]flow[/code]: velocity of the water of rivers and streams, in global space.
+				[codeblocks]
+				[gdscript]
+				var info = $River.get_surface_info(player.global_position)
+				if info.inside and player.global_position.y &lt; info.height:
+					player.velocity += info.flow * delta # Carried by the current.
+				[/gdscript]
+				[csharp]
+				var info = GetNode&lt;LandscapeSpline3D&gt;("River").GetSurfaceInfo(player.GlobalPosition);
+				if (info.Count &gt; 0 &amp;&amp; (bool)info["inside"] &amp;&amp; player.GlobalPosition.Y &lt; (float)info["height"])
+				{
+					player.Velocity += (Vector3)info["flow"] * (float)delta; // Carried by the current.
+				}
+				[/csharp]
+				[/codeblocks]
+			</description>
+		</method>
+		<method name="get_tessellated_points">
+			<return type="PackedVector3Array" />
+			<description>
+				Returns the points of the tessellated curve (local space), spaced by at most [member sample_spacing].
+			</description>
+		</method>
+		<method name="is_point_in_water">
+			<return type="bool" />
+			<param index="0" name="global_position" type="Vector3" />
+			<description>
+				Returns [code]true[/code] if [param global_position] is below the surface of the water of a river, stream or lake. Always returns [code]false[/code] for roads.
+			</description>
+		</method>
+		<method name="level_lake_to_shore">
+			<return type="void" />
+			<param index="0" name="margin" type="float" default="0.2" />
+			<description>
+				Moves the node (the water level of the lake) to the lowest point of the shore minus [param margin], so that the water doesn't overflow its basin. Uses the terrain without the splines.
+			</description>
+		</method>
+		<method name="make_downhill">
+			<return type="void" />
+			<param index="0" name="min_drop" type="float" default="0.0" />
+			<description>
+				Lowers the points of rivers and streams so that each point is at least [param min_drop] × horizontal distance lower than the previous one: the water always flows downhill, from the first point to the last one.
+			</description>
+		</method>
+		<method name="rebuild">
+			<return type="void" />
+			<description>
+				Rebuilds the mesh and applies the spline to the terrain again.
+			</description>
+		</method>
+		<method name="remove_point">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Removes the point [param index].
+			</description>
+		</method>
+		<method name="reverse">
+			<return type="void" />
+			<description>
+				Reverses the order of the points (the direction of the flow of rivers and streams). The banking of the points is reversed too.
+			</description>
+		</method>
+		<method name="sample_position">
+			<return type="Vector3" />
+			<param index="0" name="distance" type="float" />
+			<description>
+				Returns the position (local space) of the curve at [param distance] meters from the first point.
+			</description>
+		</method>
+		<method name="sample_transform">
+			<return type="Transform3D" />
+			<param index="0" name="distance" type="float" />
+			<description>
+				Returns the frame (local space) of the curve at [param distance] meters from the first point: [code]basis.x[/code] points to the right, [code]basis.y[/code] up (banked for roads) and [code]-basis.z[/code] forward, like a [Camera3D] or a [PathFollow3D] looking along the spline.
+			</description>
+		</method>
+		<method name="set_point_depth">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="depth" type="float" />
+			<description>
+				Sets the depth of the channel below the water at the point [param index].
+			</description>
+		</method>
+		<method name="set_point_flow_speed">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="speed" type="float" />
+			<description>
+				Sets the speed of the water at the point [param index], in meters per second.
+			</description>
+		</method>
+		<method name="set_point_position">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="position" type="Vector3" />
+			<description>
+				Sets the position of the point [param index] (local space).
+			</description>
+		</method>
+		<method name="set_point_tilt">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="tilt" type="float" />
+			<description>
+				Sets the banking of the road at the point [param index], in radians (positive raises the right side).
+			</description>
+		</method>
+		<method name="set_point_width">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="width" type="float" />
+			<description>
+				Sets the width at the point [param index].
+			</description>
+		</method>
+		<method name="set_spline_id">
+			<return type="void" />
+			<param index="0" name="id" type="int" />
+			<description>
+				Sets the unique identifier of the spline. See [method get_spline_id].
+			</description>
+		</method>
+		<method name="snap_to_terrain">
+			<return type="void" />
+			<param index="0" name="offset" type="float" default="0.0" />
+			<description>
+				Puts the points on the terrain, [param offset] meters above it. The terrain without the splines is used, so the result doesn't depend on the current deformation. For lakes, calls [method level_lake_to_shore].
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="bank_height" type="float" setter="set_bank_height" getter="get_bank_height" default="0.4">
+			Height of the banks of rivers, streams and lakes above the water: the terrain beside the water is raised to it if it is lower (only with [member terrain_raise]).
+		</member>
+		<member name="cast_shadows" type="bool" setter="set_cast_shadows" getter="is_casting_shadows" default="false">
+			If [code]true[/code], the mesh casts shadows. Disabled by default: roads lie on the terrain and water doesn't need shadows.
+		</member>
+		<member name="channel_shape" type="float" setter="set_channel_shape" getter="get_channel_shape" default="2.0">
+			Shape of the bottom of the channel of rivers and streams: [code]1[/code] is V-shaped, higher values are flatter with steeper sides.
+		</member>
+		<member name="chunk_length" type="float" setter="set_chunk_length" getter="get_chunk_length" default="128.0">
+			Length of the chunks of the mesh. Each chunk is a separate instance, culled and LODed separately. Lakes are split in blocks of 32 × 32 cells instead.
+		</member>
+		<member name="closed" type="bool" setter="set_closed" getter="is_closed" default="false">
+			If [code]true[/code], the last point is connected to the first one (e.g. a ring road). Lakes are always closed.
+		</member>
+		<member name="depth" type="float" setter="set_depth" getter="get_depth" default="1.5">
+			Depth of new points (depth of the channel below the water of rivers and streams), and depth of lakes below their water level.
+		</member>
+		<member name="flow_auto_width" type="bool" setter="set_flow_auto_width" getter="is_flow_auto_width" default="false">
+			If [code]true[/code], [member flow_speed] and [member point_flow_speeds] are only the speed at [member flow_reference_width]: the water speeds up where the river or stream narrows and slows down where it widens, keeping [code]width × speed[/code] roughly constant (as for an incompressible flow of steady depth).
+		</member>
+		<member name="flow_reference_width" type="float" setter="set_flow_reference_width" getter="get_flow_reference_width" default="12.0">
+			Width at which the authored flow speed applies as-is when [member flow_auto_width] is enabled.
+		</member>
+		<member name="flow_speed" type="float" setter="set_flow_speed" getter="get_flow_speed" default="1.5">
+			Speed of the water of new points, in meters per second.
+		</member>
+		<member name="lateral_spacing" type="float" setter="set_lateral_spacing" getter="get_lateral_spacing" default="3.0">
+			Maximum distance between the vertices across the mesh of roads, rivers and streams. Also the size of the cells of the lake surface.
+		</member>
+		<member name="lod_bias" type="float" setter="set_lod_bias" getter="get_lod_bias" default="1.0">
+			LOD bias of the mesh chunks. Higher values keep the detailed mesh further away.
+		</member>
+		<member name="material" type="Material" setter="set_material" getter="get_material">
+			The material of the mesh. If not set, the shared material of [method get_default_material] is used.
+		</member>
+		<member name="mesh_enabled" type="bool" setter="set_mesh_enabled" getter="is_mesh_enabled" default="true">
+			If [code]false[/code], no mesh is built: the spline only modifies the terrain (e.g. dirt paths painted on the terrain, or a flattened area).
+		</member>
+		<member name="paint_falloff" type="float" setter="set_paint_falloff" getter="get_paint_falloff" default="2.0">
+			Width of the transition of the painted layer.
+		</member>
+		<member name="paint_layer" type="int" setter="set_paint_layer" getter="get_paint_layer" default="-1">
+			The layer of the [Landscape3D] painted under the spline (e.g. dirt under roads, mud or gravel in river beds), or [code]-1[/code] to paint nothing.
+		</member>
+		<member name="paint_noise" type="float" setter="set_paint_noise" getter="get_paint_noise" default="0.5">
+			Amount of noise breaking the edges of the painted layer.
+		</member>
+		<member name="paint_strength" type="float" setter="set_paint_strength" getter="get_paint_strength" default="1.0">
+			Weight of the painted layer.
+		</member>
+		<member name="paint_width" type="float" setter="set_paint_width" getter="get_paint_width" default="1.0">
+			Distance the painted layer extends beyond the edges of the spline (negative values paint a narrower area). For lakes, beyond the shore.
+		</member>
+		<member name="point_depths" type="PackedFloat32Array" setter="set_point_depths" getter="get_point_depths" default="PackedFloat32Array()">
+			Depth of the channel below the water at each point.
+		</member>
+		<member name="point_flow_speeds" type="PackedFloat32Array" setter="set_point_flow_speeds" getter="get_point_flow_speeds" default="PackedFloat32Array()">
+			Speed of the water at each point, in meters per second. Faster water has more foam and ripples.
+		</member>
+		<member name="point_tilts" type="PackedFloat32Array" setter="set_point_tilts" getter="get_point_tilts" default="PackedFloat32Array()">
+			Banking of the road at each point, in radians.
+		</member>
+		<member name="point_widths" type="PackedFloat32Array" setter="set_point_widths" getter="get_point_widths" default="PackedFloat32Array()">
+			Width at each point: width of the road, or of the water at the banks.
+		</member>
+		<member name="points" type="PackedVector3Array" setter="set_points" getter="get_points" default="PackedVector3Array()">
+			The control points of the spline (local space). The curve passes through them (centripetal Catmull-Rom spline). Rivers and streams flow from the first point to the last one. The points of lakes define the shore: only their horizontal position is used, the water level is the height of the node.
+		</member>
+		<member name="render_layers" type="int" setter="set_render_layers" getter="get_render_layers" default="1">
+			The render layers of the mesh.
+		</member>
+		<member name="sample_spacing" type="float" setter="set_sample_spacing" getter="get_sample_spacing" default="2.0">
+			Maximum distance between the cross sections of the tessellated curve. The curve is also subdivided in curves.
+		</member>
+		<member name="shore_width" type="float" setter="set_shore_width" getter="get_shore_width" default="12.0">
+			Width of the slope from the shore of lakes to their bottom.
+		</member>
+		<member name="skirt_depth" type="float" setter="set_skirt_depth" getter="get_skirt_depth" default="0.3">
+			Depth of the vertical skirts along the edges of roads, hiding the gaps between the road and the terrain.
+		</member>
+		<member name="terrain_enabled" type="bool" setter="set_terrain_enabled" getter="is_terrain_enabled" default="true">
+			If [code]true[/code], the terrain of the [Landscape3D] ancestor is modified under the spline.
+		</member>
+		<member name="terrain_end_falloff" type="float" setter="set_terrain_end_falloff" getter="get_terrain_end_falloff" default="6.0">
+			Length of the transition to the terrain beyond the ends of open roads, rivers and streams.
+		</member>
+		<member name="terrain_falloff" type="float" setter="set_terrain_falloff" getter="get_terrain_falloff" default="6.0">
+			Width of the transition to the terrain on the sides of the spline (beyond the banks for water).
+		</member>
+		<member name="terrain_lower" type="bool" setter="set_terrain_lower" getter="is_terrain_lowering" default="true">
+			If [code]true[/code], the terrain above the spline is lowered (cuttings of roads, channels of rivers).
+		</member>
+		<member name="terrain_offset" type="float" setter="set_terrain_offset" getter="get_terrain_offset" default="0.05">
+			Distance the road bed is lowered below the road mesh, avoiding z-fighting.
+		</member>
+		<member name="terrain_priority" type="int" setter="set_terrain_priority" getter="get_terrain_priority" default="30">
+			Order in which the splines are applied to the terrain: splines with a higher priority are applied later, over the others (e.g. a road over a river for a ford or a bridge ramp).
+		</member>
+		<member name="terrain_raise" type="bool" setter="set_terrain_raise" getter="is_terrain_raising" default="true">
+			If [code]true[/code], the terrain below the spline is raised (embankments of roads, banks of rivers).
+		</member>
+		<member name="terrain_strength" type="float" setter="set_terrain_strength" getter="get_terrain_strength" default="1.0">
+			How much the terrain is modified, from [code]0[/code] (not at all) to [code]1[/code].
+		</member>
+		<member name="type" type="int" setter="set_type" getter="get_type" enum="LandscapeSpline3D.SplineType" default="0">
+			The kind of spline: it sets the terrain profile, the mesh and the default material. Call [method apply_type_defaults] to also use the typical dimensions of this kind of spline.
+		</member>
+		<member name="visibility_range" type="float" setter="set_visibility_range" getter="get_visibility_range" default="0.0">
+			Distance beyond which the chunks of the mesh are hidden (and faded out before), and not built. [code]0[/code] means always visible.
+		</member>
+		<member name="water_overlap" type="float" setter="set_water_overlap" getter="get_water_overlap" default="1.5">
+			Distance the water surface extends under the banks of rivers and streams, or beyond the shore of lakes, so that no gap appears between the water and the terrain.
+		</member>
+		<member name="width" type="float" setter="set_width" getter="get_width" default="6.0">
+			Width of new points.
+		</member>
+	</members>
+	<constants>
+		<constant name="TYPE_ROAD" value="0" enum="SplineType">
+			A road: the mesh is extruded along the spline (with skirts on its edges), the terrain is flattened under it to the banked road surface.
+		</constant>
+		<constant name="TYPE_RIVER" value="1" enum="SplineType">
+			A river: the water surface follows the spline, a channel is carved below it with banks on its sides.
+		</constant>
+		<constant name="TYPE_STREAM" value="2" enum="SplineType">
+			A stream: like a river, narrower, shallower and faster.
+		</constant>
+		<constant name="TYPE_LAKE" value="3" enum="SplineType">
+			A lake: the points define its shore (closed spline), the water surface is flat at the height of the node, a basin is carved below it.
+		</constant>
+	</constants>
+</class>

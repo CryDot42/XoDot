@@ -14,6 +14,7 @@
 		brush.apply($Landscape3D.data, $Landscape3D.global_to_local(impact_position))
 		[/codeblock]
 		Positions are in the local space of the [Landscape3D]. Modified regions are notified to the data automatically.
+		Under [LandscapeSpline3D]s, brushes edit the terrain below the splines (the base layer of the [LandscapeData]) in the editor, and the splines are applied again on top of it. At runtime, they modify the final terrain directly.
 	</description>
 	<tutorials>
 	</tutorials>

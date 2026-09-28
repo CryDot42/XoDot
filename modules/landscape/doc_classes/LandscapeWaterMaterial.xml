@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LandscapeWaterMaterial" inherits="LandscapeSplineMaterial" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Built-in water material of rivers, streams and lakes ([LandscapeSpline3D]).
+	</brief_description>
+	<description>
+		A transparent water shader made for the meshes of [LandscapeSpline3D]:
+		- Ripples move with the flow of rivers and streams (flow mapping with two phases, without visible resets), at the speed of the points of the spline, slower near the banks. Lakes use the [member wind_velocity].
+		- The color depends on the depth of the water below the surface (absorption), the bottom is refracted. Reflections use the fresnel term and the specular reflections of the scene.
+		- Foam appears along the shores and on the fast parts of rivers (rapids). The water fades out where it meets the terrain.
+		- Optional gentle waves displace the vertices.
+		Built-in tileable ripple and foam textures are generated when [member normal_texture] and [member foam_texture] aren't set.
+		[b]Note:[/b] The material reads the screen and depth textures: transparent objects below the water aren't visible through it.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_builtin_shader_code" qualifiers="static">
+			<return type="String" />
+			<description>
+				Returns the code of the built-in water shader.
+			</description>
+		</method>
+		<method name="get_default_foam_texture" qualifiers="static">
+			<return type="Texture2D" />
+			<description>
+				Returns the built-in tileable foam texture, used when [member foam_texture] isn't set.
+			</description>
+		</method>
+		<method name="get_default_normal_texture" qualifiers="static">
+			<return type="Texture2D" />
+			<description>
+				Returns the built-in tileable ripple normal map, used when [member normal_texture] isn't set.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="bank_slowdown" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.5">
+			How much slower the water flows near the banks than at the center of rivers and streams.
+		</member>
+		<member name="clarity" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="3.0">
+			Depth at which the color of the water reaches [member deep_color]. Higher values give clearer water.
+		</member>
+		<member name="deep_color" type="Color" setter="_set_parameter_color" getter="_get_parameter_color" default="Color(0.04, 0.17, 0.22, 1)">
+			Color of deep water.
+		</member>
+		<member name="detail_fade_distance" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="60.0">
+			Distance at which the ripples start fading into a smooth surface.
+		</member>
+		<member name="detail_fade_range" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="140.0">
+			Distance over which the ripples fully fade into a smooth surface past [member detail_fade_distance], avoiding shimmering noise from their pattern aliasing at a distance.
+		</member>
+		<member name="detail_scale" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="1.6">
+			Size of the second, smaller layer of ripples.
+		</member>
+		<member name="detail_strength" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.35">
+			Strength of the second, smaller layer of ripples.
+		</member>
+		<member name="edge_fade" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.4">
+			Depth over which the water fades out where it meets the terrain, avoiding hard edges.
+		</member>
+		<member name="flow_cycle" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="1.5">
+			Duration of a cycle of the flow mapping: ripples are stretched by the flow for at most this time before blending with the next phase.
+		</member>
+		<member name="flow_foam" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="1.0">
+			Amount of foam on the fast and steep parts of rivers and streams (rapids).
+		</member>
+		<member name="flow_speed_scale" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="1.0">
+			Multiplier of the flow speed of the points of the spline.
+		</member>
+		<member name="foam_color" type="Color" setter="_set_parameter_color" getter="_get_parameter_color" default="Color(0.9, 0.93, 0.93, 1)">
+			Color of the foam.
+		</member>
+		<member name="foam_scale" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="2.5">
+			Size of the foam texture.
+		</member>
+		<member name="foam_texture" type="Texture2D" setter="_set_parameter_texture" getter="_get_parameter_texture">
+			Foam texture (red channel). If not set, a built-in texture is used (see [method get_default_foam_texture]).
+		</member>
+		<member name="normal_scale" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="5.0">
+			Size of the ripple normal map.
+		</member>
+		<member name="normal_strength" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.5">
+			Strength of the ripples.
+		</member>
+		<member name="normal_texture" type="Texture2D" setter="_set_parameter_texture" getter="_get_parameter_texture">
+			Tileable normal map of the ripples. If not set, a built-in texture is used (see [method get_default_normal_texture]).
+		</member>
+		<member name="refraction" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.04">
+			Strength of the distortion of the bottom seen through the water.
+		</member>
+		<member name="roughness" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.03">
+			Roughness of the surface.
+		</member>
+		<member name="shallow_color" type="Color" setter="_set_parameter_color" getter="_get_parameter_color" default="Color(0.16, 0.27, 0.17, 1)">
+			Color of shallow water.
+		</member>
+		<member name="shore_foam" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.5">
+			Amount of foam along the shores.
+		</member>
+		<member name="shore_foam_distance" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.5">
+			Depth of water below which the shore foam appears.
+		</member>
+		<member name="specular" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.5">
+			Strength of the specular reflections.
+		</member>
+		<member name="tiling_variation" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.4">
+			Distorts the ripples at a large scale so that the repetition of the tiling normal map isn't obvious. [code]0[/code] disables it.
+		</member>
+		<member name="wave_height" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.0">
+			Height of the waves displacing the vertices of the surface. [code]0[/code] disables them.
+		</member>
+		<member name="wave_length" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="14.0">
+			Length of the waves.
+		</member>
+		<member name="wind_velocity" type="Vector2" setter="_set_parameter_vector2" getter="_get_parameter_vector2" default="Vector2(0.25, 0.1)">
+			Velocity of the ripples of lakes (on the XZ plane), and drift added to the ripples of rivers and streams.
+		</member>
+	</members>
+</class>

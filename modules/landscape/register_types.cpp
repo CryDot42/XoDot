@@ -35,6 +35,8 @@
 #include "landscape_data.h"
 #include "landscape_gpu.h"
 #include "landscape_layer.h"
+#include "landscape_spline_3d.h"
+#include "landscape_spline_materials.h"
 
 #ifdef TOOLS_ENABLED
 #include "editor/landscape_editor_plugin.h"
@@ -56,6 +58,10 @@ void initialize_landscape_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(LandscapeLayer);
 		GDREGISTER_CLASS(LandscapeBrush);
 		GDREGISTER_CLASS(Landscape3D);
+		GDREGISTER_CLASS(LandscapeSpline3D);
+		GDREGISTER_ABSTRACT_CLASS(LandscapeSplineMaterial);
+		GDREGISTER_CLASS(LandscapeWaterMaterial);
+		GDREGISTER_CLASS(LandscapeRoadMaterial);
 #ifdef RD_ENABLED
 		GDREGISTER_INTERNAL_CLASS(LandscapeGPU);
 #endif
@@ -77,6 +83,9 @@ void initialize_landscape_module(ModuleInitializationLevel p_level) {
 void uninitialize_landscape_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
 		Landscape3D::cleanup_shared_resources();
+		// Default spline materials first: they use the shared shaders and textures.
+		LandscapeSpline3D::cleanup_shared_resources();
+		LandscapeSplineMaterial::cleanup_shared_resources();
 		ResourceLoader::remove_resource_format_loader(landscape_data_loader);
 		landscape_data_loader.unref();
 		ResourceSaver::remove_resource_format_saver(landscape_data_saver);

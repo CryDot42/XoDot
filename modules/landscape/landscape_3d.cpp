@@ -31,6 +31,7 @@
 #include "landscape_3d.h"
 
 #include "landscape_shader.h"
+#include "landscape_spline_3d.h"
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
@@ -320,6 +321,7 @@ void Landscape3D::set_data(const Ref<LandscapeData> &p_data) {
 		data->connect(CoreStringName(changed), callable_mp(this, &Landscape3D::_data_changed));
 		data->ensure_layer_capacity(layers.size());
 	}
+	spline_system.set_data(data);
 	_data_changed();
 	update_configuration_warnings();
 	notify_property_list_changed();
@@ -344,6 +346,8 @@ void Landscape3D::_data_region_changed(const Rect2i &p_rect, int p_flags) {
 void Landscape3D::_data_changed() {
 	full_update_pending = true;
 	collision_full_rebuild = true;
+	// The size or spacing of the data may have changed, the splines are applied again where needed.
+	spline_system.invalidate_all();
 	dirty_heights.clear();
 	dirty_weights.clear();
 	dirty_holes.clear();
@@ -399,6 +403,8 @@ void Landscape3D::set_layers(const Vector<Ref<LandscapeLayer>> &p_layers) {
 	}
 	layers_dirty = true;
 	layer_textures_dirty = true;
+	// Splines only paint layers that exist.
+	spline_system.invalidate_all();
 	RenderingServerDefault::redraw_request();
 }
 
@@ -1037,6 +1043,9 @@ Dictionary Landscape3D::get_statistics() const {
 #endif
 	stats["cpu_cache_bytes"] = data.is_valid() ? data->get_memory_usage() : 0;
 	stats["cpu_tiles"] = data.is_valid() ? data->get_loaded_tile_count() : 0;
+	stats["splines"] = int(spline_system.get_splines().size());
+	stats["spline_base_tiles"] = data.is_valid() ? data->get_storage().get_base_tile_count() : 0;
+	stats["spline_composited_tiles"] = spline_system.get_composited_tile_count();
 	return stats;
 }
 
@@ -1046,6 +1055,60 @@ void Landscape3D::force_update() {
 	layer_textures_dirty = true;
 	collision_full_rebuild = true;
 	RenderingServerDefault::redraw_request();
+}
+
+/* Splines */
+
+void Landscape3D::_register_spline(LandscapeSpline3D *p_spline) {
+	spline_system.register_spline(p_spline);
+}
+
+void Landscape3D::_unregister_spline(LandscapeSpline3D *p_spline) {
+	spline_system.unregister_spline(p_spline);
+}
+
+void Landscape3D::_spline_changed(LandscapeSpline3D *p_spline, bool p_force) {
+	spline_system.spline_changed(p_spline, p_force);
+}
+
+void Landscape3D::_update_splines(bool p_immediate) {
+	if (!is_inside_tree() || data.is_null() || !data->is_valid()) {
+		return;
+	}
+	if (spline_system.process(p_immediate)) {
+#ifdef TOOLS_ENABLED
+		if (Engine::get_singleton()->is_editor_hint()) {
+			data->set_edited(true); // Saved with the scene.
+		}
+#endif
+		RenderingServerDefault::redraw_request();
+	}
+}
+
+void Landscape3D::update_splines() {
+	_update_splines(true);
+}
+
+void Landscape3D::rebuild_splines() {
+	spline_system.force_rebuild();
+	_update_splines(true);
+}
+
+TypedArray<LandscapeSpline3D> Landscape3D::_get_splines_bind() const {
+	TypedArray<LandscapeSpline3D> result;
+	for (LandscapeSpline3D *spline : spline_system.get_splines()) {
+		result.push_back(spline);
+	}
+	return result;
+}
+
+bool Landscape3D::get_view_position(Vector3 &r_global) const {
+	Camera3D *camera = _get_lod_camera();
+	if (!camera || !camera->is_inside_tree()) {
+		return false;
+	}
+	r_global = camera->get_camera_transform().origin;
+	return true;
 }
 
 /* Collision */
@@ -1617,6 +1680,8 @@ void Landscape3D::_notification(int p_what) {
 			if (WorldStreaming::get_singleton()) {
 				WorldStreaming::get_singleton()->process();
 			}
+			// While splines are edited, the terrain follows them after a short delay.
+			_update_splines(!Engine::get_singleton()->is_editor_hint());
 			_update_collision();
 		} break;
 	}
@@ -1702,6 +1767,9 @@ void Landscape3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_brush_preview", "visible", "local_center", "radius", "falloff", "color"), &Landscape3D::set_brush_preview, DEFVAL(Vector3()), DEFVAL(0.0), DEFVAL(0.0), DEFVAL(Color(0.25, 0.6, 1.0)));
 	ClassDB::bind_method(D_METHOD("force_update"), &Landscape3D::force_update);
 	ClassDB::bind_method(D_METHOD("get_statistics"), &Landscape3D::get_statistics);
+	ClassDB::bind_method(D_METHOD("get_splines"), &Landscape3D::_get_splines_bind);
+	ClassDB::bind_method(D_METHOD("update_splines"), &Landscape3D::update_splines);
+	ClassDB::bind_method(D_METHOD("rebuild_splines"), &Landscape3D::rebuild_splines);
 
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "data", PROPERTY_HINT_RESOURCE_TYPE, LandscapeData::get_class_static()), "set_data", "get_data");
 

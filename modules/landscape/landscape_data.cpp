@@ -52,6 +52,8 @@ void LandscapeData::create(const Vector2i &p_size, real_t p_vertex_spacing, floa
 	storage.init(p_size, 1, p_height);
 	_clear_lod_trees();
 	saved_lod_trees.clear();
+	spline_records.clear();
+	pending_composite = Rect2i();
 	notify_region_changed(Rect2i(Point2i(), p_size), CHANGED_ALL);
 	emit_changed();
 }
@@ -68,18 +70,19 @@ void LandscapeData::resize(const Vector2i &p_size) {
 	const Vector2 world_size = get_world_size();
 	const int weightmaps = get_weightmap_count();
 	const bool holes = has_holes();
+	const Vector2i old_size = get_size();
 
-	Ref<Image> height_image = get_heightmap_image();
+	// The edit layer is resampled: the splines are applied again on the new resolution.
+	Ref<Image> height_image = Image::create_from_data(old_size.x, old_size.y, false, Image::FORMAT_RF, _read_layer_rows(LandscapeStorage::LAYER_BASE_HEIGHTS, 4));
 	height_image->resize(p_size.x, p_size.y, Image::INTERPOLATE_BILINEAR);
 	Vector<Ref<Image>> weight_images;
 	for (int i = 0; i < weightmaps; i++) {
-		Ref<Image> img = get_weightmap_image(i);
+		Ref<Image> img = Image::create_from_data(old_size.x, old_size.y, false, Image::FORMAT_RGBA8, _read_layer_rows(LandscapeStorage::LAYER_BASE_WEIGHTS_0 + i, 4));
 		img->resize(p_size.x, p_size.y, Image::INTERPOLATE_BILINEAR);
 		weight_images.push_back(img);
 	}
 	Ref<Image> holes_image;
 	if (holes) {
-		const Vector2i old_size = get_size();
 		Vector<uint8_t> hole_data;
 		hole_data.resize(int64_t(old_size.x) * old_size.y);
 		storage.read_region(LandscapeStorage::LAYER_HOLES, 0, Rect2i(Point2i(), old_size), hole_data.ptrw());
@@ -91,6 +94,8 @@ void LandscapeData::resize(const Vector2i &p_size) {
 	vertex_spacing = MAX(world_size.x / real_t(p_size.x - 1), CMP_EPSILON);
 	_clear_lod_trees();
 	saved_lod_trees.clear();
+	spline_records.clear();
+	pending_composite = Rect2i();
 
 	_write_image_rows(LandscapeStorage::LAYER_HEIGHTS, height_image->get_data(), 4);
 	for (int i = 0; i < weight_images.size(); i++) {
@@ -105,15 +110,36 @@ void LandscapeData::resize(const Vector2i &p_size) {
 	emit_changed();
 }
 
-void LandscapeData::_write_image_rows(int p_layer, const Vector<uint8_t> &p_data, int p_texel_size) {
+void LandscapeData::_write_image_rows(int p_layer, const Vector<uint8_t> &p_data, int p_texel_size, bool p_edit) {
 	// Writes a full resolution image in bands to keep the memory usage bounded.
 	const Vector2i size = get_size();
 	ERR_FAIL_COND(p_data.size() != int64_t(size.x) * size.y * p_texel_size);
+	// Heights and weights have a base layer (LAYER_BASE_HEIGHTS + index of the final layer).
+	const bool edit_base = p_edit && has_base() && p_layer != LandscapeStorage::LAYER_HOLES;
 	for (int z = 0; z < size.y; z += BAND_ROWS) {
 		const Rect2i band(0, z, size.x, MIN(BAND_ROWS, size.y - z));
-		storage.write_region(p_layer, band, p_data.ptr() + int64_t(z) * size.x * p_texel_size);
+		const uint8_t *band_data = p_data.ptr() + int64_t(z) * size.x * p_texel_size;
+		storage.write_region(p_layer, band, band_data);
+		if (edit_base) {
+			storage.write_region(LandscapeStorage::LAYER_BASE_HEIGHTS + p_layer, band, band_data);
+		}
 		storage.trim();
 	}
+	if (edit_base) {
+		_request_composite(Rect2i(Point2i(), size), p_layer == LandscapeStorage::LAYER_HEIGHTS ? CHANGED_HEIGHTS : CHANGED_WEIGHTS);
+	}
+}
+
+Vector<uint8_t> LandscapeData::_read_layer_rows(int p_layer, int p_texel_size) const {
+	const Vector2i size = get_size();
+	Vector<uint8_t> data;
+	data.resize(int64_t(size.x) * size.y * p_texel_size);
+	for (int z = 0; z < size.y; z += BAND_ROWS) {
+		const Rect2i band(0, z, size.x, MIN(BAND_ROWS, size.y - z));
+		storage.read_region(p_layer, 0, band, data.ptrw() + int64_t(z) * size.x * p_texel_size);
+		storage.trim();
+	}
+	return data;
 }
 
 void LandscapeData::_set_size(const Vector2i &p_size) {
@@ -210,6 +236,50 @@ void LandscapeData::write_heights(const Rect2i &p_rect, const float *p_heights) 
 	storage.write_region(LandscapeStorage::LAYER_HEIGHTS, p_rect, p_heights);
 }
 
+/* Edit layer */
+
+float LandscapeData::get_edit_height(int p_x, int p_z) const {
+	if (!is_valid()) {
+		return 0.0;
+	}
+	return storage.get_base_height(p_x, p_z);
+}
+
+float LandscapeData::sample_edit_height(real_t p_local_x, real_t p_local_z) const {
+	if (!has_base()) {
+		return sample_height(p_local_x, p_local_z);
+	}
+	const Vector2i size = get_size();
+	const real_t fx = CLAMP(p_local_x / vertex_spacing, 0.0, real_t(size.x - 1));
+	const real_t fz = CLAMP(p_local_z / vertex_spacing, 0.0, real_t(size.y - 1));
+	const int x0 = MIN(int(fx), size.x - 2);
+	const int z0 = MIN(int(fz), size.y - 2);
+	const float tx = float(fx - x0);
+	const float tz = float(fz - z0);
+	const float h00 = storage.get_base_height(x0, z0);
+	const float h10 = storage.get_base_height(x0 + 1, z0);
+	const float h01 = storage.get_base_height(x0, z0 + 1);
+	const float h11 = storage.get_base_height(x0 + 1, z0 + 1);
+	return Math::lerp(Math::lerp(h00, h10, tx), Math::lerp(h01, h11, tx), tz);
+}
+
+void LandscapeData::read_edit_heights(const Rect2i &p_rect, float *r_heights) const {
+	ERR_FAIL_COND(!is_valid());
+	storage.read_region(LandscapeStorage::LAYER_BASE_HEIGHTS, 0, p_rect, r_heights);
+}
+
+void LandscapeData::write_edit_heights(const Rect2i &p_rect, const float *p_heights) {
+	ERR_FAIL_COND(!is_valid());
+	ERR_FAIL_COND_MSG(clip_rect(p_rect) != p_rect, "The rect must be inside the landscape.");
+	// The final data is written too: it is the edit layer where there is no base, and it is
+	// composited again from the base (and the splines) where there is one.
+	storage.write_region(LandscapeStorage::LAYER_HEIGHTS, p_rect, p_heights);
+	if (storage.has_base_in_rect(p_rect)) {
+		storage.write_region(LandscapeStorage::LAYER_BASE_HEIGHTS, p_rect, p_heights);
+		_request_composite(p_rect, CHANGED_HEIGHTS);
+	}
+}
+
 /* Weights */
 
 void LandscapeData::set_weightmap_count(int p_count) {
@@ -283,7 +353,7 @@ void LandscapeData::get_weights(int p_x, int p_z, float *r_weights) const {
 	}
 }
 
-static void _landscape_quantize_weights(const float *p_weights, int p_layers, uint8_t *r_quantized) {
+void LandscapeData::quantize_weights(const float *p_weights, int p_layers, uint8_t *r_quantized) {
 	float total = 0.0;
 	for (int i = 0; i < p_layers; i++) {
 		total += MAX(p_weights[i], 0.0f);
@@ -314,8 +384,30 @@ static void _landscape_quantize_weights(const float *p_weights, int p_layers, ui
 void LandscapeData::set_weights(int p_x, int p_z, const float *p_weights) {
 	ERR_FAIL_COND(!is_valid());
 	uint8_t w[MAX_LAYERS];
-	_landscape_quantize_weights(p_weights, get_weightmap_count() * 4, w);
+	quantize_weights(p_weights, get_weightmap_count() * 4, w);
 	storage.set_weights(p_x, p_z, w);
+}
+
+void LandscapeData::get_edit_weights(int p_x, int p_z, float *r_weights) const {
+	uint8_t w[MAX_LAYERS] = {};
+	if (is_valid()) {
+		storage.get_base_weights(p_x, p_z, w);
+	}
+	const int layers = get_weightmap_count() * 4;
+	for (int i = 0; i < MAX_LAYERS; i++) {
+		r_weights[i] = i < layers ? w[i] / 255.0f : 0.0f;
+	}
+}
+
+void LandscapeData::set_edit_weights(int p_x, int p_z, const float *p_weights) {
+	ERR_FAIL_COND(!is_valid());
+	uint8_t w[MAX_LAYERS];
+	quantize_weights(p_weights, get_weightmap_count() * 4, w);
+	storage.set_weights(p_x, p_z, w);
+	if (storage.tile_has_base(p_x >> LandscapeStorage::TILE_SHIFT, p_z >> LandscapeStorage::TILE_SHIFT)) {
+		storage.set_base_weights(p_x, p_z, w);
+		_request_composite(Rect2i(p_x, p_z, 1, 1), CHANGED_WEIGHTS);
+	}
 }
 
 int LandscapeData::get_dominant_layer(int p_x, int p_z) const {
@@ -337,6 +429,7 @@ void LandscapeData::fill_layer(int p_layer) {
 	const Vector2i size = get_size();
 	const int map = p_layer >> 2;
 	const int channel = p_layer & 3;
+	const bool base = has_base();
 	Vector<uint8_t> band;
 	for (int m = 0; m < get_weightmap_count(); m++) {
 		for (int z = 0; z < size.y; z += BAND_ROWS) {
@@ -350,8 +443,14 @@ void LandscapeData::fill_layer(int p_layer) {
 				}
 			}
 			storage.write_region(LandscapeStorage::LAYER_WEIGHTS_0 + m, rect, w);
+			if (base) {
+				storage.write_region(LandscapeStorage::LAYER_BASE_WEIGHTS_0 + m, rect, w);
+			}
 			storage.trim();
 		}
+	}
+	if (base) {
+		_request_composite(Rect2i(Point2i(), size), CHANGED_WEIGHTS);
 	}
 	notify_region_changed(Rect2i(Point2i(), size), CHANGED_WEIGHTS);
 }
@@ -366,34 +465,45 @@ void LandscapeData::remove_layer(int p_layer) {
 	const int weightmaps = get_weightmap_count();
 	const int layers = weightmaps * 4;
 	Vector<uint8_t> bands[MAX_WEIGHTMAPS];
-	for (int z = 0; z < size.y; z += BAND_ROWS) {
-		const Rect2i rect(0, z, size.x, MIN(BAND_ROWS, size.y - z));
-		const int64_t count = int64_t(rect.size.x) * rect.size.y;
-		for (int m = 0; m < weightmaps; m++) {
-			bands[m].resize(count * 4);
-			storage.read_region(LandscapeStorage::LAYER_WEIGHTS_0 + m, 0, rect, bands[m].ptrw());
+	// Both the final data and the base layer are shifted (the splines are composited again afterwards).
+	const int passes = has_base() ? 2 : 1;
+	for (int pass = 0; pass < passes; pass++) {
+		const int first_layer = pass == 0 ? LandscapeStorage::LAYER_WEIGHTS_0 : LandscapeStorage::LAYER_BASE_WEIGHTS_0;
+		for (int z = 0; z < size.y; z += BAND_ROWS) {
+			const Rect2i rect(0, z, size.x, MIN(BAND_ROWS, size.y - z));
+			if (pass == 1 && !storage.has_base_in_rect(rect)) {
+				continue;
+			}
+			const int64_t count = int64_t(rect.size.x) * rect.size.y;
+			for (int m = 0; m < weightmaps; m++) {
+				bands[m].resize(count * 4);
+				storage.read_region(first_layer + m, 0, rect, bands[m].ptrw());
+			}
+			float w[MAX_LAYERS];
+			uint8_t q[MAX_LAYERS];
+			for (int64_t i = 0; i < count; i++) {
+				for (int l = 0; l < layers; l++) {
+					w[l] = bands[l >> 2][i * 4 + (l & 3)] / 255.0f;
+				}
+				for (int l = p_layer; l < layers - 1; l++) {
+					w[l] = w[l + 1];
+				}
+				if (p_layer < layers) {
+					w[layers - 1] = 0.0;
+				}
+				quantize_weights(w, layers, q);
+				for (int l = 0; l < layers; l++) {
+					bands[l >> 2].write[i * 4 + (l & 3)] = q[l];
+				}
+			}
+			for (int m = 0; m < weightmaps; m++) {
+				storage.write_region(first_layer + m, rect, bands[m].ptr());
+			}
+			storage.trim();
 		}
-		float w[MAX_LAYERS];
-		uint8_t q[MAX_LAYERS];
-		for (int64_t i = 0; i < count; i++) {
-			for (int l = 0; l < layers; l++) {
-				w[l] = bands[l >> 2][i * 4 + (l & 3)] / 255.0f;
-			}
-			for (int l = p_layer; l < layers - 1; l++) {
-				w[l] = w[l + 1];
-			}
-			if (p_layer < layers) {
-				w[layers - 1] = 0.0;
-			}
-			_landscape_quantize_weights(w, layers, q);
-			for (int l = 0; l < layers; l++) {
-				bands[l >> 2].write[i * 4 + (l & 3)] = q[l];
-			}
-		}
-		for (int m = 0; m < weightmaps; m++) {
-			storage.write_region(LandscapeStorage::LAYER_WEIGHTS_0 + m, rect, bands[m].ptr());
-		}
-		storage.trim();
+	}
+	if (passes == 2) {
+		_request_composite(Rect2i(Point2i(), size), CHANGED_WEIGHTS);
 	}
 	notify_region_changed(Rect2i(Point2i(), size), CHANGED_WEIGHTS);
 }
@@ -458,6 +568,26 @@ Dictionary LandscapeData::get_region(const Rect2i &p_rect, bool p_heights, bool 
 		}
 		region["weightmaps"] = maps;
 	}
+
+	if (storage.has_base_in_rect(rect)) {
+		// Edit layer under splines (the final data elsewhere in the rect).
+		if (p_heights) {
+			PackedFloat32Array data;
+			data.resize(count);
+			storage.read_region(LandscapeStorage::LAYER_BASE_HEIGHTS, 0, rect, data.ptrw());
+			region["base_heights"] = data;
+		}
+		if (p_weights) {
+			Array maps;
+			for (int m = 0; m < get_weightmap_count(); m++) {
+				PackedByteArray data;
+				data.resize(count * 4);
+				storage.read_region(LandscapeStorage::LAYER_BASE_WEIGHTS_0 + m, 0, rect, data.ptrw());
+				maps.push_back(data);
+			}
+			region["base_weightmaps"] = maps;
+		}
+	}
 	return region;
 }
 
@@ -504,6 +634,28 @@ void LandscapeData::set_region(const Dictionary &p_region) {
 		flags |= CHANGED_WEIGHTS;
 	}
 
+	if (storage.has_base_in_rect(rect)) {
+		// Restore the edit layer under splines. Snapshots taken where there was no base contain it
+		// as final data. The splines are composited again on top of it.
+		int base_flags = 0;
+		if (p_region.has("heights")) {
+			const PackedFloat32Array data = p_region.get("base_heights", p_region["heights"]);
+			ERR_FAIL_COND(data.size() != count);
+			storage.write_region(LandscapeStorage::LAYER_BASE_HEIGHTS, rect, data.ptr());
+			base_flags |= CHANGED_HEIGHTS;
+		}
+		if (p_region.has("weightmaps")) {
+			const Array maps = p_region.get("base_weightmaps", p_region["weightmaps"]);
+			for (int m = 0; m < MIN(maps.size(), get_weightmap_count()); m++) {
+				const PackedByteArray data = maps[m];
+				ERR_CONTINUE(data.size() != count * 4);
+				storage.write_region(LandscapeStorage::LAYER_BASE_WEIGHTS_0 + m, rect, data.ptr());
+			}
+			base_flags |= CHANGED_WEIGHTS;
+		}
+		_request_composite(rect, base_flags);
+	}
+
 	if (flags) {
 		notify_region_changed(rect, flags);
 	}
@@ -544,7 +696,8 @@ void LandscapeData::set_heightmap_image(const Ref<Image> &p_image, float p_scale
 	for (int64_t i = 0; i < count; i++) {
 		h[i] = h[i] * p_scale + p_offset;
 	}
-	_write_image_rows(LandscapeStorage::LAYER_HEIGHTS, data, 4);
+	// The imported heightmap is the new edit layer, splines are composited on top of it.
+	_write_image_rows(LandscapeStorage::LAYER_HEIGHTS, data, 4, true);
 	notify_region_changed(Rect2i(Point2i(), size), CHANGED_HEIGHTS);
 }
 
@@ -576,7 +729,7 @@ void LandscapeData::set_weightmap_image(int p_index, const Ref<Image> &p_image) 
 	if (img->get_width() != size.x || img->get_height() != size.y) {
 		img->resize(size.x, size.y, Image::INTERPOLATE_BILINEAR);
 	}
-	_write_image_rows(LandscapeStorage::LAYER_WEIGHTS_0 + p_index, img->get_data(), 4);
+	_write_image_rows(LandscapeStorage::LAYER_WEIGHTS_0 + p_index, img->get_data(), 4, true);
 	notify_region_changed(Rect2i(Point2i(), size), CHANGED_WEIGHTS);
 }
 
@@ -696,17 +849,21 @@ Error LandscapeData::import_heightmap(const String &p_path, float p_scale, float
 		if (!is_valid()) {
 			create(new_size, vertex_spacing);
 		} else if (new_size != get_size()) {
-			// Recreate while keeping the vertex spacing and the painted layers (resampled).
+			// Recreate while keeping the vertex spacing and the painted layers (resampled edit layer,
+			// the splines are applied again on the new resolution).
 			const int weightmaps = get_weightmap_count();
+			const Vector2i old_size = get_size();
 			Vector<Ref<Image>> weight_images;
 			for (int i = 0; i < weightmaps; i++) {
-				Ref<Image> wimg = get_weightmap_image(i);
+				Ref<Image> wimg = Image::create_from_data(old_size.x, old_size.y, false, Image::FORMAT_RGBA8, _read_layer_rows(LandscapeStorage::LAYER_BASE_WEIGHTS_0 + i, 4));
 				wimg->resize(new_size.x, new_size.y, Image::INTERPOLATE_BILINEAR);
 				weight_images.push_back(wimg);
 			}
 			storage.init(new_size, weightmaps, 0.0);
 			_clear_lod_trees();
 			saved_lod_trees.clear();
+			spline_records.clear();
+			pending_composite = Rect2i();
 			for (int i = 0; i < weight_images.size(); i++) {
 				_write_image_rows(LandscapeStorage::LAYER_WEIGHTS_0 + i, weight_images[i]->get_data(), 4);
 			}
@@ -781,8 +938,10 @@ void LandscapeData::set_layer_weights_image(int p_layer, const Ref<Image> &p_ima
 	const float *mask = reinterpret_cast<const float *>(bytes.ptr());
 
 	// The imported mask becomes the weight of the layer, the other layers share the rest.
+	// It is applied to the edit layer (the base under splines), the splines are composited again afterwards.
 	const int weightmaps = get_weightmap_count();
 	const int layers = weightmaps * 4;
+	const bool base = has_base();
 	Vector<uint8_t> bands[MAX_WEIGHTMAPS];
 	float w[MAX_LAYERS];
 	uint8_t q[MAX_LAYERS];
@@ -791,7 +950,7 @@ void LandscapeData::set_layer_weights_image(int p_layer, const Ref<Image> &p_ima
 		const int64_t count = int64_t(rect.size.x) * rect.size.y;
 		for (int m = 0; m < weightmaps; m++) {
 			bands[m].resize(count * 4);
-			storage.read_region(LandscapeStorage::LAYER_WEIGHTS_0 + m, 0, rect, bands[m].ptrw());
+			storage.read_region(LandscapeStorage::LAYER_BASE_WEIGHTS_0 + m, 0, rect, bands[m].ptrw());
 		}
 		uint8_t *band_ptrs[MAX_WEIGHTMAPS] = {};
 		for (int m = 0; m < weightmaps; m++) {
@@ -816,15 +975,21 @@ void LandscapeData::set_layer_weights_image(int p_layer, const Ref<Image> &p_ima
 			if (others <= 0 && target < 1.0f) {
 				w[p_layer == 0 ? 1 : 0] = 1.0f - target;
 			}
-			_landscape_quantize_weights(w, layers, q);
+			quantize_weights(w, layers, q);
 			for (int l = 0; l < layers; l++) {
 				band_ptrs[l >> 2][i * 4 + (l & 3)] = q[l];
 			}
 		}
 		for (int m = 0; m < weightmaps; m++) {
 			storage.write_region(LandscapeStorage::LAYER_WEIGHTS_0 + m, rect, bands[m].ptr());
+			if (base) {
+				storage.write_region(LandscapeStorage::LAYER_BASE_WEIGHTS_0 + m, rect, bands[m].ptr());
+			}
 		}
 		storage.trim();
+	}
+	if (base) {
+		_request_composite(Rect2i(Point2i(), size), CHANGED_WEIGHTS);
 	}
 	notify_region_changed(Rect2i(Point2i(), size), CHANGED_WEIGHTS);
 }
@@ -848,7 +1013,9 @@ Error LandscapeData::import_layer_weights(int p_layer, const String &p_path) {
 /* Change notification and LOD trees */
 
 void LandscapeData::notify_region_changed(const Rect2i &p_rect, int p_flags) {
-	const Rect2i rect = clip_rect(p_rect);
+	Rect2i rect = clip_rect(p_rect);
+	// Edits of the base layer are composited with the splines first.
+	_flush_composite(rect, p_flags);
 	if (!rect.has_area()) {
 		return;
 	}
@@ -867,6 +1034,96 @@ void LandscapeData::_clear_lod_trees() {
 		memdelete(kv.value);
 	}
 	lod_trees.clear();
+}
+
+/* Splines */
+
+void LandscapeData::_request_composite(const Rect2i &p_rect, int p_flags) {
+	if (!compositor || compositing || !p_flags) {
+		// Without compositor, edits are written through the base and the final data alike.
+		return;
+	}
+	const Rect2i rect = clip_rect(p_rect);
+	if (!rect.has_area()) {
+		return;
+	}
+	pending_composite = pending_composite.has_area() ? pending_composite.merge(rect) : rect;
+	pending_composite_flags |= p_flags;
+}
+
+void LandscapeData::_flush_composite(Rect2i &r_rect, int &r_flags) {
+	if (!pending_composite.has_area()) {
+		return;
+	}
+	const Rect2i rect = pending_composite;
+	const int flags = pending_composite_flags;
+	pending_composite = Rect2i();
+	pending_composite_flags = 0;
+	if (compositor) {
+		compositing = true;
+		compositor->composite_region(this, rect, flags);
+		compositing = false;
+	}
+	r_rect = r_rect.has_area() ? r_rect.merge(rect) : rect;
+	r_flags |= flags;
+}
+
+void LandscapeData::set_compositor(LandscapeDataCompositor *p_compositor) {
+	compositor = p_compositor;
+	if (!compositor) {
+		pending_composite = Rect2i();
+		pending_composite_flags = 0;
+	}
+}
+
+Vector2i LandscapeData::get_tile_count() const {
+	return is_valid() ? storage.get_mip_tiles(0) : Vector2i();
+}
+
+void LandscapeData::capture_base(const Vector2i &p_tile) {
+	ERR_FAIL_COND(!is_valid());
+	storage.set_tile_base(p_tile.x, p_tile.y, true);
+}
+
+void LandscapeData::release_base(const Vector2i &p_tile) {
+	ERR_FAIL_COND(!is_valid());
+	if (!storage.tile_has_base(p_tile.x, p_tile.y)) {
+		return;
+	}
+	// Without splines, the final data is the base.
+	const Rect2i rect = clip_rect(Rect2i(p_tile * LandscapeStorage::TILE_SIZE, Size2i(LandscapeStorage::TILE_SIZE, LandscapeStorage::TILE_SIZE)));
+	const int64_t count = int64_t(rect.size.x) * rect.size.y;
+	LocalVector<float> heights;
+	heights.resize(count);
+	storage.read_region(LandscapeStorage::LAYER_BASE_HEIGHTS, 0, rect, heights.ptr());
+	storage.write_region(LandscapeStorage::LAYER_HEIGHTS, rect, heights.ptr());
+	LocalVector<uint8_t> weights;
+	weights.resize(count * 4);
+	for (int m = 0; m < get_weightmap_count(); m++) {
+		storage.read_region(LandscapeStorage::LAYER_BASE_WEIGHTS_0 + m, 0, rect, weights.ptr());
+		storage.write_region(LandscapeStorage::LAYER_WEIGHTS_0 + m, rect, weights.ptr());
+	}
+	storage.set_tile_base(p_tile.x, p_tile.y, false);
+}
+
+void LandscapeData::clear_base() {
+	if (!is_valid() || !has_base()) {
+		return;
+	}
+	const Vector2i tiles = get_tile_count();
+	for (int tz = 0; tz < tiles.y; tz++) {
+		for (int tx = 0; tx < tiles.x; tx++) {
+			if (storage.tile_has_base(tx, tz)) {
+				storage.set_tile_base(tx, tz, false);
+			}
+		}
+	}
+	spline_records.clear();
+	storage.trim();
+}
+
+void LandscapeData::set_spline_records(const Dictionary &p_records) {
+	spline_records = p_records;
 }
 
 const LandscapeLodTree *LandscapeData::get_lod_tree(int p_patch_quads) const {
@@ -922,6 +1179,9 @@ Error LandscapeData::save_to_file(const String &p_path) {
 		}
 	}
 	header["lod_trees"] = trees;
+	if (!spline_records.is_empty()) {
+		header["spline_records"] = spline_records;
+	}
 	return storage.save_file(p_path, header);
 }
 
@@ -934,6 +1194,8 @@ Error LandscapeData::load_from_file(const String &p_path) {
 	vertex_spacing = MAX(real_t(header.get("vertex_spacing", 1.0)), real_t(CMP_EPSILON));
 	_clear_lod_trees();
 	saved_lod_trees = header.get("lod_trees", Dictionary());
+	spline_records = header.get("spline_records", Dictionary());
+	pending_composite = Rect2i();
 	emit_changed();
 	return OK;
 }
@@ -1017,6 +1279,63 @@ PackedByteArray LandscapeData::_get_holes() const {
 	return holes;
 }
 
+void LandscapeData::_set_base_tiles(const Dictionary &p_tiles) {
+	if (p_tiles.is_empty() || !is_valid()) {
+		return;
+	}
+	// Tile -> [base heights, [base weightmaps]] of the valid texels of the tile.
+	for (const KeyValue<Variant, Variant> &kv : p_tiles) {
+		const Vector2i tile = kv.key;
+		ERR_CONTINUE(!storage.has_tile(0, tile.x, tile.y));
+		const Array entry = kv.value;
+		ERR_CONTINUE(entry.size() != 2);
+		const Rect2i rect = clip_rect(Rect2i(tile * LandscapeStorage::TILE_SIZE, Size2i(LandscapeStorage::TILE_SIZE, LandscapeStorage::TILE_SIZE)));
+		const int64_t count = int64_t(rect.size.x) * rect.size.y;
+		const PackedFloat32Array heights = entry[0];
+		const Array maps = entry[1];
+		ERR_CONTINUE(heights.size() != count);
+		storage.set_tile_base(tile.x, tile.y, true);
+		storage.write_region(LandscapeStorage::LAYER_BASE_HEIGHTS, rect, heights.ptr());
+		for (int m = 0; m < MIN(maps.size(), get_weightmap_count()); m++) {
+			const PackedByteArray weights = maps[m];
+			ERR_CONTINUE(weights.size() != count * 4);
+			storage.write_region(LandscapeStorage::LAYER_BASE_WEIGHTS_0 + m, rect, weights.ptr());
+		}
+	}
+}
+
+Dictionary LandscapeData::_get_base_tiles() const {
+	Dictionary tiles;
+	if (!is_valid() || !has_base()) {
+		return tiles;
+	}
+	const Vector2i count = get_tile_count();
+	for (int tz = 0; tz < count.y; tz++) {
+		for (int tx = 0; tx < count.x; tx++) {
+			if (!storage.tile_has_base(tx, tz)) {
+				continue;
+			}
+			const Rect2i rect = clip_rect(Rect2i(Vector2i(tx, tz) * LandscapeStorage::TILE_SIZE, Size2i(LandscapeStorage::TILE_SIZE, LandscapeStorage::TILE_SIZE)));
+			const int64_t texels = int64_t(rect.size.x) * rect.size.y;
+			PackedFloat32Array heights;
+			heights.resize(texels);
+			storage.read_region(LandscapeStorage::LAYER_BASE_HEIGHTS, 0, rect, heights.ptrw());
+			Array maps;
+			for (int m = 0; m < get_weightmap_count(); m++) {
+				PackedByteArray weights;
+				weights.resize(texels * 4);
+				storage.read_region(LandscapeStorage::LAYER_BASE_WEIGHTS_0 + m, 0, rect, weights.ptrw());
+				maps.push_back(weights);
+			}
+			Array entry;
+			entry.push_back(heights);
+			entry.push_back(maps);
+			tiles[Vector2i(tx, tz)] = entry;
+		}
+	}
+	return tiles;
+}
+
 void LandscapeData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("create", "size", "vertex_spacing", "height"), &LandscapeData::create, DEFVAL(1.0), DEFVAL(0.0));
 	ClassDB::bind_method(D_METHOD("resize", "size"), &LandscapeData::resize);
@@ -1060,6 +1379,14 @@ void LandscapeData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_hole", "x", "z", "hole"), &LandscapeData::set_hole);
 	ClassDB::bind_method(D_METHOD("clear_holes"), &LandscapeData::clear_holes);
 
+	ClassDB::bind_method(D_METHOD("get_edit_height", "x", "z"), &LandscapeData::get_edit_height);
+	ClassDB::bind_method(D_METHOD("has_base_layer"), &LandscapeData::has_base);
+	ClassDB::bind_method(D_METHOD("clear_base_layer"), &LandscapeData::clear_base);
+	ClassDB::bind_method(D_METHOD("_set_base_tiles", "tiles"), &LandscapeData::_set_base_tiles);
+	ClassDB::bind_method(D_METHOD("_get_base_tiles"), &LandscapeData::_get_base_tiles);
+	ClassDB::bind_method(D_METHOD("set_spline_records", "records"), &LandscapeData::set_spline_records);
+	ClassDB::bind_method(D_METHOD("get_spline_records"), &LandscapeData::get_spline_records);
+
 	ClassDB::bind_method(D_METHOD("notify_region_changed", "rect", "flags"), &LandscapeData::notify_region_changed);
 
 	ClassDB::bind_method(D_METHOD("save_to_file", "path"), &LandscapeData::save_to_file);
@@ -1082,6 +1409,8 @@ void LandscapeData::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_FLOAT32_ARRAY, "heights", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "_set_heights", "_get_heights");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "weightmaps", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "_set_weightmaps", "_get_weightmaps");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "holes", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "_set_holes", "_get_holes");
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "base_tiles", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "_set_base_tiles", "_get_base_tiles");
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "spline_records", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "set_spline_records", "get_spline_records");
 
 	ADD_SIGNAL(MethodInfo("region_changed", PropertyInfo(Variant::RECT2I, "rect"), PropertyInfo(Variant::INT, "flags")));
 

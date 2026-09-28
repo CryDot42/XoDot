@@ -7,7 +7,7 @@
 		[WorldStreaming] is the singleton used by the systems that stream world content, such as [Landscape3D]:
 		- a prioritized job queue executed by dedicated streaming threads (see [member ProjectSettings.streaming/threads/thread_count]), whose results are applied on the main thread,
 		- the registry of streaming sources ([StreamingSource3D]),
-		- named memory pools with budgets, also exposed as performance monitors (Debugger > Monitors > Streaming).
+		- named memory pools with budgets, also exposed as performance monitors (Debugger &gt; Monitors &gt; Streaming).
 	</description>
 	<tutorials>
 	</tutorials>
