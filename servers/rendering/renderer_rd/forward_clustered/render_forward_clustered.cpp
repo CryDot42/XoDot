@@ -1521,7 +1521,9 @@ void RenderForwardClustered::_process_ssr(Ref<RenderSceneBuffersRD> p_render_buf
 
 	RENDER_TIMESTAMP("Process SSR");
 
-	ss_effects->ssr_allocate_buffers(p_render_buffers, rb_data->ss_effects_data.ssr, p_render_buffers->get_base_data_format());
+	if (!ss_effects->ssr_allocate_buffers(p_render_buffers, rb_data->ss_effects_data.ssr, p_render_buffers->get_base_data_format())) {
+		return;
+	}
 
 	Projection reprojections[RendererSceneRender::MAX_RENDER_VIEWS];
 
@@ -1537,7 +1539,13 @@ void RenderForwardClustered::_process_ssr(Ref<RenderSceneBuffersRD> p_render_buf
 	}
 	rb_data->ss_effects_data.ssr_last_frame_transform = p_transform;
 
-	ss_effects->screen_space_reflection(p_render_buffers, rb_data->ss_effects_data.ssr, p_normal_slices, environment_get_ssr_max_steps(p_environment), environment_get_ssr_fade_in(p_environment), environment_get_ssr_fade_out(p_environment), environment_get_ssr_depth_tolerance(p_environment), p_projections, reprojections, p_eye_offsets, *copy_effects);
+	RendererRD::SSEffects::SSRSettings settings;
+	settings.max_steps = environment_get_ssr_max_steps(p_environment);
+	settings.fade_in = environment_get_ssr_fade_in(p_environment);
+	settings.fade_out = environment_get_ssr_fade_out(p_environment);
+	settings.depth_tolerance = environment_get_ssr_depth_tolerance(p_environment);
+
+	ss_effects->screen_space_reflection(p_render_buffers, rb_data->ss_effects_data.ssr, p_normal_slices, settings, p_projections, reprojections, p_eye_offsets);
 }
 
 void RenderForwardClustered::_process_sscs(Ref<RenderSceneBuffersRD> p_render_buffers, const Projection *p_projections, const Transform3D &p_transform, const LocalVector<int> &p_contact_shadows, const RenderShadowData *p_render_shadows, const float p_taa_frame_count) {
@@ -2430,7 +2438,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		{
 			//just mix specular back
 			RENDER_TIMESTAMP("Merge Specular");
-			copy_effects->merge_specular(color_only_framebuffer, rb_data->get_specular(), !use_msaa ? RID() : rb->get_internal_texture(), RID(), p_render_data->scene_data->view_count);
+			copy_effects->merge_specular(color_only_framebuffer, rb_data->get_specular(), !use_msaa ? RID() : rb->get_internal_texture(), p_render_data->scene_data->view_count);
 		}
 	}
 
