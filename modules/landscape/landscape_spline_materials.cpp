@@ -323,6 +323,8 @@ enum {
 	WATER_DETAIL_SCALE,
 	WATER_DETAIL_STRENGTH,
 	WATER_TILING_VARIATION,
+	WATER_DETAIL_FADE_DISTANCE,
+	WATER_DETAIL_FADE_RANGE,
 	WATER_WIND_VELOCITY,
 	WATER_FLOW_SPEED_SCALE,
 	WATER_FLOW_CYCLE,
@@ -352,6 +354,8 @@ static const LandscapeSplineMaterial::ParameterInfo water_parameters[WATER_MAX] 
 	{ "detail_scale", Variant::FLOAT, PROPERTY_HINT_RANGE, "0.1,64,0.01,or_greater,suffix:m", "Ripples" },
 	{ "detail_strength", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,2,0.01", "Ripples" },
 	{ "tiling_variation", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,1,0.01", "Ripples" },
+	{ "detail_fade_distance", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,2000,0.1,or_greater,suffix:m", "Ripples" },
+	{ "detail_fade_range", Variant::FLOAT, PROPERTY_HINT_RANGE, "1,2000,0.1,or_greater,suffix:m", "Ripples" },
 	{ "wind_velocity", Variant::VECTOR2, PROPERTY_HINT_NONE, "suffix:m/s", "Ripples" },
 	{ "flow_speed_scale", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,4,0.01,or_greater", "Flow" },
 	{ "flow_cycle", Variant::FLOAT, PROPERTY_HINT_RANGE, "0.1,8,0.01,suffix:s", "Flow" },
@@ -378,9 +382,9 @@ const LandscapeSplineMaterial::ParameterInfo *LandscapeWaterMaterial::_get_param
 Variant LandscapeWaterMaterial::_get_parameter_default(int p_index) const {
 	switch (p_index) {
 		case WATER_SHALLOW_COLOR:
-			return Color(0.30, 0.62, 0.58);
+			return Color(0.16, 0.27, 0.17);
 		case WATER_DEEP_COLOR:
-			return Color(0.02, 0.11, 0.15);
+			return Color(0.04, 0.17, 0.22);
 		case WATER_CLARITY:
 			return 3.0;
 		case WATER_ROUGHNESS:
@@ -399,6 +403,10 @@ Variant LandscapeWaterMaterial::_get_parameter_default(int p_index) const {
 			return 0.35;
 		case WATER_TILING_VARIATION:
 			return 0.4;
+		case WATER_DETAIL_FADE_DISTANCE:
+			return 60.0;
+		case WATER_DETAIL_FADE_RANGE:
+			return 140.0;
 		case WATER_WIND_VELOCITY:
 			return Vector2(0.25, 0.1);
 		case WATER_FLOW_SPEED_SCALE:
@@ -418,7 +426,7 @@ Variant LandscapeWaterMaterial::_get_parameter_default(int p_index) const {
 		case WATER_FLOW_FOAM:
 			return 1.0;
 		case WATER_EDGE_FADE:
-			return 0.25;
+			return 0.4;
 		case WATER_WAVE_HEIGHT:
 			return 0.0;
 		case WATER_WAVE_LENGTH:
@@ -490,8 +498,8 @@ String LandscapeWaterMaterial::get_builtin_shader_code() {
 shader_type spatial;
 render_mode blend_mix, depth_draw_always, cull_back, diffuse_burley, specular_schlick_ggx;
 
-uniform vec4 shallow_color : source_color = vec4(0.30, 0.62, 0.58, 1.0);
-uniform vec4 deep_color : source_color = vec4(0.02, 0.11, 0.15, 1.0);
+uniform vec4 shallow_color : source_color = vec4(0.16, 0.27, 0.17, 1.0);
+uniform vec4 deep_color : source_color = vec4(0.04, 0.17, 0.22, 1.0);
 uniform float clarity : hint_range(0.05, 64.0) = 3.0; // Distance (m) over which the light is mostly absorbed.
 uniform float roughness : hint_range(0.0, 1.0) = 0.03;
 uniform float specular : hint_range(0.0, 1.0) = 0.5;
@@ -502,6 +510,8 @@ uniform float normal_strength : hint_range(0.0, 2.0) = 0.5;
 uniform float detail_scale = 1.6;
 uniform float detail_strength : hint_range(0.0, 2.0) = 0.35;
 uniform float tiling_variation : hint_range(0.0, 1.0) = 0.4; // Breaks up the visible repetition of the tiling ripple texture.
+uniform float detail_fade_distance : hint_range(0.0, 4000.0) = 60.0; // Distance (m) at which ripples start fading into a smooth surface.
+uniform float detail_fade_range : hint_range(1.0, 4000.0) = 140.0; // Distance (m) over which they fully fade out.
 uniform vec2 wind_velocity = vec2(0.25, 0.1);
 uniform float flow_speed_scale = 1.0;
 uniform float flow_cycle = 1.5; // Seconds: the ripples are advected over a cycle, then crossfaded.
@@ -512,7 +522,7 @@ uniform float foam_scale = 2.5;
 uniform float shore_foam : hint_range(0.0, 2.0) = 0.5;
 uniform float shore_foam_distance = 0.5;
 uniform float flow_foam : hint_range(0.0, 2.0) = 1.0;
-uniform float edge_fade = 0.25; // Soft intersection with the ground (m).
+uniform float edge_fade = 0.4; // Soft intersection with the ground (m).
 uniform float wave_height = 0.0;
 uniform float wave_length = 14.0;
 uniform sampler2D ls_screen : hint_screen_texture, filter_linear_mipmap, repeat_disable;
@@ -577,7 +587,13 @@ void fragment() {
 	vec2 warp = (texture(normal_texture, warp_uv).rg - 0.5) * (normal_scale * tiling_variation);
 	vec3 n1 = ls_ripples(UV - drift + warp, flow, offsets, blend, max(normal_scale, 0.01), normal_strength);
 	vec3 n2 = ls_ripples(UV - drift * 1.7 + warp * 0.6 + vec2(0.5), flow * 1.25, offsets, blend, max(detail_scale, 0.01), detail_strength);
-	vec3 ts = normalize(vec3(n1.xy + n2.xy, n1.z * n2.z));
+
+	// Ripples fade into a smooth surface with distance: their pattern otherwise keeps the same
+	// frequency in screen space as the water recedes, aliasing into shimmering noise instead of
+	// reading as waves.
+	float view_distance = length(VERTEX);
+	float distance_fade = 1.0 - smoothstep(detail_fade_distance, detail_fade_distance + max(detail_fade_range, 1.0), view_distance);
+	vec3 ts = normalize(vec3((n1.xy + n2.xy) * distance_fade, n1.z * n2.z));
 	vec3 normal = normalize(TANGENT * ts.x + BINORMAL * ts.y + NORMAL * ts.z);
 
 	// Thickness of water in front of the ground.
@@ -589,11 +605,12 @@ void fragment() {
 	float aspect = VIEWPORT_SIZE.y / max(VIEWPORT_SIZE.x, 1.0);
 	vec2 refracted_uv = SCREEN_UV + normal.xy * vec2(aspect, 1.0) * refraction * clamp(thickness, 0.0, 1.0);
 	float refracted_ground = ls_view_depth(refracted_uv, INV_PROJECTION_MATRIX);
-	if (refracted_ground < surface) {
-		// What is in front of the water is not refracted.
-		refracted_uv = SCREEN_UV;
-		refracted_ground = ground;
-	}
+	// Fade back to the unrefracted sample where it would otherwise grab a point closer to the
+	// camera than the water itself (an object poking through, not the bottom seen through it): a
+	// smooth blend avoids the stain-like seam a hard cutoff leaves wherever the bottom is uneven.
+	float refraction_valid = smoothstep(-0.2, 0.05, refracted_ground - surface);
+	refracted_uv = mix(SCREEN_UV, refracted_uv, refraction_valid);
+	refracted_ground = mix(ground, refracted_ground, refraction_valid);
 	// Distance travelled by the light in the water (along the view ray).
 	float path = max(refracted_ground - surface, 0.0) * length(VERTEX) / max(surface, 1e-4);
 	float transmittance = exp(-path / max(clarity, 0.01));
@@ -604,6 +621,9 @@ void fragment() {
 	// Less light comes through the surface at grazing angles (the rest is reflected).
 	float fresnel = 0.02 + 0.98 * pow(1.0 - clamp(dot(normal, VIEW), 0.0, 1.0), 5.0);
 
+	// Soft intersection with the ground, avoiding a hard edge where the water meets the shore.
+	float edge_alpha = smoothstep(0.0, max(edge_fade, 0.001), thickness);
+
 	// Foam along the shore and in rapids.
 	vec2 foam_uv = UV - drift;
 	float f0 = texture(foam_texture, (foam_uv - flow * offsets.x) / max(foam_scale, 0.01)).r;
@@ -613,7 +633,9 @@ void fragment() {
 	float amount = clamp(shore * shore_foam + v_turbulence * flow_foam, 0.0, 1.0);
 	// Patches of foam: even the most turbulent water keeps gaps showing the water.
 	float threshold = 1.0 - amount * 0.7;
-	float foam = smoothstep(threshold, threshold + 0.15, foam_noise) * smoothstep(0.0, 0.15, amount);
+	// Held back where the water itself is still fading in, so the shore doesn't get a bright ring
+	// exactly at its edge.
+	float foam = smoothstep(threshold, threshold + 0.15, foam_noise) * smoothstep(0.0, 0.15, amount) * edge_alpha;
 
 	ALBEDO = mix(scattered * (1.0 - transmittance) * (1.0 - fresnel), foam_color.rgb, foam);
 	EMISSION = transmitted * transmittance * (1.0 - fresnel) * (1.0 - foam);
@@ -624,7 +646,7 @@ void fragment() {
 	SPECULAR = specular;
 	METALLIC = 0.0;
 	NORMAL = normalize(mix(normal, NORMAL, foam * 0.7));
-	ALPHA = smoothstep(0.0, max(edge_fade, 0.001), thickness) * v_fade;
+	ALPHA = edge_alpha * v_fade;
 }
 )";
 }

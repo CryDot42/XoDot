@@ -659,7 +659,7 @@ TEST_CASE("[Landscape][Splines] Built-in materials") {
 	CHECK(real_t(water->get("clarity")) == doctest::Approx(3.0));
 	water->set("clarity", 5.0);
 	CHECK(real_t(water->get("clarity")) == doctest::Approx(5.0));
-	CHECK(Color(water->get("deep_color")).is_equal_approx(Color(0.02, 0.11, 0.15)));
+	CHECK(Color(water->get("deep_color")).is_equal_approx(Color(0.04, 0.17, 0.22)));
 	CHECK(water->find_parameter("normal_texture") >= 0);
 	CHECK(LandscapeWaterMaterial::get_builtin_shader_code().contains("shader_type spatial;"));
 	CHECK(LandscapeWaterMaterial::get_default_normal_texture()->get_width() == 256);

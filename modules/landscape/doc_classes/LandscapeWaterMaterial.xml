@@ -41,8 +41,14 @@
 		<member name="clarity" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="3.0">
 			Depth at which the color of the water reaches [member deep_color]. Higher values give clearer water.
 		</member>
-		<member name="deep_color" type="Color" setter="_set_parameter_color" getter="_get_parameter_color" default="Color(0.02, 0.11, 0.15, 1)">
+		<member name="deep_color" type="Color" setter="_set_parameter_color" getter="_get_parameter_color" default="Color(0.04, 0.17, 0.22, 1)">
 			Color of deep water.
+		</member>
+		<member name="detail_fade_distance" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="60.0">
+			Distance at which the ripples start fading into a smooth surface.
+		</member>
+		<member name="detail_fade_range" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="140.0">
+			Distance over which the ripples fully fade into a smooth surface past [member detail_fade_distance], avoiding shimmering noise from their pattern aliasing at a distance.
 		</member>
 		<member name="detail_scale" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="1.6">
 			Size of the second, smaller layer of ripples.
@@ -50,7 +56,7 @@
 		<member name="detail_strength" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.35">
 			Strength of the second, smaller layer of ripples.
 		</member>
-		<member name="edge_fade" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.25">
+		<member name="edge_fade" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.4">
 			Depth over which the water fades out where it meets the terrain, avoiding hard edges.
 		</member>
 		<member name="flow_cycle" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="1.5">
@@ -86,7 +92,7 @@
 		<member name="roughness" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.03">
 			Roughness of the surface.
 		</member>
-		<member name="shallow_color" type="Color" setter="_set_parameter_color" getter="_get_parameter_color" default="Color(0.3, 0.62, 0.58, 1)">
+		<member name="shallow_color" type="Color" setter="_set_parameter_color" getter="_get_parameter_color" default="Color(0.16, 0.27, 0.17, 1)">
 			Color of shallow water.
 		</member>
 		<member name="shore_foam" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.5">
