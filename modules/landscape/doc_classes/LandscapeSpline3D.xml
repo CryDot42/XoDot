@@ -7,7 +7,7 @@
 		A smooth curve through control points, similar to the landscape splines and water bodies of Unreal Engine. Each point has its own width, depth, banking and flow speed, interpolated smoothly along the curve.
 		- A mesh is extruded along the curve (road surface with skirts, water surface of rivers and streams) or fills it (flat surface of lakes). It is split in chunks of [member chunk_length] that are culled and LODed separately, only built near the camera and hidden beyond [member visibility_range].
 		- The terrain of the [Landscape3D] ancestor is modified under the spline: flattened road bed, channel carved below the water with its banks, or lake basin. A material layer can also be painted ([member paint_layer]).
-		The terrain is modified non-destructively: the terrain of the storage tiles under splines is kept in a base layer of the [LandscapeData], and the splines are composited on top of it, in the order of their [member terrain_priority]. Moving or deleting a spline restores the terrain it covered, and sculpting or painting under splines edits the base layer. Only the parts of the splines that changed are applied again (see [method LandscapeData.get_spline_records]). At runtime, splines aren't composited again unless they change, and brushes modify the terrain directly.
+		The terrain is modified non-destructively: the terrain of the storage tiles under splines is kept in a base layer of the [LandscapeData], and the splines are composited on top of it, in the order of their [member terrain_priority]. Moving or deleting a spline restores the terrain it covered, and sculpting or painting under splines edits the base layer. Only the parts of the splines that changed are applied again (see [member LandscapeData.spline_records]). At runtime, splines aren't composited again unless they change, and brushes modify the terrain directly.
 		Points are drawn and edited with the Splines tab of the Landscape dock: select them in the viewport and move them with the transform gizmo, and drag the handles on their sides to change the width.
 		Water and road surfaces use [LandscapeWaterMaterial] and [LandscapeRoadMaterial] by default (see [method get_default_material]).
 	</description>
@@ -133,13 +133,22 @@
 				- [code]position[/code], [code]height[/code] and [code]normal[/code]: point of the surface (road or water) at this position, in global space.
 				- [code]distance[/code]: distance along the spline of the closest point of the curve.
 				- [code]lateral[/code]: signed distance to the curve (positive on the right), or for lakes, the distance to the shore (negative inside).
-				- [code]width[/code] and [code]depth[/code]: width and depth at the closest point.
+				- [code skip-lint]width[/code] and [code skip-lint]depth[/code]: width and depth at the closest point.
 				- [code]flow[/code]: velocity of the water of rivers and streams, in global space.
-				[codeblock]
+				[codeblocks]
+				[gdscript]
 				var info = $River.get_surface_info(player.global_position)
 				if info.inside and player.global_position.y &lt; info.height:
-				    player.velocity += info.flow * delta
-				[/codeblock]
+					player.velocity += info.flow * delta # Carried by the current.
+				[/gdscript]
+				[csharp]
+				var info = GetNode&lt;LandscapeSpline3D&gt;("River").GetSurfaceInfo(player.GlobalPosition);
+				if (info.Count &gt; 0 &amp;&amp; (bool)info["inside"] &amp;&amp; player.GlobalPosition.Y &lt; (float)info["height"])
+				{
+					player.Velocity += (Vector3)info["flow"] * (float)delta; // Carried by the current.
+				}
+				[/csharp]
+				[/codeblocks]
 			</description>
 		</method>
 		<method name="get_tessellated_points">

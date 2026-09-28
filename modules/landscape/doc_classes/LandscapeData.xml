@@ -120,12 +120,6 @@
 				Returns a copy of the heights and/or weights of a region, as a dictionary with the keys [code skip-lint]rect[/code], [code skip-lint]heights[/code] ([PackedFloat32Array]) and [code skip-lint]weightmaps[/code] (array of [PackedByteArray]). Under splines, the edit layer is also stored ([code skip-lint]base_heights[/code] and [code skip-lint]base_weightmaps[/code]). The result can be restored with [method set_region], e.g. for undo.
 			</description>
 		</method>
-		<method name="get_spline_records" qualifiers="const">
-			<return type="Dictionary" />
-			<description>
-				Returns what the splines applied to this data: spline id → hash and texel rect of each block of the spline (see [LandscapeSpline3D]). Used by [Landscape3D] to only apply again the parts of the splines that changed, also when the scene was edited while the data wasn't loaded.
-			</description>
-		</method>
 		<method name="get_weightmap_count" qualifiers="const">
 			<return type="int" />
 			<description>
@@ -305,13 +299,6 @@
 				Restores a region returned by [method get_region] and notifies the change.
 			</description>
 		</method>
-		<method name="set_spline_records">
-			<return type="void" />
-			<param index="0" name="records" type="Dictionary" />
-			<description>
-				Sets what the splines applied to this data, see [method get_spline_records].
-			</description>
-		</method>
 		<method name="set_weightmap_count">
 			<return type="void" />
 			<param index="0" name="count" type="int" />
@@ -344,11 +331,11 @@
 		<member name="holes" type="PackedByteArray" setter="_set_holes" getter="_get_holes" default="PackedByteArray()">
 			The hole mask, one byte per texel ([code]0[/code]: solid). Empty when the landscape has no holes.
 		</member>
-		<member name="spline_records" type="Dictionary" setter="set_spline_records" getter="get_spline_records" default="{}">
-			What the splines applied to this data, see [method get_spline_records].
-		</member>
 		<member name="size" type="Vector2i" setter="_set_size" getter="get_size" default="Vector2i(0, 0)">
 			The resolution of the landscape in texels. Use [method create] or [method resize] to change it.
+		</member>
+		<member name="spline_records" type="Dictionary" setter="set_spline_records" getter="get_spline_records" default="{}">
+			What the splines applied to this data: spline id → hash and texel rect of each block of the spline (see [LandscapeSpline3D]). Used by [Landscape3D] to only apply again the parts of the splines that changed, also when the scene was edited while the data wasn't loaded.
 		</member>
 		<member name="vertex_spacing" type="float" setter="set_vertex_spacing" getter="get_vertex_spacing" default="1.0">
 			The distance in meters between two heightmap texels.

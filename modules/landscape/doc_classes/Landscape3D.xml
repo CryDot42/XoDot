@@ -70,6 +70,12 @@
 				Returns the global normal of the terrain at the given global position.
 			</description>
 		</method>
+		<method name="get_splines" qualifiers="const">
+			<return type="LandscapeSpline3D[]" />
+			<description>
+				Returns the [LandscapeSpline3D] descendants modifying the terrain.
+			</description>
+		</method>
 		<method name="get_statistics" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
@@ -83,12 +89,6 @@
 				- [code]splines[/code]: number of [LandscapeSpline3D] modifying the terrain.
 				- [code]spline_base_tiles[/code]: number of storage tiles keeping a base layer under splines.
 				- [code]spline_composited_tiles[/code]: number of tiles composited by the last spline update.
-			</description>
-		</method>
-		<method name="get_splines" qualifiers="const">
-			<return type="LandscapeSpline3D[]" />
-			<description>
-				Returns the [LandscapeSpline3D] descendants modifying the terrain.
 			</description>
 		</method>
 		<method name="global_to_local" qualifiers="const">
@@ -140,7 +140,7 @@
 		<method name="update_splines">
 			<return type="void" />
 			<description>
-				Applies the pending spline changes to the terrain now. This happens automatically every frame (in the editor, after a short delay while splines are being edited). Only the blocks of the splines that changed since they were applied are composited again (see [method LandscapeData.get_spline_records]).
+				Applies the pending spline changes to the terrain now. This happens automatically every frame (in the editor, after a short delay while splines are being edited). Only the blocks of the splines that changed since they were applied are composited again (see [member LandscapeData.spline_records]).
 			</description>
 		</method>
 	</methods>

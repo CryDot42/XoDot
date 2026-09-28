@@ -218,10 +218,21 @@ TEST_CASE("[Landscape][Splines] Road, channel and lake profiles") {
 		LandscapeSplineTerrain::apply(shape, 1.0, rect, heights.ptr(), weights.ptr(), layers);
 		auto at = [&](int p_x, int p_z) { return heights[p_z * size.x + p_x]; };
 		auto weight = [&](int p_x, int p_z, int p_layer) { return weights[(p_z * size.x + p_x) * layers + p_layer]; };
+		// The curve through the corners bulges outwards: find the shore at x = 32.
+		real_t shore_z = 32.0;
+		for (const LandscapeSplineSample &s : shape.samples) {
+			if (Math::abs(s.position.x - 32.0) < 1.0) {
+				shore_z = MIN(shore_z, s.position.z);
+			}
+		}
+		CHECK(shore_z < 16.0);
+		CHECK(shore_z > 8.0);
+		const int shore = int(Math::round(shore_z));
 		CHECK(at(32, 32) == doctest::Approx(7.0)); // Full depth in the middle.
-		CHECK(at(32, 18) < 10.0); // Shore slope.
-		CHECK(at(32, 18) > 7.0);
-		CHECK(at(32, 14) > 10.0); // Bank.
+		CHECK(at(32, shore + 2) < 10.0); // Shore slope.
+		CHECK(at(32, shore + 2) > 7.0);
+		CHECK(at(32, shore + 6) == doctest::Approx(7.0));
+		CHECK(at(32, shore - 2) > 10.0); // Bank.
 		CHECK(at(32, 2) == doctest::Approx(10.0));
 		CHECK(weight(32, 32, 1) == doctest::Approx(1.0));
 		CHECK(weight(32, 32, 0) == doctest::Approx(0.0));
@@ -535,8 +546,14 @@ TEST_CASE("[Landscape][Splines] Extruded meshes") {
 		check_front_faces(mesh);
 		const AABB aabb = mesh->get_aabb();
 		CHECK(aabb.size.y == doctest::Approx(0.0)); // Flat, at the height of the node.
-		CHECK(aabb.position.x < 0.0); // Continues under the banks.
-		CHECK(aabb.position.x > -spline->get_water_overlap() - 2.0 * spline->get_sample_spacing() - 0.01);
+		real_t shore_min_x = 0.0;
+		for (const Vector3 &p : spline->get_tessellated_points()) {
+			shore_min_x = MIN(shore_min_x, p.x);
+		}
+		// Continues under the banks, by the overlap and at most a bit more than a cell of the grid.
+		const real_t cell = spline->get_sample_spacing() * 2.0;
+		CHECK(aabb.position.x < shore_min_x - spline->get_water_overlap() * 0.5);
+		CHECK(aabb.position.x > shore_min_x - spline->get_water_overlap() - cell * 1.25 - 0.01);
 		CHECK(aabb.get_end().z > 40.0);
 	}
 	memdelete(spline);
@@ -626,6 +643,18 @@ TEST_CASE("[Landscape][Splines] Built-in materials") {
 	CHECK(int(road->get("lane_count")) == 4);
 	CHECK(LandscapeRoadMaterial::get_builtin_shader_code().contains("ALPHA_SCISSOR_THRESHOLD"));
 	CHECK(LandscapeSpline3D::get_default_material(LandscapeSpline3D::TYPE_LAKE).is_valid());
+
+	// The shaders compile (their uniforms are known), with the preprocessor directives resolved.
+	CHECK(water->get_shader_code().contains("#if CURRENT_RENDERER"));
+	for (const Ref<LandscapeSplineMaterial> &material : { Ref<LandscapeSplineMaterial>(water), Ref<LandscapeSplineMaterial>(road) }) {
+		List<PropertyInfo> parameters;
+		RenderingServer::get_singleton()->get_shader_parameter_list(material->get_shader_rid(), &parameters);
+		bool has_roughness = false;
+		for (const PropertyInfo &parameter : parameters) {
+			has_roughness = has_roughness || parameter.name == "roughness";
+		}
+		CHECK(has_roughness);
+	}
 }
 
 } // namespace TestLandscapeSplines

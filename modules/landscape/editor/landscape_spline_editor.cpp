@@ -312,6 +312,11 @@ Ref<Resource> LandscapeSplineMaterialConversionPlugin::convert(const Ref<Resourc
 	Ref<LandscapeSplineMaterial> material = p_resource;
 	ERR_FAIL_COND_V(material.is_null(), Ref<Resource>());
 	Ref<ShaderMaterial> result = MaterialEditor::make_shader_material(material, false);
+	// The code before preprocessing, which works with every renderer.
+	Ref<Shader> shader = result->get_shader();
+	if (shader.is_valid()) {
+		shader->set_code(material->get_shader_code());
+	}
 	const bool water = Object::cast_to<LandscapeWaterMaterial>(material.ptr()) != nullptr;
 	for (int i = 0; i < material->get_parameter_count(); i++) {
 		const String name = material->get_parameter_name(i);

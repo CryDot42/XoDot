@@ -33,6 +33,7 @@
 #include "core/math/random_pcg.h"
 #include "core/object/class_db.h"
 #include "servers/rendering/rendering_server.h"
+#include "servers/rendering/shader_preprocessor.h"
 
 /* LandscapeSplineMaterial */
 
@@ -95,6 +96,17 @@ String LandscapeSplineMaterial::get_parameter_name(int p_index) const {
 	return _get_parameter_infos()[p_index].name;
 }
 
+RID LandscapeSplineMaterial::_create_shader(const String &p_code) {
+	// Like Shader::set_code(): the rendering server expects preprocessed code (CURRENT_RENDERER).
+	String code;
+	ShaderPreprocessor preprocessor;
+	const Error err = preprocessor.preprocess(p_code, String(), code);
+	ERR_FAIL_COND_V_MSG(err != OK, RID(), "Failed to preprocess the built-in landscape spline shader.");
+	const RID shader_rid = RenderingServer::get_singleton()->shader_create();
+	RenderingServer::get_singleton()->shader_set_code(shader_rid, code);
+	return shader_rid;
+}
+
 RID LandscapeSplineMaterial::get_rid() const {
 	if (!shader_set) {
 		const RID shader_rid = _get_shader();
@@ -107,8 +119,7 @@ RID LandscapeSplineMaterial::get_rid() const {
 }
 
 String LandscapeSplineMaterial::get_shader_code() const {
-	const RID shader_rid = _get_shader();
-	return shader_rid.is_valid() ? RenderingServer::get_singleton()->shader_get_code(shader_rid) : String();
+	return _get_source_code(); // Before preprocessing: valid for every renderer.
 }
 
 void LandscapeSplineMaterial::_bind_parameters(const StringName &p_class, const ParameterInfo *p_infos, int p_count) {
@@ -119,13 +130,41 @@ void LandscapeSplineMaterial::_bind_parameters(const StringName &p_class, const 
 			group = info.group;
 			ClassDB::add_property_group(p_class, group, "");
 		}
-		ClassDB::add_property(p_class, PropertyInfo(info.type, info.name, info.hint, info.hint_string), "_set_parameter", "_get_parameter", i);
+		StringName getter;
+		switch (info.type) {
+			case Variant::BOOL:
+				getter = "_get_parameter_bool";
+				break;
+			case Variant::INT:
+				getter = "_get_parameter_int";
+				break;
+			case Variant::FLOAT:
+				getter = "_get_parameter_float";
+				break;
+			case Variant::VECTOR2:
+				getter = "_get_parameter_vector2";
+				break;
+			case Variant::COLOR:
+				getter = "_get_parameter_color";
+				break;
+			case Variant::OBJECT:
+				getter = "_get_parameter_texture";
+				break;
+			default:
+				ERR_FAIL_MSG(vformat("Unsupported type of the parameter \"%s\".", info.name));
+		}
+		ClassDB::add_property(p_class, PropertyInfo(info.type, info.name, info.hint, info.hint_string), "_set_parameter", getter, i);
 	}
 }
 
 void LandscapeSplineMaterial::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_set_parameter", "index", "value"), &LandscapeSplineMaterial::set_parameter_by_index);
-	ClassDB::bind_method(D_METHOD("_get_parameter", "index"), &LandscapeSplineMaterial::get_parameter_by_index);
+	ClassDB::bind_method(D_METHOD("_get_parameter_bool", "index"), &LandscapeSplineMaterial::_get_parameter_bool);
+	ClassDB::bind_method(D_METHOD("_get_parameter_int", "index"), &LandscapeSplineMaterial::_get_parameter_int);
+	ClassDB::bind_method(D_METHOD("_get_parameter_float", "index"), &LandscapeSplineMaterial::_get_parameter_float);
+	ClassDB::bind_method(D_METHOD("_get_parameter_vector2", "index"), &LandscapeSplineMaterial::_get_parameter_vector2);
+	ClassDB::bind_method(D_METHOD("_get_parameter_color", "index"), &LandscapeSplineMaterial::_get_parameter_color);
+	ClassDB::bind_method(D_METHOD("_get_parameter_texture", "index"), &LandscapeSplineMaterial::_get_parameter_texture);
 	ClassDB::bind_method(D_METHOD("get_shader_code"), &LandscapeSplineMaterial::get_shader_code);
 }
 
@@ -399,8 +438,7 @@ Ref<Texture2D> LandscapeWaterMaterial::get_default_foam_texture() {
 RID LandscapeWaterMaterial::_get_shader() const {
 	MutexLock lock(shader_mutex);
 	if (shader.is_null()) {
-		shader = RenderingServer::get_singleton()->shader_create();
-		RenderingServer::get_singleton()->shader_set_code(shader, get_builtin_shader_code());
+		shader = _create_shader(get_builtin_shader_code());
 	}
 	return shader;
 }
@@ -712,8 +750,7 @@ void LandscapeRoadMaterial::apply_preset(Preset p_preset) {
 RID LandscapeRoadMaterial::_get_shader() const {
 	MutexLock lock(shader_mutex);
 	if (shader.is_null()) {
-		shader = RenderingServer::get_singleton()->shader_create();
-		RenderingServer::get_singleton()->shader_set_code(shader, get_builtin_shader_code());
+		shader = _create_shader(get_builtin_shader_code());
 	}
 	return shader;
 }

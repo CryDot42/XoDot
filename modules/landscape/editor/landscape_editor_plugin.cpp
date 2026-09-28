@@ -805,23 +805,23 @@ void LandscapeEditor::_create_spline(int p_type) {
 	spline->apply_type_defaults();
 	// A material of its own, ready to be tweaked in the inspector.
 	if (type == LandscapeSpline3D::TYPE_ROAD) {
-		Ref<LandscapeRoadMaterial> material;
-		material.instantiate();
-		spline->set_material(material);
+		Ref<LandscapeRoadMaterial> road_material;
+		road_material.instantiate();
+		spline->set_material(road_material);
 	} else {
-		Ref<LandscapeWaterMaterial> material;
-		material.instantiate();
+		Ref<LandscapeWaterMaterial> water_material;
+		water_material.instantiate();
 		if (type == LandscapeSpline3D::TYPE_STREAM) {
-			material->set("clarity", 1.5);
-			material->set("normal_scale", 2.5);
-			material->set("detail_scale", 0.8);
-			material->set("flow_foam", 1.4);
+			water_material->set("clarity", 1.5);
+			water_material->set("normal_scale", 2.5);
+			water_material->set("detail_scale", 0.8);
+			water_material->set("flow_foam", 1.4);
 		} else if (type == LandscapeSpline3D::TYPE_LAKE) {
-			material->set("wave_height", 0.05);
-			material->set("clarity", 5.0);
-			material->set("wind_velocity", Vector2(0.4, 0.2));
+			water_material->set("wave_height", 0.05);
+			water_material->set("clarity", 5.0);
+			water_material->set("wind_velocity", Vector2(0.4, 0.2));
 		}
-		spline->set_material(material);
+		spline->set_material(water_material);
 	}
 
 	Node *owner = EditorNode::get_singleton()->get_edited_scene();
@@ -1503,8 +1503,9 @@ LandscapeEditor::LandscapeEditor() {
 			TTRC("A lake: draw its shore (closed spline). The water level is the height of the node."),
 		};
 		for (int i = 0; i < 4; i++) {
-			Button *button = memnew(Button(TTRGET(create_names[i])));
-			button->set_tooltip_text(TTRGET(create_tooltips[i]));
+			// Translated automatically (TTRC marks the strings for extraction).
+			Button *button = memnew(Button(create_names[i]));
+			button->set_tooltip_text(create_tooltips[i]);
 			button->set_h_size_flags(SIZE_EXPAND_FILL);
 			button->connect(SceneStringName(pressed), callable_mp(this, &LandscapeEditor::_create_spline).bind(i));
 			create_grid->add_child(button);

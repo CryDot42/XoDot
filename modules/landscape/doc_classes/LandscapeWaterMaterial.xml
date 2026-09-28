@@ -35,76 +35,76 @@
 		</method>
 	</methods>
 	<members>
-		<member name="bank_slowdown" type="float" setter="_set_parameter" getter="_get_parameter" default="0.5">
+		<member name="bank_slowdown" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.5">
 			How much slower the water flows near the banks than at the center of rivers and streams.
 		</member>
-		<member name="clarity" type="float" setter="_set_parameter" getter="_get_parameter" default="3.0">
+		<member name="clarity" type="float" setter="_set_parameter" getter="_get_parameter_float" default="3.0">
 			Depth at which the color of the water reaches [member deep_color]. Higher values give clearer water.
 		</member>
-		<member name="deep_color" type="Color" setter="_set_parameter" getter="_get_parameter" default="Color(0.02, 0.11, 0.15, 1)">
+		<member name="deep_color" type="Color" setter="_set_parameter" getter="_get_parameter_color" default="Color(0.02, 0.11, 0.15, 1)">
 			Color of deep water.
 		</member>
-		<member name="detail_scale" type="float" setter="_set_parameter" getter="_get_parameter" default="1.6">
+		<member name="detail_scale" type="float" setter="_set_parameter" getter="_get_parameter_float" default="1.6">
 			Size of the second, smaller layer of ripples.
 		</member>
-		<member name="detail_strength" type="float" setter="_set_parameter" getter="_get_parameter" default="0.35">
+		<member name="detail_strength" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.35">
 			Strength of the second, smaller layer of ripples.
 		</member>
-		<member name="edge_fade" type="float" setter="_set_parameter" getter="_get_parameter" default="0.25">
+		<member name="edge_fade" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.25">
 			Depth over which the water fades out where it meets the terrain, avoiding hard edges.
 		</member>
-		<member name="flow_cycle" type="float" setter="_set_parameter" getter="_get_parameter" default="1.5">
+		<member name="flow_cycle" type="float" setter="_set_parameter" getter="_get_parameter_float" default="1.5">
 			Duration of a cycle of the flow mapping: ripples are stretched by the flow for at most this time before blending with the next phase.
 		</member>
-		<member name="flow_foam" type="float" setter="_set_parameter" getter="_get_parameter" default="1.0">
+		<member name="flow_foam" type="float" setter="_set_parameter" getter="_get_parameter_float" default="1.0">
 			Amount of foam on the fast and steep parts of rivers and streams (rapids).
 		</member>
-		<member name="flow_speed_scale" type="float" setter="_set_parameter" getter="_get_parameter" default="1.0">
+		<member name="flow_speed_scale" type="float" setter="_set_parameter" getter="_get_parameter_float" default="1.0">
 			Multiplier of the flow speed of the points of the spline.
 		</member>
-		<member name="foam_color" type="Color" setter="_set_parameter" getter="_get_parameter" default="Color(0.9, 0.93, 0.93, 1)">
+		<member name="foam_color" type="Color" setter="_set_parameter" getter="_get_parameter_color" default="Color(0.9, 0.93, 0.93, 1)">
 			Color of the foam.
 		</member>
-		<member name="foam_scale" type="float" setter="_set_parameter" getter="_get_parameter" default="2.5">
+		<member name="foam_scale" type="float" setter="_set_parameter" getter="_get_parameter_float" default="2.5">
 			Size of the foam texture.
 		</member>
-		<member name="foam_texture" type="Texture2D" setter="_set_parameter" getter="_get_parameter">
+		<member name="foam_texture" type="Texture2D" setter="_set_parameter" getter="_get_parameter_texture">
 			Foam texture (red channel). If not set, a built-in texture is used (see [method get_default_foam_texture]).
 		</member>
-		<member name="normal_scale" type="float" setter="_set_parameter" getter="_get_parameter" default="5.0">
+		<member name="normal_scale" type="float" setter="_set_parameter" getter="_get_parameter_float" default="5.0">
 			Size of the ripple normal map.
 		</member>
-		<member name="normal_strength" type="float" setter="_set_parameter" getter="_get_parameter" default="0.5">
+		<member name="normal_strength" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.5">
 			Strength of the ripples.
 		</member>
-		<member name="normal_texture" type="Texture2D" setter="_set_parameter" getter="_get_parameter">
+		<member name="normal_texture" type="Texture2D" setter="_set_parameter" getter="_get_parameter_texture">
 			Tileable normal map of the ripples. If not set, a built-in texture is used (see [method get_default_normal_texture]).
 		</member>
-		<member name="refraction" type="float" setter="_set_parameter" getter="_get_parameter" default="0.04">
+		<member name="refraction" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.04">
 			Strength of the distortion of the bottom seen through the water.
 		</member>
-		<member name="roughness" type="float" setter="_set_parameter" getter="_get_parameter" default="0.03">
+		<member name="roughness" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.03">
 			Roughness of the surface.
 		</member>
-		<member name="shallow_color" type="Color" setter="_set_parameter" getter="_get_parameter" default="Color(0.3, 0.62, 0.58, 1)">
+		<member name="shallow_color" type="Color" setter="_set_parameter" getter="_get_parameter_color" default="Color(0.3, 0.62, 0.58, 1)">
 			Color of shallow water.
 		</member>
-		<member name="shore_foam" type="float" setter="_set_parameter" getter="_get_parameter" default="0.5">
+		<member name="shore_foam" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.5">
 			Amount of foam along the shores.
 		</member>
-		<member name="shore_foam_distance" type="float" setter="_set_parameter" getter="_get_parameter" default="0.5">
+		<member name="shore_foam_distance" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.5">
 			Depth of water below which the shore foam appears.
 		</member>
-		<member name="specular" type="float" setter="_set_parameter" getter="_get_parameter" default="0.5">
+		<member name="specular" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.5">
 			Strength of the specular reflections.
 		</member>
-		<member name="wave_height" type="float" setter="_set_parameter" getter="_get_parameter" default="0.0">
+		<member name="wave_height" type="float" setter="_set_parameter" getter="_get_parameter_float" default="0.0">
 			Height of the waves displacing the vertices of the surface. [code]0[/code] disables them.
 		</member>
-		<member name="wave_length" type="float" setter="_set_parameter" getter="_get_parameter" default="14.0">
+		<member name="wave_length" type="float" setter="_set_parameter" getter="_get_parameter_float" default="14.0">
 			Length of the waves.
 		</member>
-		<member name="wind_velocity" type="Vector2" setter="_set_parameter" getter="_get_parameter" default="Vector2(0.25, 0.1)">
+		<member name="wind_velocity" type="Vector2" setter="_set_parameter" getter="_get_parameter_vector2" default="Vector2(0.25, 0.1)">
 			Velocity of the ripples of lakes (on the XZ plane), and drift added to the ripples of rivers and streams.
 		</member>
 	</members>

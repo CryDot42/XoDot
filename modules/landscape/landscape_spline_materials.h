@@ -63,6 +63,16 @@ protected:
 	// Texture bound when a texture parameter is null (built-in textures).
 	virtual RID _get_default_texture(int p_index) const { return RID(); }
 	virtual RID _get_shader() const { return RID(); }
+	virtual String _get_source_code() const { return String(); }
+	static RID _create_shader(const String &p_code);
+
+	// Typed getters of the parameters, so that the properties have their real type in the API.
+	bool _get_parameter_bool(int p_index) const { return get_parameter_by_index(p_index); }
+	int _get_parameter_int(int p_index) const { return get_parameter_by_index(p_index); }
+	float _get_parameter_float(int p_index) const { return get_parameter_by_index(p_index); }
+	Vector2 _get_parameter_vector2(int p_index) const { return get_parameter_by_index(p_index); }
+	Color _get_parameter_color(int p_index) const { return get_parameter_by_index(p_index); }
+	Ref<Texture2D> _get_parameter_texture(int p_index) const { return get_parameter_by_index(p_index); }
 
 public:
 	void set_parameter_by_index(int p_index, const Variant &p_value);
@@ -102,6 +112,7 @@ protected:
 	virtual Variant _get_parameter_default(int p_index) const override;
 	virtual RID _get_default_texture(int p_index) const override;
 	virtual RID _get_shader() const override;
+	virtual String _get_source_code() const override { return get_builtin_shader_code(); }
 
 public:
 	static String get_builtin_shader_code();
@@ -135,6 +146,7 @@ protected:
 	virtual const ParameterInfo *_get_parameter_infos() const override;
 	virtual Variant _get_parameter_default(int p_index) const override;
 	virtual RID _get_shader() const override;
+	virtual String _get_source_code() const override { return get_builtin_shader_code(); }
 
 public:
 	void apply_preset(Preset p_preset);
