@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="StreamingSource3D" inherits="Node3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Position around which world content is streamed in.
+	</brief_description>
+	<description>
+		Marks a position around which streamed content is kept loaded, typically the player character. For example, [Landscape3D] builds its collision (see [member Landscape3D.collision_radius]) around every [StreamingSource3D] of its world.
+		When a world has no source, streaming systems use the active camera instead.
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="enabled" type="bool" setter="set_enabled" getter="is_enabled" default="true">
+			If [code]false[/code], this source is ignored.
+		</member>
+		<member name="priority" type="float" setter="set_priority" getter="get_priority" default="1.0">
+			Priority of the content requested for this source, relative to the other sources.
+		</member>
+		<member name="range_scale" type="float" setter="set_range_scale" getter="get_range_scale" default="1.0">
+			Multiplier of the streaming distances (for example the collision radius of landscapes) around this source.
+		</member>
+	</members>
+</class>

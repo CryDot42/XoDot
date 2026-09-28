@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LandscapeLayer" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		A material layer painted on a [Landscape3D].
+	</brief_description>
+	<description>
+		Describes the surface of one of the (up to 16) weight-blended layers of a [Landscape3D], similar to the layers of a landscape material in Unreal Engine.
+		The textures of all layers are resized to [member Landscape3D.layer_texture_size] and packed into two texture arrays: albedo + height, and normal + roughness + ambient occlusion. Missing textures are replaced by neutral values.
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="albedo_color" type="Color" setter="set_albedo_color" getter="get_albedo_color" default="Color(1, 1, 1, 1)">
+			Color multiplied with the albedo texture.
+		</member>
+		<member name="albedo_texture" type="Texture2D" setter="set_albedo_texture" getter="get_albedo_texture">
+			Albedo (base color) texture.
+		</member>
+		<member name="ao_strength" type="float" setter="set_ao_strength" getter="get_ao_strength" default="1.0">
+			Strength of the ambient occlusion texture.
+		</member>
+		<member name="ao_texture" type="Texture2D" setter="set_ao_texture" getter="get_ao_texture">
+			Ambient occlusion texture (red channel).
+		</member>
+		<member name="displacement" type="float" setter="set_displacement" getter="get_displacement" default="0.0">
+			Amplitude in meters of the micro detail displacement generated from [member height_texture] close to the camera. Requires [member Landscape3D.micro_detail_levels] to be greater than [code]0[/code].
+		</member>
+		<member name="height_blend" type="float" setter="set_height_blend" getter="get_height_blend" default="0.5">
+			How much the layer height is used when blending with other layers ([code]0[/code]: weight blend, [code]1[/code]: height blend, like [code]LB_HeightBlend[/code] in Unreal Engine).
+		</member>
+		<member name="height_texture" type="Texture2D" setter="set_height_texture" getter="get_height_texture">
+			Height texture (red channel), used for height blending and micro detail displacement.
+		</member>
+		<member name="layer_name" type="String" setter="set_layer_name" getter="get_layer_name" default="&quot;&quot;">
+			The name of the layer, displayed in the editor.
+		</member>
+		<member name="metallic" type="float" setter="set_metallic" getter="get_metallic" default="0.0">
+			Metallic value of the layer.
+		</member>
+		<member name="normal_strength" type="float" setter="set_normal_strength" getter="get_normal_strength" default="1.0">
+			Strength of the normal map.
+		</member>
+		<member name="normal_texture" type="Texture2D" setter="set_normal_texture" getter="get_normal_texture">
+			Normal map (OpenGL convention, Y+).
+		</member>
+		<member name="roughness" type="float" setter="set_roughness" getter="get_roughness" default="1.0">
+			Roughness of the layer (multiplied with [member roughness_texture] if set).
+		</member>
+		<member name="roughness_texture" type="Texture2D" setter="set_roughness_texture" getter="get_roughness_texture">
+			Roughness texture (red channel).
+		</member>
+		<member name="tile_size" type="float" setter="set_tile_size" getter="get_tile_size" default="4.0">
+			Size in meters of one repetition of the textures.
+		</member>
+		<member name="triplanar" type="bool" setter="set_triplanar" getter="is_triplanar" default="false">
+			If [code]true[/code], the layer is projected on the three axes and blended by the terrain normal, avoiding stretching on cliffs.
+		</member>
+		<member name="triplanar_sharpness" type="float" setter="set_triplanar_sharpness" getter="get_triplanar_sharpness" default="4.0">
+			Sharpness of the blend between the triplanar projections.
+		</member>
+		<member name="uv_rotation" type="float" setter="set_uv_rotation" getter="get_uv_rotation" default="0.0">
+			Rotation of the texture coordinates, useful to break the repetition between layers.
+		</member>
+	</members>
+	<signals>
+		<signal name="textures_changed">
+			<description>
+				Emitted when one of the textures of the layer is replaced or changed. [Landscape3D] rebuilds its layer texture arrays in response.
+			</description>
+		</signal>
+	</signals>
+</class>
