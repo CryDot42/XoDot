@@ -1362,6 +1362,8 @@ public:
 	// SDFGI
 
 	PASS11(environment_set_sdfgi, RID, bool, int, float, RSE::EnvironmentSDFGIYScale, bool, float, bool, float, float, float)
+	PASS5(environment_set_sdfgi_radiance_cascades, RID, bool, uint32_t, uint32_t, uint32_t)
+	PASS3(environment_set_sdfgi_screen_probes, RID, bool, uint32_t)
 
 	PASS1RC(bool, environment_get_sdfgi_enabled, RID)
 	PASS1RC(int, environment_get_sdfgi_cascades, RID)

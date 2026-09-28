@@ -572,6 +572,38 @@ RSE::EnvironmentSDFGIYScale RendererSceneRender::environment_get_sdfgi_y_scale(R
 	return environment_storage.environment_get_sdfgi_y_scale(p_env);
 }
 
+void RendererSceneRender::environment_set_sdfgi_radiance_cascades(RID p_env, bool p_enable, uint32_t p_base_oct_size, uint32_t p_max_oct_size, uint32_t p_angular_branching_log2) {
+	environment_storage.environment_set_sdfgi_radiance_cascades(p_env, p_enable, p_base_oct_size, p_max_oct_size, p_angular_branching_log2);
+}
+
+bool RendererSceneRender::environment_get_sdfgi_radiance_cascades_enabled(RID p_env) const {
+	return environment_storage.environment_get_sdfgi_radiance_cascades_enabled(p_env);
+}
+
+uint32_t RendererSceneRender::environment_get_sdfgi_rc_base_oct_size(RID p_env) const {
+	return environment_storage.environment_get_sdfgi_rc_base_oct_size(p_env);
+}
+
+uint32_t RendererSceneRender::environment_get_sdfgi_rc_max_oct_size(RID p_env) const {
+	return environment_storage.environment_get_sdfgi_rc_max_oct_size(p_env);
+}
+
+uint32_t RendererSceneRender::environment_get_sdfgi_rc_angular_branching_log2(RID p_env) const {
+	return environment_storage.environment_get_sdfgi_rc_angular_branching_log2(p_env);
+}
+
+void RendererSceneRender::environment_set_sdfgi_screen_probes(RID p_env, bool p_enable, uint32_t p_probe_spacing) {
+	environment_storage.environment_set_sdfgi_screen_probes(p_env, p_enable, p_probe_spacing);
+}
+
+bool RendererSceneRender::environment_get_sdfgi_screen_probes_enabled(RID p_env) const {
+	return environment_storage.environment_get_sdfgi_screen_probes_enabled(p_env);
+}
+
+uint32_t RendererSceneRender::environment_get_sdfgi_screen_probe_spacing(RID p_env) const {
+	return environment_storage.environment_get_sdfgi_screen_probe_spacing(p_env);
+}
+
 // Adjustments
 
 void RendererSceneRender::environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction) {

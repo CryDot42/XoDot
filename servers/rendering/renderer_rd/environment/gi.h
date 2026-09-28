@@ -43,6 +43,8 @@
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_direct_light.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_integrate.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_preprocess.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/sdfgi_radiance_cascades.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/sdfgi_screen_probes.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/voxel_gi.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/voxel_gi_debug.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/voxel_gi_mipmap.glsl.gen.h"
@@ -558,6 +560,45 @@ private:
 
 		RID integrate_default_sky_uniform_set;
 
+		// Experimental Radiance Cascades probe backend, see sdfgi_radiance_cascades.glsl.
+		enum {
+			RADIANCE_CASCADES_MODE_TRACE,
+			RADIANCE_CASCADES_MODE_MERGE,
+			RADIANCE_CASCADES_MODE_PROJECT,
+			RADIANCE_CASCADES_MODE_STORE,
+			RADIANCE_CASCADES_MODE_MAX
+		};
+		// Must match Params in sdfgi_radiance_cascades.glsl.
+		struct RadianceCascadesPushConstant {
+			float grid_size[3];
+			uint32_t max_cascades;
+
+			uint32_t probe_axis_size;
+			uint32_t cascade;
+			uint32_t angular_branching_log2;
+			uint32_t base_oct_size;
+
+			int32_t image_size[2];
+			float ray_bias;
+			uint32_t sky_flags;
+
+			int32_t world_offset[3];
+			float sky_energy;
+
+			float sky_color_or_orientation[3];
+			float y_mult;
+
+			float sky_irradiance_border_size[2];
+			uint32_t store_ambient_texture;
+			uint32_t pad0;
+		};
+
+		SdfgiRadianceCascadesShaderRD radiance_cascades;
+		RID radiance_cascades_shader;
+		PipelineDeferredRD radiance_cascades_pipeline[RADIANCE_CASCADES_MODE_MAX];
+
+		RID radiance_cascades_default_sky_uniform_set;
+
 	} sdfgi_shader;
 
 public:
@@ -596,6 +637,14 @@ public:
 		Transform3D screen_probe_prev_transform;
 		RID screen_probe_trace_ubo;
 		RID screen_probe_gi_ubo;
+
+		// Experimental: screen probes over SDFGI alone, see sdfgi_screen_probes.glsl.
+		// The frame/history/last-frame bookkeeping above (screen_probe_frame,
+		// screen_probe_history_index, ...) is generic and shared with this path too,
+		// since only one screen-probe backend is ever active on a given render buffer.
+		RID sdfgi_screen_probe_trace_ubo;
+		RID sdfgi_screen_probe_gi_ubo;
+		RID sdfgi_screen_probe_sdfgi_ubo;
 
 		RID uniform_set[RendererSceneRender::MAX_RENDER_VIEWS];
 		RID scene_data_ubo;
@@ -697,7 +746,12 @@ public:
 			MAX_DYNAMIC_LIGHTS = 128,
 			MAX_STATIC_LIGHTS = 1024,
 			LIGHTPROBE_OCT_SIZE = 6,
-			SH_SIZE = 16
+			SH_SIZE = 16,
+			// Compile-time cap for the experimental Radiance Cascades probe backend's angular
+			// resolution (see RC_MAX_OCT_SIZE in sdfgi_radiance_cascades.glsl). The Environment's
+			// runtime rc_max_oct_size setting is clamped to this; raising it means recompiling.
+			RC_MAX_OCT_SIZE = 8,
+			RC_SH_TERMS = 9,
 		};
 
 		struct Cascade {
@@ -788,6 +842,17 @@ public:
 		RID lightprobe_history_scroll; //used for scrolling lightprobes
 		RID lightprobe_average_scroll; //used for scrolling lightprobes
 
+		// Experimental Radiance Cascades probe backend (see sdfgi_radiance_cascades.glsl).
+		// Single arrays covering every cascade (layer = cascade index), unlike the per-cascade
+		// lightprobe_history_tex/lightprobe_average_tex above - the shader picks its layer via
+		// the push constant, so one uniform set covers every cascade's dispatch. These hold no
+		// cross-frame temporal state: every update_probes_radiance_cascades() call re-traces
+		// and re-merges them from scratch.
+		RID radiance_cascade_trace_tex;
+		RID radiance_cascade_merged_tex;
+		RID radiance_cascade_sh_tex;
+		RID radiance_cascades_uniform_set;
+
 		uint32_t history_size = 0;
 		float solid_cell_ratio = 0;
 		uint32_t solid_cell_count = 0;
@@ -817,6 +882,17 @@ public:
 		int32_t cascade_dynamic_light_count[SDFGI::MAX_CASCADES]; //used dynamically
 		RID integrate_sky_uniform_set;
 
+		// Experimental Radiance Cascades probe backend and screen probes (see
+		// environment_storage's sdfgi_radiance_cascades_enabled / sdfgi_screen_probes_enabled).
+		// Cached every update() call, same as bounce_feedback/energy/... above.
+		bool radiance_cascades_enabled = false;
+		uint32_t rc_base_oct_size = 2;
+		uint32_t rc_max_oct_size = 8;
+		uint32_t rc_angular_branching_log2 = 1;
+		bool screen_probes_enabled = false;
+		uint32_t screen_probe_spacing = 16;
+		RID radiance_cascades_sky_uniform_set;
+
 		virtual void configure(RenderSceneBuffersRD *p_render_buffers) override {}
 		virtual void free_data() override;
 		~SDFGI();
@@ -825,6 +901,7 @@ public:
 		void update(RID p_env, const Vector3 &p_world_position);
 		void update_light();
 		void update_probes(RID p_env, RendererRD::SkyRD::Sky *p_sky);
+		void update_probes_radiance_cascades(RID p_env, RendererRD::SkyRD::Sky *p_sky);
 		void store_probes();
 		int get_pending_region_data(int p_region, Vector3i &r_local_offset, Vector3i &r_local_size, AABB &r_bounds) const;
 		void update_cascades();
@@ -1002,6 +1079,48 @@ public:
 	RID screen_probes_shader_version;
 	PipelineDeferredRD screen_probes_pipelines[SCREEN_PROBES_MAX];
 
+	// Experimental: screen probes over SDFGI alone, see sdfgi_screen_probes.glsl.
+	// Must match Params in sdfgi_screen_probes.glsl.
+	struct SDFGIScreenProbeTraceParams {
+		float inv_projection[16];
+		float projection[16];
+		float reprojection[16];
+		float cam_basis[16];
+
+		int32_t screen_size[2];
+		int32_t probe_grid_size[2];
+
+		uint32_t probe_spacing;
+		uint32_t frame;
+		uint32_t screen_trace_steps;
+		float screen_trace_distance;
+
+		float z_near;
+		float pixel_size;
+		float last_frame_max_lod;
+		uint32_t orthogonal;
+
+		uint32_t has_last_frame;
+		uint32_t pad0;
+		uint32_t pad1;
+		uint32_t pad2;
+	};
+
+	// Must match SDFGIParams in sdfgi_screen_probes.glsl.
+	struct SDFGIScreenProbeSdfgiParams {
+		float grid_size[3];
+		uint32_t max_cascades;
+
+		uint32_t probe_axis_size;
+		float y_mult;
+		float normal_bias;
+		uint32_t use_sdfgi;
+	};
+
+	SdfgiScreenProbesShaderRD sdfgi_screen_probes_shader;
+	RID sdfgi_screen_probes_shader_version;
+	PipelineDeferredRD sdfgi_screen_probes_pipelines[SCREEN_PROBES_MAX];
+
 	enum ShaderSpecializations {
 		SHADER_SPECIALIZATION_HALF_RES = 1 << 0,
 		SHADER_SPECIALIZATION_USE_FULL_PROJECTION_MATRIX = 1 << 1,
@@ -1028,6 +1147,8 @@ public:
 	// Screen probes need the last frame buffer (RB_SCOPE_SSLF) to be allocated and copied every frame.
 	static bool is_using_screen_probes();
 	void _setup_screen_probes(Ref<RenderSceneBuffersRD> p_render_buffers, Ref<RenderBuffersGI> p_rbgi, RID p_normal_roughness, RID p_voxel_gi_buffer, const Projection &p_projection, const Transform3D &p_cam_transform, uint32_t p_max_voxel_gi_instances, RID &r_trace_set, RID &r_filter_set, RID &r_gi_set, Size2i &r_probe_grid_size);
+	// Experimental: screen probes over SDFGI alone, see sdfgi_screen_probes.glsl.
+	void _setup_sdfgi_screen_probes(Ref<RenderSceneBuffersRD> p_render_buffers, Ref<RenderBuffersGI> p_rbgi, Ref<SDFGI> p_sdfgi, RID p_normal_roughness, const Projection &p_projection, const Transform3D &p_cam_transform, RID &r_trace_set, RID &r_filter_set, RID &r_gi_set, Size2i &r_probe_grid_size);
 	void process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances, bool p_use_screen_probes = false);
 
 	RID voxel_gi_instance_create(RID p_base);

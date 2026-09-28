@@ -157,6 +157,15 @@ private:
 	float sdfgi_energy = 1.0;
 	float sdfgi_normal_bias = 1.1;
 	float sdfgi_probe_bias = 1.1;
+
+	// Experimental SDFGI Radiance Cascades probe backend and screen probes.
+	bool sdfgi_radiance_cascades_enabled = false;
+	int sdfgi_rc_base_oct_size = 2;
+	int sdfgi_rc_max_oct_size = 8;
+	int sdfgi_rc_angular_branching_log2 = 1;
+	bool sdfgi_screen_probes_enabled = false;
+	int sdfgi_screen_probe_spacing = 16;
+
 	void _update_sdfgi();
 
 	// Glow
@@ -339,6 +348,20 @@ public:
 	float get_sdfgi_normal_bias() const;
 	void set_sdfgi_probe_bias(float p_bias);
 	float get_sdfgi_probe_bias() const;
+
+	// Experimental SDFGI Radiance Cascades probe backend and screen probes.
+	void set_sdfgi_radiance_cascades_enabled(bool p_enabled);
+	bool is_sdfgi_radiance_cascades_enabled() const;
+	void set_sdfgi_rc_base_oct_size(int p_size);
+	int get_sdfgi_rc_base_oct_size() const;
+	void set_sdfgi_rc_max_oct_size(int p_size);
+	int get_sdfgi_rc_max_oct_size() const;
+	void set_sdfgi_rc_angular_branching_log2(int p_log2);
+	int get_sdfgi_rc_angular_branching_log2() const;
+	void set_sdfgi_screen_probes_enabled(bool p_enabled);
+	bool is_sdfgi_screen_probes_enabled() const;
+	void set_sdfgi_screen_probe_spacing(int p_spacing);
+	int get_sdfgi_screen_probe_spacing() const;
 
 	// Glow
 	void set_glow_enabled(bool p_enabled);

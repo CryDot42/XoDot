@@ -247,6 +247,16 @@ public:
 	float environment_get_sdfgi_probe_bias(RID p_env) const;
 	RSE::EnvironmentSDFGIYScale environment_get_sdfgi_y_scale(RID p_env) const;
 
+	void environment_set_sdfgi_radiance_cascades(RID p_env, bool p_enable, uint32_t p_base_oct_size, uint32_t p_max_oct_size, uint32_t p_angular_branching_log2);
+	bool environment_get_sdfgi_radiance_cascades_enabled(RID p_env) const;
+	uint32_t environment_get_sdfgi_rc_base_oct_size(RID p_env) const;
+	uint32_t environment_get_sdfgi_rc_max_oct_size(RID p_env) const;
+	uint32_t environment_get_sdfgi_rc_angular_branching_log2(RID p_env) const;
+
+	void environment_set_sdfgi_screen_probes(RID p_env, bool p_enable, uint32_t p_probe_spacing);
+	bool environment_get_sdfgi_screen_probes_enabled(RID p_env) const;
+	uint32_t environment_get_sdfgi_screen_probe_spacing(RID p_env) const;
+
 	virtual void environment_set_sdfgi_ray_count(RSE::EnvironmentSDFGIRayCount p_ray_count) = 0;
 	virtual void environment_set_sdfgi_frames_to_converge(RSE::EnvironmentSDFGIFramesToConverge p_frames) = 0;
 	virtual void environment_set_sdfgi_frames_to_update_light(RSE::EnvironmentSDFGIFramesToUpdateLight p_update) = 0;
