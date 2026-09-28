@@ -1034,7 +1034,7 @@ void LandscapeSpline3D::_build_ribbon_chunk(Chunk &r_chunk, Array &r_arrays, Dic
 			const int next = MIN(index + 1, sample_count - 1);
 			const real_t run = samples[next].distance - samples[prev].distance;
 			const real_t drop = run > CMP_EPSILON ? (samples[prev].position.y - samples[next].position.y) / run : 0.0;
-			const float turbulence = _spline_smoothstep01((drop - 0.01) / 0.07);
+			const float turbulence = _spline_smoothstep01((drop - 0.015) / 0.12);
 			// Open rivers fade in and out at their ends.
 			float fade = 1.0;
 			if (!is_closed()) {

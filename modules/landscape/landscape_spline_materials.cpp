@@ -584,7 +584,9 @@ void fragment() {
 	float foam_noise = mix(f0, f1, blend);
 	float shore = 1.0 - smoothstep(0.0, max(shore_foam_distance, 0.01), thickness);
 	float amount = clamp(shore * shore_foam + v_turbulence * flow_foam, 0.0, 1.0);
-	float foam = clamp((foam_noise - (1.0 - amount)) * 4.0, 0.0, 1.0) * step(0.001, amount);
+	// Patches of foam: even the most turbulent water keeps gaps showing the water.
+	float threshold = 1.0 - amount * 0.7;
+	float foam = smoothstep(threshold, threshold + 0.15, foam_noise) * smoothstep(0.0, 0.15, amount);
 
 	ALBEDO = mix(scattered * (1.0 - transmittance) * (1.0 - fresnel), foam_color.rgb, foam);
 	EMISSION = transmitted * transmittance * (1.0 - fresnel) * (1.0 - foam);
