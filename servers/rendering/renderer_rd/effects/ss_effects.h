@@ -153,8 +153,16 @@ public:
 		bool half_size = false;
 	};
 
-	void ssr_allocate_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, SSRRenderBuffers &p_ssr_buffers, const RD::DataFormat p_color_format);
-	void screen_space_reflection(Ref<RenderSceneBuffersRD> p_render_buffers, SSRRenderBuffers &p_ssr_buffers, const RID *p_normal_roughness_slices, int p_max_steps, float p_fade_in, float p_fade_out, float p_tolerance, const Projection *p_projections, const Projection *p_reprojections, const Vector3 *p_eye_offsets, RendererRD::CopyEffects &p_copy_effects);
+	struct SSRSettings {
+		int max_steps = 64;
+		float fade_in = 0.15;
+		float fade_out = 2.0;
+		float depth_tolerance = 0.5;
+	};
+
+	// Returns false when the viewport is too small for screen space reflections, in which case they must be skipped.
+	bool ssr_allocate_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, SSRRenderBuffers &p_ssr_buffers, const RD::DataFormat p_color_format);
+	void screen_space_reflection(Ref<RenderSceneBuffersRD> p_render_buffers, SSRRenderBuffers &p_ssr_buffers, const RID *p_normal_roughness_slices, const SSRSettings &p_settings, const Projection *p_projections, const Projection *p_reprojections, const Vector3 *p_eye_offsets);
 
 	/* subsurface scattering */
 	void sss_set_quality(RSE::SubSurfaceScatteringQuality p_quality);
@@ -436,14 +444,6 @@ private:
 
 	/* Screen Space Reflection */
 
-	enum ScreenSpaceReflectionDownsampleMode {
-		SCREEN_SPACE_REFLECTION_DOWNSAMPLE_DEFAULT,
-		SCREEN_SPACE_REFLECTION_DOWNSAMPLE_ODD_WIDTH,
-		SCREEN_SPACE_REFLECTION_DOWNSAMPLE_ODD_HEIGHT,
-		SCREEN_SPACE_REFLECTION_DOWNSAMPLE_ODD_WIDTH_AND_HEIGHT,
-		SCREEN_SPACE_REFLECTION_DOWNSAMPLE_MAX
-	};
-
 	struct ScreenSpaceReflectionDownsamplePushConstant {
 		int32_t screen_size[2];
 		int32_t pad[2];
@@ -451,9 +451,7 @@ private:
 
 	enum ScreenSpaceReflectionHizMode {
 		SCREEN_SPACE_REFLECTION_HIZ_DEFAULT,
-		SCREEN_SPACE_REFLECTION_HIZ_ODD_WIDTH,
-		SCREEN_SPACE_REFLECTION_HIZ_ODD_HEIGHT,
-		SCREEN_SPACE_REFLECTION_HIZ_ODD_WIDTH_AND_HEIGHT,
+		SCREEN_SPACE_REFLECTION_HIZ_COPY_SOURCE,
 		SCREEN_SPACE_REFLECTION_HIZ_MAX
 	};
 
@@ -489,13 +487,13 @@ private:
 
 	struct ScreenSpaceReflectionResolvePushConstant {
 		int32_t screen_size[2];
-		int32_t pad[2];
+		int32_t half_screen_size[2];
 	};
 
 	struct ScreenSpaceReflection {
 		ScreenSpaceReflectionDownsampleShaderRD downsample_shader;
 		RID downsample_shader_version;
-		PipelineDeferredRD downsample_pipelines[SCREEN_SPACE_REFLECTION_DOWNSAMPLE_MAX];
+		PipelineDeferredRD downsample_pipeline;
 
 		ScreenSpaceReflectionHizShaderRD hiz_shader;
 		RID hiz_shader_version;

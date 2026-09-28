@@ -42,22 +42,12 @@ layout(set = 0, binding = 0) uniform sampler2DArray specular;
 layout(set = 0, binding = 0) uniform sampler2D specular;
 #endif //USE_MULTIVIEW
 
-#ifdef MODE_SSR
-
-#ifdef USE_MULTIVIEW
-layout(set = 1, binding = 0) uniform sampler2DArray ssr;
-#else // USE_MULTIVIEW
-layout(set = 1, binding = 0) uniform sampler2D ssr;
-#endif //USE_MULTIVIEW
-
-#endif
-
 #ifdef MODE_MERGE
 
 #ifdef USE_MULTIVIEW
-layout(set = 2, binding = 0) uniform sampler2DArray diffuse;
+layout(set = 1, binding = 0) uniform sampler2DArray diffuse;
 #else // USE_MULTIVIEW
-layout(set = 2, binding = 0) uniform sampler2D diffuse;
+layout(set = 1, binding = 0) uniform sampler2D diffuse;
 #endif //USE_MULTIVIEW
 
 #endif
@@ -67,11 +57,6 @@ layout(location = 0) out vec4 frag_color;
 void main() {
 	frag_color.rgb = texture(specular, uv_interp).rgb;
 	frag_color.a = 0.0;
-#ifdef MODE_SSR
-
-	vec4 ssr_color = texture(ssr, uv_interp);
-	frag_color.rgb = mix(frag_color.rgb, ssr_color.rgb, ssr_color.a);
-#endif
 
 #ifdef MODE_MERGE
 	frag_color += texture(diffuse, uv_interp);

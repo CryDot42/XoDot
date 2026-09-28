@@ -300,22 +300,16 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 	{
 		Vector<String> specular_modes;
 		specular_modes.push_back("\n#define MODE_MERGE\n"); // SPECULAR_MERGE_ADD
-		specular_modes.push_back("\n#define MODE_MERGE\n#define MODE_SSR\n"); // SPECULAR_MERGE_SSR
 		specular_modes.push_back("\n"); // SPECULAR_MERGE_ADDITIVE_ADD
-		specular_modes.push_back("\n#define MODE_SSR\n"); // SPECULAR_MERGE_ADDITIVE_SSR
 
 		specular_modes.push_back("\n#define USE_MULTIVIEW\n#define MODE_MERGE\n"); // SPECULAR_MERGE_ADD_MULTIVIEW
-		specular_modes.push_back("\n#define USE_MULTIVIEW\n#define MODE_MERGE\n#define MODE_SSR\n"); // SPECULAR_MERGE_SSR_MULTIVIEW
 		specular_modes.push_back("\n#define USE_MULTIVIEW\n"); // SPECULAR_MERGE_ADDITIVE_ADD_MULTIVIEW
-		specular_modes.push_back("\n#define USE_MULTIVIEW\n#define MODE_SSR\n"); // SPECULAR_MERGE_ADDITIVE_SSR_MULTIVIEW
 
 		specular_merge.shader.initialize(specular_modes);
 
 		if (!RendererCompositorRD::get_singleton()->is_xr_enabled()) {
 			specular_merge.shader.set_variant_enabled(SPECULAR_MERGE_ADD_MULTIVIEW, false);
-			specular_merge.shader.set_variant_enabled(SPECULAR_MERGE_SSR_MULTIVIEW, false);
 			specular_merge.shader.set_variant_enabled(SPECULAR_MERGE_ADDITIVE_ADD_MULTIVIEW, false);
-			specular_merge.shader.set_variant_enabled(SPECULAR_MERGE_ADDITIVE_SSR_MULTIVIEW, false);
 		}
 
 		specular_merge.shader_version = specular_merge.shader.version_create();
@@ -337,7 +331,7 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 		for (int i = 0; i < SPECULAR_MERGE_MAX; i++) {
 			if (specular_merge.shader.is_variant_enabled(i)) {
 				RD::PipelineColorBlendState blend_state;
-				if (i == SPECULAR_MERGE_ADDITIVE_ADD || i == SPECULAR_MERGE_ADDITIVE_SSR || i == SPECULAR_MERGE_ADDITIVE_ADD_MULTIVIEW || i == SPECULAR_MERGE_ADDITIVE_SSR_MULTIVIEW) {
+				if (i == SPECULAR_MERGE_ADDITIVE_ADD || i == SPECULAR_MERGE_ADDITIVE_ADD_MULTIVIEW) {
 					blend_state = blend_additive;
 				} else {
 					blend_state = RD::PipelineColorBlendState::create_disabled();
@@ -1432,7 +1426,7 @@ void CopyEffects::octmap_roughness_raster(RID p_source_rd_texture, RID p_dest_fr
 	RD::get_singleton()->draw_list_end();
 }
 
-void CopyEffects::merge_specular(RID p_dest_framebuffer, RID p_specular, RID p_base, RID p_reflection, uint32_t p_view_count) {
+void CopyEffects::merge_specular(RID p_dest_framebuffer, RID p_specular, RID p_base, uint32_t p_view_count) {
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	ERR_FAIL_NULL(uniform_set_cache);
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
@@ -1444,20 +1438,7 @@ void CopyEffects::merge_specular(RID p_dest_framebuffer, RID p_specular, RID p_b
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dest_framebuffer);
 
-	int mode;
-	if (p_reflection.is_valid()) {
-		if (p_base.is_valid()) {
-			mode = SPECULAR_MERGE_SSR;
-		} else {
-			mode = SPECULAR_MERGE_ADDITIVE_SSR;
-		}
-	} else {
-		if (p_base.is_valid()) {
-			mode = SPECULAR_MERGE_ADD;
-		} else {
-			mode = SPECULAR_MERGE_ADDITIVE_ADD;
-		}
-	}
+	int mode = p_base.is_valid() ? SPECULAR_MERGE_ADD : SPECULAR_MERGE_ADDITIVE_ADD;
 
 	if (p_view_count > 1) {
 		mode += SPECULAR_MERGE_ADD_MULTIVIEW;
@@ -1466,17 +1447,12 @@ void CopyEffects::merge_specular(RID p_dest_framebuffer, RID p_specular, RID p_b
 	RID shader = specular_merge.shader.version_get_shader(specular_merge.shader_version, mode);
 	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, specular_merge.pipelines[mode].get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dest_framebuffer)));
 
-	if (p_base.is_valid()) {
-		RD::Uniform u_base(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_base }));
-		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 2, u_base), 2);
-	}
-
 	RD::Uniform u_specular(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_specular }));
 	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_specular), 0);
 
-	if (p_reflection.is_valid()) {
-		RD::Uniform u_reflection(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_reflection }));
-		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 1, u_reflection), 1);
+	if (p_base.is_valid()) {
+		RD::Uniform u_base(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_base }));
+		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 1, u_base), 1);
 	}
 
 	RD::get_singleton()->draw_list_draw(draw_list, false, 1u, 3u);

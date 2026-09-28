@@ -1046,6 +1046,7 @@ layout(location = 2) out vec2 motion_vector;
 
 #include "../scene_forward_gi_inc.glsl"
 #include "../scene_forward_lights_inc.glsl"
+#include "../screen_space_reflection_inc.glsl"
 
 #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
@@ -2291,7 +2292,7 @@ void fragment_shader(in SceneData scene_data) {
 				ssr_mip_level = textureLod(sampler2D(ssr_mip_level_buffer, SAMPLER_NEAREST_CLAMP), screen_uv, 0.0).x;
 #endif // USE_MULTIVIEW
 
-				ssr_mip_level *= 14.0;
+				ssr_mip_level *= SSR_MIP_LEVEL_RANGE;
 			}
 
 #ifdef USE_MULTIVIEW
@@ -2301,8 +2302,8 @@ void fragment_shader(in SceneData scene_data) {
 #endif // USE_MULTIVIEW
 
 			if (resolve_ssr) {
-				const vec3 rec709_luminance_weights = vec3(0.2126, 0.7152, 0.0722);
-				ssr.rgb /= 1.0 - dot(ssr.rgb, rec709_luminance_weights);
+				// At full size there is no resolve pass to undo the tone mapping of the trace pass.
+				ssr.rgb = ssr_inverse_tonemap(ssr.rgb);
 			}
 
 			// Apply fade when approaching 0.7 roughness to smoothen the harsh cutoff in the main SSR trace pass.
