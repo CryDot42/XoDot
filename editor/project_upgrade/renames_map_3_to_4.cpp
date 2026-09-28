@@ -564,7 +564,6 @@ const char *RenamesMap3To4::gdscript_function_renames[][2] = {
 	{ "set_space_override_mode", "set_gravity_space_override_mode" }, // Area2D
 	{ "set_spatial_node", "set_node_3d" }, // EditorNode3DGizmo
 	{ "set_speed", "set_velocity" }, // InputEventMouseMotion
-	{ "set_ssao_edge_sharpness", "set_ssao_sharpness" }, // Environment
 	{ "set_surface_material", "set_surface_override_material" }, // MeshInstance3D -- Breaks ImporterMesh.
 	{ "set_tab_align", "set_tab_alignment" }, // TabContainer
 	{ "set_tangent", "surface_set_tangent" }, // ImmediateGeometry -- Breaks SurfaceTool.
@@ -974,7 +973,6 @@ const char *RenamesMap3To4::csharp_function_renames[][2] = {
 	{ "SetSpaceOverrideMode", "SetGravitySpaceOverrideMode" }, // Area2D
 	{ "SetSpatialNode", "SetNode3d" }, // EditorNode3DGizmo
 	{ "SetSpeed", "SetVelocity" }, // InputEventMouseMotion
-	{ "SetSsaoEdgeSharpness", "SetSsaoSharpness" }, // Environment
 	{ "SetSurfaceMaterial", "SetSurfaceOverrideMaterial" }, // MeshInstance3D -- Breaks ImporterMesh.
 	{ "SetTabAlign", "SetTabAlignment" }, // TabContainer
 	{ "SetTangent", "SurfaceSetTangent" }, // ImmediateGeometry -- Breaks SurfaceTool.

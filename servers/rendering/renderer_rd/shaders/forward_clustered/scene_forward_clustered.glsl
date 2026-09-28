@@ -1693,12 +1693,38 @@ void fragment_shader(in SceneData scene_data) {
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
 #ifndef AMBIENT_LIGHT_DISABLED
-// Use bent normal for indirect lighting where possible
+	// Screen-space ambient occlusion (XeGTAO). The visibility is stored in the red channel,
+	// and the view space bent normal (if enabled) in the green, blue and alpha channels.
+	bool use_ssao_bent_normal = false;
+	vec3 ssao_bent_normal = normal;
+	if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO)) {
+#ifdef USE_MULTIVIEW
+		vec4 ssao = textureLod(sampler2DArray(ao_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex), 0.0);
+#else
+		vec4 ssao = textureLod(sampler2D(ao_buffer, SAMPLER_LINEAR_CLAMP), screen_uv, 0.0);
+#endif
+		// By default, the darkest of the material's ambient occlusion and SSAO is used, so SSAO isn't visible
+		// in areas already darkened by an AO texture. The AO channel affect makes SSAO stack on top of it instead.
+		ao = mix(min(ao, ssao.r), ao * ssao.r, implementation_data.ssao_ao_affect);
+		ao_light_affect = max(ao_light_affect, implementation_data.ssao_light_affect);
+
+		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO_BENT_NORMALS)) {
+			use_ssao_bent_normal = true;
+			ssao_bent_normal = normalize(ssao.gba * 2.0 - 1.0);
+		}
+	}
+
+	// Use bent normal for indirect lighting where possible.
 #ifdef BENT_NORMAL_MAP_USED
 	vec3 indirect_normal = bent_normal_vector;
 #else
 	vec3 indirect_normal = normal;
 #endif
+	if (use_ssao_bent_normal) {
+		// The screen-space bent normal was computed from the shading normal stored in the normal buffer,
+		// bend the indirect normal (which may already be bent by the material) by the same amount.
+		indirect_normal = normalize(indirect_normal + ssao_bent_normal - normal);
+	}
 
 	if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_REFLECTION_CUBEMAP)) {
 #ifdef LIGHT_ANISOTROPY_USED
@@ -1955,7 +1981,7 @@ void fragment_shader(in SceneData scene_data) {
 		//make vertex orientation the world one, but still align to camera
 		vec3 cam_pos = mat3(inv_view_matrix) * vertex;
 		vec3 cam_normal = mat3(inv_view_matrix) * indirect_normal;
-		vec3 cam_reflection = mat3(inv_view_matrix) * reflect(-view, indirect_normal);
+		vec3 cam_reflection = mat3(inv_view_matrix) * reflect(-view, normal);
 
 		//apply y-mult
 		cam_pos.y *= sdfgi.y_mult;
@@ -2027,7 +2053,7 @@ void fragment_shader(in SceneData scene_data) {
 		// Make vertex orientation the world one, but still align to camera.
 		vec3 cam_pos = mat3(inv_view_matrix) * vertex;
 		vec3 cam_normal = mat3(inv_view_matrix) * indirect_normal;
-		vec3 ref_vec = mat3(inv_view_matrix) * normalize(reflect(-view, indirect_normal));
+		vec3 ref_vec = mat3(inv_view_matrix) * normalize(reflect(-view, normal));
 
 		//find arbitrary tangent and bitangent, then build a matrix
 		vec3 v0 = abs(cam_normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
@@ -2065,18 +2091,18 @@ void fragment_shader(in SceneData scene_data) {
 			vec2 base_coord = screen_uv;
 			vec2 closest_coord = base_coord;
 #ifdef USE_MULTIVIEW
-			float closest_ang = dot(indirect_normal, normalize(textureLod(sampler2DArray(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), vec3(base_coord, ViewIndex), 0.0).xyz * 2.0 - 1.0));
+			float closest_ang = dot(normal, normalize(textureLod(sampler2DArray(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), vec3(base_coord, ViewIndex), 0.0).xyz * 2.0 - 1.0));
 #else // USE_MULTIVIEW
-			float closest_ang = dot(indirect_normal, normalize(textureLod(sampler2D(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), base_coord, 0.0).xyz * 2.0 - 1.0));
+			float closest_ang = dot(normal, normalize(textureLod(sampler2D(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), base_coord, 0.0).xyz * 2.0 - 1.0));
 #endif // USE_MULTIVIEW
 
 			for (int i = 0; i < 4; i++) {
 				const vec2 neighbors[4] = vec2[](vec2(-1, 0), vec2(1, 0), vec2(0, -1), vec2(0, 1));
 				vec2 neighbour_coord = base_coord + neighbors[i] * scene_data.screen_pixel_size;
 #ifdef USE_MULTIVIEW
-				float neighbour_ang = dot(indirect_normal, normalize(textureLod(sampler2DArray(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), vec3(neighbour_coord, ViewIndex), 0.0).xyz * 2.0 - 1.0));
+				float neighbour_ang = dot(normal, normalize(textureLod(sampler2DArray(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), vec3(neighbour_coord, ViewIndex), 0.0).xyz * 2.0 - 1.0));
 #else // USE_MULTIVIEW
-				float neighbour_ang = dot(indirect_normal, normalize(textureLod(sampler2D(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), neighbour_coord, 0.0).xyz * 2.0 - 1.0));
+				float neighbour_ang = dot(normal, normalize(textureLod(sampler2D(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), neighbour_coord, 0.0).xyz * 2.0 - 1.0));
 #endif // USE_MULTIVIEW
 				if (neighbour_ang > closest_ang) {
 					closest_ang = neighbour_ang;
@@ -2102,16 +2128,6 @@ void fragment_shader(in SceneData scene_data) {
 		indirect_specular_light = mix(indirect_specular_light, buffer_reflection.rgb, buffer_reflection.a);
 	}
 #endif // !USE_LIGHTMAP
-
-	if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO)) {
-#ifdef USE_MULTIVIEW
-		float ssao = texture(sampler2DArray(ao_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex)).r;
-#else
-		float ssao = texture(sampler2D(ao_buffer, SAMPLER_LINEAR_CLAMP), screen_uv).r;
-#endif
-		ao = min(ao, ssao);
-		ao_light_affect = mix(ao_light_affect, max(ao_light_affect, implementation_data.ssao_light_affect), implementation_data.ssao_ao_affect);
-	}
 
 	{ // process reflections
 
@@ -2175,7 +2191,7 @@ void fragment_shader(in SceneData scene_data) {
 				}
 #endif // LIGHT_CLEARCOAT_USED
 
-				reflection_process(reflection_index, vertex, ref_vec, normal, roughness, ambient_light,
+				reflection_process(reflection_index, vertex, ref_vec, indirect_normal, roughness, ambient_light,
 #ifdef LIGHT_CLEARCOAT_USED
 						cc_ref_vec, sqrt(mix(0.001, 0.1, clearcoat_roughness)), cc_reflection_accum,
 #endif
@@ -2231,47 +2247,58 @@ void fragment_shader(in SceneData scene_data) {
 		ambient_light *= ao;
 #endif // MULTI_BOUNCE_OCCLUSION_ENABLED
 #ifndef SPECULAR_OCCLUSION_DISABLED
+		float specular_occlusion = 1.0;
 #ifdef BENT_NORMAL_MAP_USED
-		// Apply cone to cone intersection with cosine weighted assumption:
-		// https://blog.selfshadow.com/publications/s2016-shading-course/activision/s2016_pbs_activision_occlusion.pdf
-		float cos_a_v = sqrt(1.0 - ao);
-		float limited_roughness = max(roughness, 0.01); // Avoid artifacts at really low roughness.
-		float cos_a_s = exp2((-log(10.0) / log(2.0)) * limited_roughness * limited_roughness);
-		float cos_b = dot(bent_normal_vector, reflect(-view, normal));
+		bool use_bent_normal_specular_occlusion = true;
+#else
+		bool use_bent_normal_specular_occlusion = use_ssao_bent_normal;
+#endif
+		if (use_bent_normal_specular_occlusion) {
+			// Apply cone to cone intersection with cosine weighted assumption (GTSO):
+			// https://blog.selfshadow.com/publications/s2016-shading-course/activision/s2016_pbs_activision_occlusion.pdf
+			float cos_a_v = sqrt(1.0 - ao);
+			float limited_roughness = max(roughness, 0.01); // Avoid artifacts at really low roughness.
+			float cos_a_s = exp2((-log(10.0) / log(2.0)) * limited_roughness * limited_roughness);
+			float cos_b = dot(indirect_normal, reflect(-view, normal));
 
-		// Intersection between the spherical caps of the visibility and specular cone.
-		// Based on Christopher Oat and Pedro V. Sander's "Ambient aperture lighting":
-		// https://advances.realtimerendering.com/s2006/Chapter8-Ambient_Aperture_Lighting.pdf
-		float r1 = acos(cos_a_v);
-		float r2 = acos(cos_a_s);
-		float d = acos(cos_b);
-		float area = 0.0;
+			// Intersection between the spherical caps of the visibility and specular cone.
+			// Based on Christopher Oat and Pedro V. Sander's "Ambient aperture lighting":
+			// https://advances.realtimerendering.com/s2006/Chapter8-Ambient_Aperture_Lighting.pdf
+			float r1 = acos(cos_a_v);
+			float r2 = acos(cos_a_s);
+			float d = acos(clamp(cos_b, -1.0, 1.0));
+			float area = 0.0;
 
-		if (d <= max(r1, r2) - min(r1, r2)) {
-			// One cap is enclosed in the other.
-			area = M_TAU - M_TAU * max(cos_a_v, cos_a_s);
-		} else if (d >= r1 + r2) {
-			// No intersection.
-			area = 0.0;
-		} else {
-			float delta = abs(r1 - r2);
-			float x = 1.0 - clamp((d - delta) / (r1 + r2 - delta), 0.0, 1.0);
-			area = smoothstep(0.0, 1.0, x);
-			area *= M_TAU - M_TAU * max(cos_a_v, cos_a_s);
+			if (d <= max(r1, r2) - min(r1, r2)) {
+				// One cap is enclosed in the other.
+				area = M_TAU - M_TAU * max(cos_a_v, cos_a_s);
+			} else if (d >= r1 + r2) {
+				// No intersection.
+				area = 0.0;
+			} else {
+				float delta = abs(r1 - r2);
+				float x = 1.0 - clamp((d - delta) / (r1 + r2 - delta), 0.0, 1.0);
+				area = smoothstep(0.0, 1.0, x);
+				area *= M_TAU - M_TAU * max(cos_a_v, cos_a_s);
+			}
+
+			specular_occlusion = area / (M_TAU * (1.0 - cos_a_s));
 		}
+#ifndef BENT_NORMAL_MAP_USED
+		{
+			// Approximate large scale occlusion of reflections using the ambient light, this complements
+			// the screen-space bent normal based occlusion which is limited to the SSAO radius.
+			float ambient_specular_occlusion = (ambient_light.r * 0.3 + ambient_light.g * 0.59 + ambient_light.b * 0.11) * 2.0; // Luminance of ambient light.
+			ambient_specular_occlusion = min(ambient_specular_occlusion * 4.0, 1.0); // This multiplication preserves speculars on bright areas.
 
-		float specular_occlusion = area / (M_TAU * (1.0 - cos_a_s));
+			float reflective_f = (1.0 - roughness) * metallic;
+			// 10.0 is a magic number, it gives the intended effect in most scenarios.
+			// Low enough for occlusion, high enough for reaction to lights and shadows.
+			ambient_specular_occlusion = max(min(reflective_f * ambient_specular_occlusion * 10.0, 1.0), ambient_specular_occlusion);
+			specular_occlusion = min(specular_occlusion, ambient_specular_occlusion);
+		}
+#endif // !BENT_NORMAL_MAP_USED
 		indirect_specular_light *= specular_occlusion;
-#else // BENT_NORMAL_MAP_USED
-		float specular_occlusion = (ambient_light.r * 0.3 + ambient_light.g * 0.59 + ambient_light.b * 0.11) * 2.0; // Luminance of ambient light.
-		specular_occlusion = min(specular_occlusion * 4.0, 1.0); // This multiplication preserves speculars on bright areas.
-
-		float reflective_f = (1.0 - roughness) * metallic;
-		// 10.0 is a magic number, it gives the intended effect in most scenarios.
-		// Low enough for occlusion, high enough for reaction to lights and shadows.
-		specular_occlusion = max(min(reflective_f * specular_occlusion * 10.0, 1.0), specular_occlusion);
-		indirect_specular_light *= specular_occlusion;
-#endif // BENT_NORMAL_MAP_USED
 #endif // SPECULAR_OCCLUSION_DISABLED
 		ambient_light *= albedo.rgb;
 

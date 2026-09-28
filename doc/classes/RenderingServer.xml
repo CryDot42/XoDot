@@ -1476,12 +1476,9 @@
 			<param index="1" name="enable" type="bool" />
 			<param index="2" name="radius" type="float" />
 			<param index="3" name="intensity" type="float" />
-			<param index="4" name="power" type="float" />
-			<param index="5" name="detail" type="float" />
-			<param index="6" name="horizon" type="float" />
-			<param index="7" name="sharpness" type="float" />
-			<param index="8" name="light_affect" type="float" />
-			<param index="9" name="ao_channel_affect" type="float" />
+			<param index="4" name="thin_occluder_compensation" type="float" />
+			<param index="5" name="light_affect" type="float" />
+			<param index="6" name="ao_channel_affect" type="float" />
 			<description>
 				Sets the variables to be used with the screen-space ambient occlusion (SSAO) post-process effect. See [Environment] for more details.
 			</description>
@@ -1489,13 +1486,10 @@
 		<method name="environment_set_ssao_quality">
 			<return type="void" />
 			<param index="0" name="quality" type="int" enum="RenderingServer.EnvironmentSSAOQuality" />
-			<param index="1" name="half_size" type="bool" />
-			<param index="2" name="adaptive_target" type="float" />
-			<param index="3" name="blur_passes" type="int" />
-			<param index="4" name="fadeout_from" type="float" />
-			<param index="5" name="fadeout_to" type="float" />
+			<param index="1" name="denoise_passes" type="int" />
+			<param index="2" name="bent_normals" type="bool" />
 			<description>
-				Sets the quality level of the screen-space ambient occlusion (SSAO) post-process effect. See [Environment] for more details.
+				Sets the quality level of the screen-space ambient occlusion (SSAO) post-process effect, the number of edge-aware denoising passes applied to it (between [code]0[/code] and [code]3[/code]), and whether bent normals are computed. See [member ProjectSettings.rendering/environment/ssao/quality], [member ProjectSettings.rendering/environment/ssao/denoise_passes] and [member ProjectSettings.rendering/environment/ssao/bent_normals] for more details.
 			</description>
 		</method>
 		<method name="environment_set_ssil_quality">
@@ -5629,7 +5623,7 @@
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering methods.
 		</constant>
 		<constant name="VIEWPORT_DEBUG_DRAW_SSAO" value="12" enum="ViewportDebugDraw">
-			Draws the screen space ambient occlusion texture instead of the scene so that you can clearly see how it is affecting objects. In order for this display mode to work, you must have [member Environment.ssao_enabled] set in your [WorldEnvironment].
+			Draws the screen space ambient occlusion visibility term instead of the scene so that you can clearly see how it is affecting objects. In order for this display mode to work, you must have [member Environment.ssao_enabled] set in your [WorldEnvironment].
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="VIEWPORT_DEBUG_DRAW_SSIL" value="13" enum="ViewportDebugDraw">
@@ -5688,6 +5682,10 @@
 		<constant name="VIEWPORT_DEBUG_DRAW_INTERNAL_BUFFER" value="26" enum="ViewportDebugDraw">
 			Internal buffer is drawn instead of regular scene so you can see the per-pixel output that will be used by post-processing effects.
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering methods.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_SSAO_BENT_NORMALS" value="29" enum="ViewportDebugDraw">
+			Draws the view space bent normals computed by screen-space ambient occlusion instead of the scene. In order for this display mode to work, you must have [member Environment.ssao_enabled] set in your [WorldEnvironment] and [member ProjectSettings.rendering/environment/ssao/bent_normals] enabled.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.
@@ -5853,20 +5851,20 @@
 		<constant name="ENV_SSR_ROUGHNESS_QUALITY_HIGH" value="3" enum="EnvironmentSSRRoughnessQuality">
 			High quality of roughness filter for screen-space reflections. This is the slowest option.
 		</constant>
-		<constant name="ENV_SSAO_QUALITY_VERY_LOW" value="0" enum="EnvironmentSSAOQuality">
-			Lowest quality of screen-space ambient occlusion.
+		<constant name="ENV_SSAO_QUALITY_LOW" value="0" enum="EnvironmentSSAOQuality">
+			Lowest quality of screen-space ambient occlusion: 1 slice with 2 steps per side (4 samples per pixel). This is the fastest option.
 		</constant>
-		<constant name="ENV_SSAO_QUALITY_LOW" value="1" enum="EnvironmentSSAOQuality">
-			Low quality screen-space ambient occlusion.
+		<constant name="ENV_SSAO_QUALITY_MEDIUM" value="1" enum="EnvironmentSSAOQuality">
+			Medium quality screen-space ambient occlusion: 2 slices with 2 steps per side (8 samples per pixel).
 		</constant>
-		<constant name="ENV_SSAO_QUALITY_MEDIUM" value="2" enum="EnvironmentSSAOQuality">
-			Medium quality screen-space ambient occlusion.
+		<constant name="ENV_SSAO_QUALITY_HIGH" value="2" enum="EnvironmentSSAOQuality">
+			High quality screen-space ambient occlusion: 3 slices with 3 steps per side (18 samples per pixel).
 		</constant>
-		<constant name="ENV_SSAO_QUALITY_HIGH" value="3" enum="EnvironmentSSAOQuality">
-			High quality screen-space ambient occlusion.
+		<constant name="ENV_SSAO_QUALITY_ULTRA" value="3" enum="EnvironmentSSAOQuality">
+			Highest quality screen-space ambient occlusion: 9 slices with 3 steps per side (54 samples per pixel). This is the slowest option.
 		</constant>
-		<constant name="ENV_SSAO_QUALITY_ULTRA" value="4" enum="EnvironmentSSAOQuality">
-			Highest quality screen-space ambient occlusion. Uses the adaptive target setting which can be dynamically adjusted to smoothly balance performance and visual quality.
+		<constant name="ENV_SSAO_QUALITY_MAX" value="4" enum="EnvironmentSSAOQuality">
+			Represents the size of the [enum EnvironmentSSAOQuality] enum.
 		</constant>
 		<constant name="ENV_SSIL_QUALITY_VERY_LOW" value="0" enum="EnvironmentSSILQuality">
 			Lowest quality of screen-space indirect lighting.
