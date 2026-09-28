@@ -2001,8 +2001,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	p_render_data->scene_data->emissive_exposure_normalization = -1.0;
 
-	// Screen probes need VoxelGI and a single view, and are not used together with SDFGI.
-	bool using_screen_probes = !is_reflection_probe && using_voxelgi && !using_sdfgi && p_render_data->scene_data->view_count == 1 && RendererRD::GI::is_using_screen_probes();
+	// Screen probes need exactly one of VoxelGI/SDFGI and a single view. The VoxelGI path is
+	// additionally gated by the (VoxelGI-named) project setting; the SDFGI path is gated purely
+	// by the Environment's own sdfgi_screen_probes_enabled below in GI::process_gi(), since it
+	// is a distinct, per-Environment-controlled experimental feature.
+	bool using_voxel_gi_screen_probes = !is_reflection_probe && using_voxelgi && !using_sdfgi && p_render_data->scene_data->view_count == 1 && RendererRD::GI::is_using_screen_probes();
+	bool using_sdfgi_screen_probes = !is_reflection_probe && using_sdfgi && !using_voxelgi && p_render_data->scene_data->view_count == 1;
+	bool using_screen_probes = using_voxel_gi_screen_probes || using_sdfgi_screen_probes;
 
 	RD::get_singleton()->draw_command_begin_label("Render Setup");
 

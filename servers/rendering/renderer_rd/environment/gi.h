@@ -590,7 +590,7 @@ private:
 
 			float sky_irradiance_border_size[2];
 			uint32_t store_ambient_texture;
-			uint32_t pad0;
+			uint32_t rc_max_oct_size; // runtime quality cap; see rc_oct_size() in sdfgi_radiance_cascades.glsl
 		};
 
 		SdfgiRadianceCascadesShaderRD radiance_cascades;

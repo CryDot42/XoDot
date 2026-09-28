@@ -1622,7 +1622,7 @@ void GI::SDFGI::update_probes_radiance_cascades(RID p_env, SkyRD::Sky *p_sky) {
 	push_constant.world_offset[1] = 0;
 	push_constant.world_offset[2] = 0;
 	push_constant.store_ambient_texture = RendererSceneRenderRD::get_singleton()->environment_get_volumetric_fog_enabled(p_env);
-	push_constant.pad0 = 0;
+	push_constant.rc_max_oct_size = rc_max_oct_size;
 
 	const float sky_irradiance_border_size = p_sky != nullptr ? p_sky->uv_border_size : 0.0f;
 	push_constant.sky_irradiance_border_size[0] = sky_irradiance_border_size;

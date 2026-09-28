@@ -124,7 +124,7 @@ layout(push_constant, std430) uniform Params {
 
 	vec2 sky_irradiance_border_size;
 	uint store_ambient_texture;
-	uint pad0;
+	uint rc_max_oct_size; // runtime quality cap (<= compile-time RC_MAX_OCT_SIZE, which bounds the buffers)
 }
 params;
 
@@ -132,7 +132,10 @@ const float PI = 3.14159265f;
 
 uint rc_oct_size(uint p_cascade) {
 	uint size = params.base_oct_size << (p_cascade * params.angular_branching_log2);
-	return clamp(size, params.base_oct_size, uint(RC_MAX_OCT_SIZE));
+	// The compile-time RC_MAX_OCT_SIZE is a hard cap (it sizes the trace/merge/SH buffers, see
+	// RC_MAX_ANGULAR_TEXELS above); params.rc_max_oct_size is the user-facing quality knob and
+	// must never exceed it, but is free to be lower to cut cost without recompiling the shader.
+	return clamp(size, params.base_oct_size, min(params.rc_max_oct_size, uint(RC_MAX_OCT_SIZE)));
 }
 
 vec3 rc_direction(uint p_local_index, uint p_oct_size) {
