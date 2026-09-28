@@ -804,6 +804,25 @@ void process_gi(ivec2 pos, vec3 vertex, inout vec4 ambient_light, inout vec4 ref
 
 #ifdef USE_SDFGI
 		sdfgi_process(vertex, normal, reflection, roughness, ambient_light, reflection_light);
+
+#ifdef USE_SCREEN_PROBES
+		// Experimental: screen-space probes as a near-camera detail layer over SDFGI's
+		// world-space probes (Radiance Cascades or the legacy integrator), the same role
+		// they already play over VoxelGI below. screen_probes_gather() is the confidence
+		// gate: it only reports success where an on-screen probe actually matches this
+		// surface, so off-screen/disoccluded/low-confidence pixels keep SDFGI's own
+		// result untouched. screen_probes_temporal() must run every pixel regardless,
+		// since it also writes this frame's history/reprojection buffers as a side effect.
+		{
+			vec4 probe_ambient;
+			bool use_probes = screen_probes_gather(pos, vertex, normal, probe_ambient);
+			vec4 amb_accum = use_probes ? probe_ambient : ambient_light;
+			amb_accum = screen_probes_temporal(pos, vertex, normal, view_depth, dynamic_object, amb_accum);
+			if (use_probes) {
+				ambient_light = amb_accum;
+			}
+		}
+#endif
 #endif
 
 #ifdef USE_VOXEL_GI_INSTANCES

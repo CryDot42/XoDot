@@ -4422,6 +4422,9 @@ void GI::init(SkyRD *p_sky) {
 			variants.push_back(ShaderRD::VariantDefine(group, vrs_base + "\n#define USE_SDFGI\n\n#define USE_VOXEL_GI_INSTANCES\n#define SAMPLE_VOXEL_GI_NEAREST\n", default_enabled)); // MODE_COMBINED_WITHOUT_SAMPLER
 			variants.push_back(ShaderRD::VariantDefine(group, vrs_base + "\n#define USE_VOXEL_GI_INSTANCES\n#define USE_SCREEN_PROBES\n", default_enabled)); // MODE_VOXEL_GI_SCREEN_PROBES
 			variants.push_back(ShaderRD::VariantDefine(group, vrs_base + "\n#define USE_VOXEL_GI_INSTANCES\n#define SAMPLE_VOXEL_GI_NEAREST\n#define USE_SCREEN_PROBES\n", default_enabled)); // MODE_VOXEL_GI_SCREEN_PROBES_WITHOUT_SAMPLER
+			// Experimental (see sdfgi_screen_probes.glsl): disabled by default, only reachable when an
+			// Environment has both SDFGI and the experimental screen probes flag turned on.
+			variants.push_back(ShaderRD::VariantDefine(group, vrs_base + "\n#define USE_SDFGI\n#define USE_SCREEN_PROBES\n", false)); // MODE_SDFGI_SCREEN_PROBES
 		}
 
 		shader.initialize(variants, defines);

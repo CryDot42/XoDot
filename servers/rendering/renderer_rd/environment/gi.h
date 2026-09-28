@@ -946,6 +946,9 @@ public:
 		MODE_COMBINED_WITHOUT_SAMPLER,
 		MODE_VOXEL_GI_SCREEN_PROBES,
 		MODE_VOXEL_GI_SCREEN_PROBES_WITHOUT_SAMPLER,
+		// Experimental: screen probes over SDFGI alone (no VoxelGI instances), see
+		// sdfgi_screen_probes.glsl and the USE_SCREEN_PROBES block under USE_SDFGI in gi.glsl.
+		MODE_SDFGI_SCREEN_PROBES,
 		MODE_MAX
 	};
 
