@@ -74,6 +74,8 @@ void LandscapeSpline3D::apply_type_defaults() {
 			width = 6.0;
 			depth = 0.0;
 			flow_speed = 0.0;
+			flow_auto_width = false;
+			flow_reference_width = width;
 			sample_spacing = 2.0;
 			lateral_spacing = 3.0;
 			skirt_depth = 0.3;
@@ -92,6 +94,8 @@ void LandscapeSpline3D::apply_type_defaults() {
 			width = 12.0;
 			depth = 2.5;
 			flow_speed = 1.5;
+			flow_auto_width = false;
+			flow_reference_width = width;
 			sample_spacing = 3.0;
 			lateral_spacing = 3.0;
 			water_overlap = 2.0;
@@ -111,6 +115,8 @@ void LandscapeSpline3D::apply_type_defaults() {
 			width = 3.0;
 			depth = 0.7;
 			flow_speed = 2.5;
+			flow_auto_width = false;
+			flow_reference_width = width;
 			sample_spacing = 1.5;
 			lateral_spacing = 1.0;
 			water_overlap = 1.0;
@@ -130,6 +136,8 @@ void LandscapeSpline3D::apply_type_defaults() {
 			width = 0.0;
 			depth = 5.0;
 			flow_speed = 0.0;
+			flow_auto_width = false;
+			flow_reference_width = width;
 			sample_spacing = 4.0;
 			water_overlap = 3.0;
 			terrain_priority = 0;
@@ -320,6 +328,25 @@ void LandscapeSpline3D::set_depth(float p_depth) {
 
 void LandscapeSpline3D::set_flow_speed(float p_speed) {
 	flow_speed = p_speed;
+}
+
+void LandscapeSpline3D::set_flow_auto_width(bool p_enabled) {
+	flow_auto_width = p_enabled;
+	chunks_dirty = true;
+}
+
+void LandscapeSpline3D::set_flow_reference_width(float p_width) {
+	flow_reference_width = MAX(p_width, 0.05f);
+	chunks_dirty = true;
+}
+
+// Scales the authored flow speed so that width * speed stays constant (as for an incompressible
+// flow of roughly constant depth): rivers speed up where they narrow, slow down where they widen.
+float LandscapeSpline3D::_effective_flow_speed(const LandscapeSplineSample &p_sample) const {
+	if (!flow_auto_width || p_sample.width <= CMP_EPSILON) {
+		return p_sample.speed;
+	}
+	return p_sample.speed * flow_reference_width / p_sample.width;
 }
 
 void LandscapeSpline3D::set_spline_id(int64_t p_id) {
@@ -763,7 +790,7 @@ Dictionary LandscapeSpline3D::get_surface_info(const Vector3 &p_global_position)
 	info["lateral"] = lateral;
 	info["width"] = type == TYPE_LAKE ? 0.0f : s.width;
 	info["depth"] = type == TYPE_LAKE ? depth : s.depth;
-	info["flow"] = (type == TYPE_RIVER || type == TYPE_STREAM) ? global.basis.xform(s.forward * s.speed) : Vector3();
+	info["flow"] = (type == TYPE_RIVER || type == TYPE_STREAM) ? global.basis.xform(s.forward * _effective_flow_speed(s)) : Vector3();
 	return info;
 }
 
@@ -1041,6 +1068,7 @@ void LandscapeSpline3D::_build_ribbon_chunk(Chunk &r_chunk, Array &r_arrays, Dic
 				const real_t fade_length = MAX(real_t(s.width), real_t(2.0));
 				fade = _spline_smoothstep01(s.distance / fade_length) * _spline_smoothstep01((total_length - s.distance) / fade_length);
 			}
+			const real_t effective_speed = _effective_flow_speed(s);
 			for (int j = 0; j <= n; j++) {
 				const real_t lateral = -extent + extent * 2.0 * real_t(j) / real_t(n);
 				const int v = base + j;
@@ -1049,7 +1077,7 @@ void LandscapeSpline3D::_build_ribbon_chunk(Chunk &r_chunk, Array &r_arrays, Dic
 				// U along the flow, V to the right: the binormal cross(normal, tangent) * w must be dP/dV.
 				set_tangent(v, forward_h, -1.0);
 				uw[v] = Vector2(s.distance, lateral);
-				u2w[v] = Vector2(s.speed, 0.0);
+				u2w[v] = Vector2(effective_speed, 0.0);
 				cw[v] = Color(turbulence, float(Math::abs(lateral) / MAX(half, real_t(0.01))), 0.0, fade);
 			}
 		} else {
@@ -1701,7 +1729,7 @@ void LandscapeSpline3D::_validate_property(PropertyInfo &p_property) const {
 	bool hidden = false;
 	if (name == "point_tilts") {
 		hidden = type != TYPE_ROAD;
-	} else if (name == "point_flow_speeds" || name == "flow_speed") {
+	} else if (name == "point_flow_speeds" || name == "flow_speed" || name == "flow_auto_width" || name == "flow_reference_width") {
 		hidden = !channel;
 	} else if (name == "point_widths" || name == "width" || name == "lateral_spacing" || name == "terrain_end_falloff" || name == "chunk_length") {
 		hidden = type == TYPE_LAKE;
@@ -1731,6 +1759,9 @@ void LandscapeSpline3D::_validate_property(PropertyInfo &p_property) const {
 		}
 	}
 	if (name.begins_with("paint_") && name != "paint_layer" && paint_layer < 0) {
+		p_property.usage |= PROPERTY_USAGE_READ_ONLY;
+	}
+	if (name == "flow_reference_width" && !flow_auto_width) {
 		p_property.usage |= PROPERTY_USAGE_READ_ONLY;
 	}
 }
@@ -1791,6 +1822,10 @@ void LandscapeSpline3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_depth"), &LandscapeSpline3D::get_depth);
 	ClassDB::bind_method(D_METHOD("set_flow_speed", "speed"), &LandscapeSpline3D::set_flow_speed);
 	ClassDB::bind_method(D_METHOD("get_flow_speed"), &LandscapeSpline3D::get_flow_speed);
+	ClassDB::bind_method(D_METHOD("set_flow_auto_width", "enabled"), &LandscapeSpline3D::set_flow_auto_width);
+	ClassDB::bind_method(D_METHOD("is_flow_auto_width"), &LandscapeSpline3D::is_flow_auto_width);
+	ClassDB::bind_method(D_METHOD("set_flow_reference_width", "width"), &LandscapeSpline3D::set_flow_reference_width);
+	ClassDB::bind_method(D_METHOD("get_flow_reference_width"), &LandscapeSpline3D::get_flow_reference_width);
 	ClassDB::bind_method(D_METHOD("set_spline_id", "id"), &LandscapeSpline3D::set_spline_id);
 	ClassDB::bind_method(D_METHOD("get_spline_id"), &LandscapeSpline3D::get_spline_id);
 
@@ -1882,6 +1917,8 @@ void LandscapeSpline3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "width", PROPERTY_HINT_RANGE, "0.1,500,0.01,or_greater,suffix:m"), "set_width", "get_width");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "depth", PROPERTY_HINT_RANGE, "0,100,0.01,or_greater,suffix:m"), "set_depth", "get_depth");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "flow_speed", PROPERTY_HINT_RANGE, "-20,20,0.01,suffix:m/s"), "set_flow_speed", "get_flow_speed");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "flow_auto_width"), "set_flow_auto_width", "is_flow_auto_width");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "flow_reference_width", PROPERTY_HINT_RANGE, "0.1,500,0.01,or_greater,suffix:m"), "set_flow_reference_width", "get_flow_reference_width");
 
 	ADD_GROUP("Mesh", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "mesh_enabled"), "set_mesh_enabled", "is_mesh_enabled");

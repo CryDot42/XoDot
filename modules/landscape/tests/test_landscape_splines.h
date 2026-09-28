@@ -614,6 +614,44 @@ TEST_CASE("[SceneTree][Landscape][Splines] Surface queries") {
 	memdelete(river);
 }
 
+TEST_CASE("[SceneTree][Landscape][Splines] Automatic flow speed from width") {
+	LandscapeSpline3D *river = memnew(LandscapeSpline3D);
+	river->set_type(LandscapeSpline3D::TYPE_RIVER);
+	river->apply_type_defaults();
+	river->set_flow_speed(2.0);
+	river->set_flow_reference_width(10.0);
+	PackedVector3Array points;
+	points.push_back(Vector3(0, 5, 0));
+	points.push_back(Vector3(100, 5, 0));
+	river->set_points(points);
+	river->set_point_width(0, 10.0);
+	river->set_point_width(1, 5.0); // Narrows to half the reference width.
+	SceneTree::get_singleton()->get_root()->add_child(river);
+
+	// Disabled by default: the authored speed applies everywhere, regardless of width.
+	CHECK(Vector3(river->get_surface_info(Vector3(0, 3, 0))["flow"]).is_equal_approx(Vector3(2, 0, 0)));
+	CHECK(Vector3(river->get_surface_info(Vector3(100, 3, 0))["flow"]).is_equal_approx(Vector3(2, 0, 0)));
+
+	river->set_flow_auto_width(true);
+	// At the reference width, the speed is unchanged.
+	CHECK(Vector3(river->get_surface_info(Vector3(0, 3, 0))["flow"]).is_equal_approx(Vector3(2, 0, 0)));
+	// Half the reference width: twice the speed, keeping width * speed constant (continuity).
+	CHECK(Vector3(river->get_surface_info(Vector3(100, 3, 0))["flow"]).is_equal_approx(Vector3(4, 0, 0)));
+
+	// The mesh's UV2 (read by the water shader for flow mapping) carries the same speed.
+	const Ref<ArrayMesh> mesh = river->create_mesh();
+	const Array arrays = mesh->surface_get_arrays(0);
+	const PackedVector2Array uv2s = arrays[Mesh::ARRAY_TEX_UV2];
+	real_t max_speed = 0.0;
+	for (const Vector2 &uv2 : uv2s) {
+		max_speed = MAX(max_speed, uv2.x);
+	}
+	CHECK(uv2s[0].x == doctest::Approx(2.0));
+	CHECK(max_speed == doctest::Approx(4.0));
+
+	memdelete(river);
+}
+
 TEST_CASE("[Landscape][Splines] Built-in materials") {
 	Ref<LandscapeWaterMaterial> water;
 	water.instantiate();

@@ -285,6 +285,12 @@
 		<member name="depth" type="float" setter="set_depth" getter="get_depth" default="1.5">
 			Depth of new points (depth of the channel below the water of rivers and streams), and depth of lakes below their water level.
 		</member>
+		<member name="flow_auto_width" type="bool" setter="set_flow_auto_width" getter="is_flow_auto_width" default="false">
+			If [code]true[/code], [member flow_speed] and [member point_flow_speeds] are only the speed at [member flow_reference_width]: the water speeds up where the river or stream narrows and slows down where it widens, keeping [code]width × speed[/code] roughly constant (as for an incompressible flow of steady depth).
+		</member>
+		<member name="flow_reference_width" type="float" setter="set_flow_reference_width" getter="get_flow_reference_width" default="12.0">
+			Width at which the authored flow speed applies as-is when [member flow_auto_width] is enabled.
+		</member>
 		<member name="flow_speed" type="float" setter="set_flow_speed" getter="get_flow_speed" default="1.5">
 			Speed of the water of new points, in meters per second.
 		</member>

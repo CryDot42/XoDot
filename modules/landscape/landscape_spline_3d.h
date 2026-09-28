@@ -73,6 +73,8 @@ private:
 	float width = 6.0; // Defaults of new points.
 	float depth = 1.5;
 	float flow_speed = 1.5;
+	bool flow_auto_width = false;
+	float flow_reference_width = 12.0;
 	int64_t spline_id = 0;
 
 	// Mesh.
@@ -149,6 +151,7 @@ private:
 	void _build_chunk(Chunk &r_chunk);
 	void _build_ribbon_chunk(Chunk &r_chunk, Array &r_arrays, Dictionary &r_lods) const;
 	void _build_lake_chunk(Chunk &r_chunk, Array &r_arrays) const;
+	float _effective_flow_speed(const LandscapeSplineSample &p_sample) const;
 	void _update_chunk_instances();
 	void _process_chunks();
 	bool _get_view_position(Vector3 &r_global) const;
@@ -208,6 +211,10 @@ public:
 	float get_depth() const { return depth; }
 	void set_flow_speed(float p_speed);
 	float get_flow_speed() const { return flow_speed; }
+	void set_flow_auto_width(bool p_enabled);
+	bool is_flow_auto_width() const { return flow_auto_width; }
+	void set_flow_reference_width(float p_width);
+	float get_flow_reference_width() const { return flow_reference_width; }
 	void set_spline_id(int64_t p_id);
 	int64_t get_spline_id() const { return spline_id; }
 	void regenerate_spline_id();
