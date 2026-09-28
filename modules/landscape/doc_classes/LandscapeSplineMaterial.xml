@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LandscapeSplineMaterial" inherits="Material" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Base class of the built-in materials of [LandscapeSpline3D].
+	</brief_description>
+	<description>
+		A material using a built-in shader shared by all its instances, whose uniforms are exposed as properties. See [LandscapeWaterMaterial] and [LandscapeRoadMaterial].
+		In the editor, these materials can be converted to a [ShaderMaterial] (with the same parameters) to customize their shader.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_shader_code" qualifiers="const">
+			<return type="String" />
+			<description>
+				Returns the code of the built-in shader of the material.
+			</description>
+		</method>
+	</methods>
+</class>

@@ -30,6 +30,8 @@
 
 #include "landscape_editor_plugin.h"
 
+#include "../landscape_spline_materials.h"
+
 #include "core/input/input.h"
 #include "core/input/input_event.h"
 #include "core/io/resource_loader.h"
@@ -171,9 +173,17 @@ void LandscapeEditor::_mode_changed(int p_mode) {
 	manage_panel->set_visible(mode == MODE_MANAGE);
 	sculpt_panel->set_visible(mode == MODE_SCULPT);
 	paint_panel->set_visible(mode == MODE_PAINT);
-	brush_panel->set_visible(mode != MODE_MANAGE);
+	brush_panel->set_visible(mode == MODE_SCULPT || mode == MODE_PAINT);
+	splines_panel->set_visible(mode == MODE_SPLINES);
+	if (mode != MODE_SPLINES && spline_draw->is_pressed()) {
+		spline_draw->set_pressed(false);
+	}
 	_update_tool_settings();
 	_update_brush_preview();
+	if (mode == MODE_SPLINES) {
+		_update_spline_list();
+		_update_spline_panel();
+	}
 }
 
 void LandscapeEditor::_tool_selected(LandscapeBrush::Tool p_tool) {
@@ -619,6 +629,18 @@ void LandscapeEditor::_update_brush_preview() {
 		landscape->set_brush_preview(false);
 		return;
 	}
+	if (mode == MODE_SPLINES) {
+		// Where the next point of the spline is drawn, with its width.
+		LandscapeSpline3D *spline = _get_spline();
+		if (!spline || !spline_draw->is_pressed()) {
+			landscape->set_brush_preview(false);
+			return;
+		}
+		const bool water = spline->get_type() != LandscapeSpline3D::TYPE_ROAD;
+		const real_t radius = spline->get_type() == LandscapeSpline3D::TYPE_LAKE ? 2.0 : MAX(spline->get_width() * 0.5, real_t(0.5));
+		landscape->set_brush_preview(true, cursor_local, radius, 0.0, water ? Color(0.35, 0.72, 1.0) : Color(1.0, 0.62, 0.25));
+		return;
+	}
 	Color color = Color(0.3, 0.62, 1.0);
 	const LandscapeBrush::Tool tool = _get_current_tool();
 	if (LandscapeBrush::is_paint_tool(tool)) {
@@ -757,7 +779,340 @@ void LandscapeEditor::_cancel_stroke() {
 	}
 }
 
+/* Splines */
+
+LandscapeSpline3D *LandscapeEditor::_get_spline() const {
+	LandscapeSpline3D *spline = ObjectDB::get_instance<LandscapeSpline3D>(spline_id);
+	return (spline && spline->is_inside_tree()) ? spline : nullptr;
+}
+
+void LandscapeEditor::_select_spline(LandscapeSpline3D *p_spline) {
+	EditorSelection *selection = EditorNode::get_singleton()->get_editor_selection();
+	selection->clear();
+	selection->add_node(p_spline);
+}
+
+void LandscapeEditor::_create_spline(int p_type) {
+	if (!_validate_landscape()) {
+		EditorNode::get_singleton()->show_warning(TTR("Select a Landscape3D to add splines to it."));
+		return;
+	}
+	static const char *names[] = { "Road", "River", "Stream", "Lake" };
+	const LandscapeSpline3D::SplineType type = LandscapeSpline3D::SplineType(CLAMP(p_type, 0, 3));
+	LandscapeSpline3D *spline = memnew(LandscapeSpline3D);
+	spline->set_name(names[type]);
+	spline->set_type(type);
+	spline->apply_type_defaults();
+	// A material of its own, ready to be tweaked in the inspector.
+	if (type == LandscapeSpline3D::TYPE_ROAD) {
+		Ref<LandscapeRoadMaterial> material;
+		material.instantiate();
+		spline->set_material(material);
+	} else {
+		Ref<LandscapeWaterMaterial> material;
+		material.instantiate();
+		if (type == LandscapeSpline3D::TYPE_STREAM) {
+			material->set("clarity", 1.5);
+			material->set("normal_scale", 2.5);
+			material->set("detail_scale", 0.8);
+			material->set("flow_foam", 1.4);
+		} else if (type == LandscapeSpline3D::TYPE_LAKE) {
+			material->set("wave_height", 0.05);
+			material->set("clarity", 5.0);
+			material->set("wind_velocity", Vector2(0.4, 0.2));
+		}
+		spline->set_material(material);
+	}
+
+	Node *owner = EditorNode::get_singleton()->get_edited_scene();
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(vformat(TTR("Create Landscape %s"), TTR(names[type])), UndoRedo::MERGE_DISABLE, landscape);
+	undo_redo->add_do_method(landscape, "add_child", spline, true);
+	undo_redo->add_do_method(spline, "set_owner", owner);
+	undo_redo->add_do_reference(spline);
+	undo_redo->add_undo_method(landscape, "remove_child", spline);
+	undo_redo->commit_action();
+
+	spline_id = spline->get_instance_id();
+	_select_spline(spline);
+	// Start drawing its points right away.
+	spline_draw->set_pressed(true);
+	_update_spline_list();
+	_update_spline_panel();
+}
+
+void LandscapeEditor::_update_spline_list() {
+	if (!spline_list) {
+		return;
+	}
+	uint64_t hash = hash_murmur3_one_64(uint64_t(spline_id));
+	const bool valid = _validate_landscape();
+	if (valid) {
+		for (LandscapeSpline3D *spline : landscape->get_splines()) {
+			hash = hash_murmur3_one_64(uint64_t(spline->get_instance_id()), hash);
+			hash = hash_murmur3_one_64(String(spline->get_name()).hash(), hash);
+			hash = hash_murmur3_one_64(uint64_t(spline->get_type()), hash);
+		}
+	}
+	if (hash == spline_list_hash) {
+		return;
+	}
+	spline_list_hash = hash;
+	spline_list->clear();
+	if (!valid) {
+		return;
+	}
+	static const char *type_names[] = { "Road", "River", "Stream", "Lake" };
+	for (LandscapeSpline3D *spline : landscape->get_splines()) {
+		const int index = spline_list->add_item(vformat("%s (%s)", spline->get_name(), TTR(type_names[spline->get_type()])), get_editor_theme_icon(SNAME("LandscapeSpline3D")));
+		spline_list->set_item_metadata(index, spline->get_instance_id());
+		if (spline->get_instance_id() == spline_id) {
+			spline_list->select(index);
+		}
+	}
+}
+
+void LandscapeEditor::_spline_list_selected(int p_index) {
+	LandscapeSpline3D *spline = ObjectDB::get_instance<LandscapeSpline3D>(ObjectID(uint64_t(spline_list->get_item_metadata(p_index))));
+	if (spline) {
+		spline_id = spline->get_instance_id();
+		_select_spline(spline);
+	}
+}
+
+Vector<int> LandscapeEditor::_get_selected_points() const {
+	LandscapeSpline3D *spline = _get_spline();
+	if (!spline || !Node3DEditor::get_singleton()) {
+		return Vector<int>();
+	}
+	// The subgizmo selection belongs to the selected node.
+	const List<Node *> &selected = EditorNode::get_singleton()->get_editor_selection()->get_top_selected_node_list();
+	if (selected.size() != 1 || selected.front()->get() != spline) {
+		return Vector<int>();
+	}
+	Vector<int> points = Node3DEditor::get_singleton()->get_subgizmo_selection();
+	points.sort();
+	return points;
+}
+
+void LandscapeEditor::_update_spline_panel() {
+	if (!splines_panel) {
+		return;
+	}
+	LandscapeSpline3D *spline = _get_spline();
+	point_selection = _get_selected_points();
+	if (!spline) {
+		spline_info->set_text(_validate_landscape() ? TTR("Create a spline, or select one in the list or in the viewport.") : TTR("Select a Landscape3D, or a LandscapeSpline3D under it."));
+		point_panel->set_visible(false);
+		spline_draw->set_disabled(true);
+		return;
+	}
+	spline_draw->set_disabled(false);
+	const Dictionary stats = spline->get_statistics();
+	String info = vformat(TTR("%s: %d points, %s m, %d / %d chunks built (%s triangles)."), spline->get_name(), spline->get_point_count(), String::num(double(stats["length"]), 1), int(stats["chunks_built"]), int(stats["chunks"]), _format_count(uint64_t(int64_t(stats["triangles"]))));
+	if (!spline->get_landscape()) {
+		info += "\n" + TTR("Not under a Landscape3D: the terrain isn't modified.");
+	}
+	spline_info->set_text(info);
+	const LandscapeSpline3D::SplineType type = spline->get_type();
+	spline_downhill->set_visible(type == LandscapeSpline3D::TYPE_RIVER || type == LandscapeSpline3D::TYPE_STREAM);
+
+	// Attributes of the selected points (the first one is shown, edits apply to all of them).
+	point_panel->set_visible(!point_selection.is_empty() && type != LandscapeSpline3D::TYPE_LAKE);
+	if (point_selection.is_empty() || point_selection[0] >= spline->get_point_count()) {
+		return;
+	}
+	const int first = point_selection[0];
+	updating_points = true;
+	point_label->set_text(point_selection.size() == 1 ? vformat(TTR("Point %d"), first) : vformat(TTR("%d Points"), point_selection.size()));
+	point_width->set_value(spline->get_point_width(first));
+	point_depth->set_value(spline->get_point_depth(first));
+	point_tilt->set_value(Math::rad_to_deg(spline->get_point_tilt(first)));
+	point_speed->set_value(spline->get_point_flow_speed(first));
+	point_depth_row->set_visible(type != LandscapeSpline3D::TYPE_ROAD);
+	point_speed_row->set_visible(type != LandscapeSpline3D::TYPE_ROAD);
+	point_tilt_row->set_visible(type == LandscapeSpline3D::TYPE_ROAD);
+	updating_points = false;
+}
+
+void LandscapeEditor::_point_attribute_changed(double p_value) {
+	LandscapeSpline3D *spline = _get_spline();
+	if (updating_points || !spline || point_selection.is_empty()) {
+		return;
+	}
+	const Dictionary before = _snapshot_spline(spline);
+	for (int index : point_selection) {
+		if (index >= spline->get_point_count()) {
+			continue;
+		}
+		spline->set_point_width(index, point_width->get_value());
+		spline->set_point_depth(index, point_depth->get_value());
+		spline->set_point_tilt(index, Math::deg_to_rad(point_tilt->get_value()));
+		spline->set_point_flow_speed(index, point_speed->get_value());
+	}
+	_commit_spline(spline, TTR("Set Landscape Spline Point Attributes"), before, UndoRedo::MERGE_ENDS);
+}
+
+Dictionary LandscapeEditor::_snapshot_spline(LandscapeSpline3D *p_spline) const {
+	Dictionary state;
+	state["transform"] = p_spline->get_transform();
+	state["points"] = p_spline->get_points();
+	state["point_widths"] = p_spline->get_point_widths();
+	state["point_depths"] = p_spline->get_point_depths();
+	state["point_tilts"] = p_spline->get_point_tilts();
+	state["point_flow_speeds"] = p_spline->get_point_flow_speeds();
+	return state;
+}
+
+void LandscapeEditor::_commit_spline(LandscapeSpline3D *p_spline, const String &p_action, const Dictionary &p_before, UndoRedo::MergeMode p_merge) {
+	// The change is already applied: record the properties that changed.
+	const Dictionary after = _snapshot_spline(p_spline);
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(p_action, p_merge, p_spline);
+	static const char *properties[] = { "transform", "points", "point_widths", "point_depths", "point_tilts", "point_flow_speeds" };
+	for (const char *property : properties) {
+		if (p_before[property] != after[property]) {
+			undo_redo->add_do_property(p_spline, property, after[property]);
+			undo_redo->add_undo_property(p_spline, property, p_before[property]);
+		}
+	}
+	undo_redo->add_do_method(this, "_update_spline_panel");
+	undo_redo->add_undo_method(this, "_update_spline_panel");
+	undo_redo->commit_action(false);
+	_update_spline_panel();
+}
+
+void LandscapeEditor::_add_spline_point(LandscapeSpline3D *p_spline, const Vector3 &p_global) {
+	const Dictionary before = _snapshot_spline(p_spline);
+	if (p_spline->get_point_count() == 0) {
+		// The node starts at the first point. For lakes, this is the level of the water.
+		Transform3D xform = p_spline->get_global_transform();
+		xform.origin = p_global;
+		p_spline->set_global_transform(xform);
+	}
+	const Vector3 local = p_spline->get_global_transform().affine_inverse().xform(p_global);
+	// Clicking on the spline inserts a point there, elsewhere the point is added at the end.
+	int insert = -1;
+	const LocalVector<LandscapeSplineSample> &samples = p_spline->get_samples();
+	int segment;
+	real_t t;
+	real_t distance;
+	if (p_spline->get_point_count() >= 2 && LandscapeSplineCurve::get_closest(samples, local, segment, t, distance)) {
+		const LandscapeSplineSample &sample = samples[segment];
+		const real_t reach = p_spline->get_type() == LandscapeSpline3D::TYPE_LAKE ? real_t(2.0) : MAX(real_t(sample.width) * 0.5, real_t(2.0));
+		if (distance <= reach) {
+			insert = sample.segment + 1;
+		}
+	}
+	p_spline->add_point(local, insert);
+	_commit_spline(p_spline, TTR("Add Landscape Spline Point"), before);
+}
+
+void LandscapeEditor::_spline_action(int p_action) {
+	if (p_action == SPLINE_ACTION_REBUILD) {
+		if (_validate_landscape()) {
+			landscape->rebuild_splines();
+		}
+		return;
+	}
+	LandscapeSpline3D *spline = _get_spline();
+	if (!spline) {
+		return;
+	}
+	const Dictionary before = _snapshot_spline(spline);
+	String action;
+	switch (p_action) {
+		case SPLINE_ACTION_DELETE_POINTS: {
+			Vector<int> selection = _get_selected_points();
+			if (selection.is_empty()) {
+				return;
+			}
+			selection.sort();
+			for (int i = selection.size() - 1; i >= 0; i--) {
+				if (selection[i] < spline->get_point_count()) {
+					spline->remove_point(selection[i]);
+				}
+			}
+			Node3DEditor::get_singleton()->clear_subgizmo_selection(spline);
+			action = TTR("Delete Landscape Spline Points");
+		} break;
+		case SPLINE_ACTION_SNAP: {
+			if (!spline->get_landscape()) {
+				return;
+			}
+			spline->snap_to_terrain(0.0);
+			action = spline->get_type() == LandscapeSpline3D::TYPE_LAKE ? TTR("Level Lake With Its Shore") : TTR("Snap Landscape Spline to Terrain");
+		} break;
+		case SPLINE_ACTION_REVERSE: {
+			spline->reverse();
+			action = TTR("Reverse Landscape Spline");
+		} break;
+		case SPLINE_ACTION_DOWNHILL: {
+			spline->make_downhill(0.0);
+			action = TTR("Make Landscape Spline Downhill");
+		} break;
+		default:
+			return;
+	}
+	_commit_spline(spline, action, before);
+}
+
+void LandscapeEditor::_spline_draw_toggled(bool p_pressed) {
+	if (!p_pressed) {
+		cursor_valid = false;
+	}
+	_update_brush_preview();
+}
+
+void LandscapeEditor::_spline_snap_toggled(bool p_pressed) {
+	LandscapeSplineGizmoPlugin::snap_moved_points = p_pressed;
+}
+
+EditorPlugin::AfterGUIInput LandscapeEditor::_spline_gui_input(Camera3D *p_camera, const Ref<InputEvent> &p_event) {
+	LandscapeSpline3D *spline = _get_spline();
+	Ref<InputEventKey> k = p_event;
+	if (k.is_valid() && k->is_pressed() && !k->is_echo()) {
+		const Key key = k->get_keycode();
+		if (spline_draw->is_pressed() && (key == Key::ESCAPE || key == Key::ENTER || key == Key::KP_ENTER)) {
+			spline_draw->set_pressed(false);
+			return EditorPlugin::AFTER_GUI_INPUT_STOP;
+		}
+		if ((key == Key::KEY_DELETE || key == Key::BACKSPACE) && !_get_selected_points().is_empty()) {
+			// Delete the selected points, not the node.
+			_spline_action(SPLINE_ACTION_DELETE_POINTS);
+			return EditorPlugin::AFTER_GUI_INPUT_STOP;
+		}
+	}
+	if (!spline || !spline_draw->is_pressed() || !_validate_landscape() || landscape->get_data().is_null() || !landscape->get_data()->is_valid()) {
+		return EditorPlugin::AFTER_GUI_INPUT_PASS;
+	}
+
+	Ref<InputEventMouseMotion> mm = p_event;
+	if (mm.is_valid()) {
+		_update_cursor(p_camera, mm->get_position());
+		_update_brush_preview();
+		return EditorPlugin::AFTER_GUI_INPUT_PASS;
+	}
+	Ref<InputEventMouseButton> mb = p_event;
+	if (mb.is_valid() && mb->is_pressed()) {
+		if (mb->get_button_index() == MouseButton::LEFT && !mb->is_alt_pressed()) {
+			if (_update_cursor(p_camera, mb->get_position())) {
+				_add_spline_point(spline, landscape->local_to_global(cursor_local));
+			}
+			return EditorPlugin::AFTER_GUI_INPUT_STOP;
+		}
+		if (mb->get_button_index() == MouseButton::RIGHT) {
+			spline_draw->set_pressed(false);
+			return EditorPlugin::AFTER_GUI_INPUT_STOP;
+		}
+	}
+	return EditorPlugin::AFTER_GUI_INPUT_PASS;
+}
+
 EditorPlugin::AfterGUIInput LandscapeEditor::forward_3d_gui_input(Camera3D *p_camera, const Ref<InputEvent> &p_event) {
+	if (mode == MODE_SPLINES) {
+		return _spline_gui_input(p_camera, p_event);
+	}
 	if (!_validate_landscape() || mode == MODE_MANAGE || landscape->get_data().is_null() || !landscape->get_data()->is_valid()) {
 		return EditorPlugin::AFTER_GUI_INPUT_PASS;
 	}
@@ -829,10 +1184,31 @@ void LandscapeEditor::edit(Landscape3D *p_landscape) {
 	selected_layer = 0;
 	_update_layer_list();
 	_update_info();
+	spline_list_hash = 0;
+	_update_spline_list();
 	if (landscape && (landscape->get_data().is_null() || !landscape->get_data()->is_valid())) {
 		// Nothing to sculpt yet, start with the creation settings.
 		mode_tabs->set_current_tab(MODE_MANAGE);
 	}
+}
+
+void LandscapeEditor::edit_spline(LandscapeSpline3D *p_spline) {
+	const ObjectID new_id = p_spline ? p_spline->get_instance_id() : ObjectID();
+	if (new_id != spline_id && spline_draw->is_pressed()) {
+		spline_draw->set_pressed(false);
+	}
+	spline_id = new_id;
+	point_selection.clear();
+	if (p_spline && p_spline->get_landscape()) {
+		// The landscape of the spline is edited, in the Splines mode.
+		_validate_landscape();
+		if (landscape != p_spline->get_landscape()) {
+			edit(p_spline->get_landscape());
+		}
+		mode_tabs->set_current_tab(MODE_SPLINES);
+	}
+	_update_spline_list();
+	_update_spline_panel();
 }
 
 void LandscapeEditor::_notification(int p_what) {
@@ -851,6 +1227,17 @@ void LandscapeEditor::_notification(int p_what) {
 		} break;
 
 		case NOTIFICATION_PROCESS: {
+			if (mode == MODE_SPLINES) {
+				spline_timer -= get_process_delta_time();
+				if (spline_timer <= 0.0) {
+					// Points may be selected in the viewport and splines added from the scene tree.
+					spline_timer = 0.2;
+					_update_spline_list();
+					if (_get_selected_points() != point_selection) {
+						_update_spline_panel();
+					}
+				}
+			}
 			if (!_validate_landscape()) {
 				break;
 			}
@@ -907,6 +1294,7 @@ void LandscapeEditor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_apply_regions", "data", "regions"), &LandscapeEditor::_apply_regions);
 	ClassDB::bind_method(D_METHOD("_update_layer_list"), &LandscapeEditor::_update_layer_list);
 	ClassDB::bind_method(D_METHOD("_update_info"), &LandscapeEditor::_update_info);
+	ClassDB::bind_method(D_METHOD("_update_spline_panel"), &LandscapeEditor::_update_spline_panel);
 }
 
 LandscapeEditor::LandscapeEditor() {
@@ -930,6 +1318,7 @@ LandscapeEditor::LandscapeEditor() {
 	mode_tabs->add_tab(TTR("Manage"));
 	mode_tabs->add_tab(TTR("Sculpt"));
 	mode_tabs->add_tab(TTR("Paint"));
+	mode_tabs->add_tab(TTR("Splines"));
 	mode_tabs->set_clip_tabs(false);
 	mode_tabs->connect("tab_changed", callable_mp(this, &LandscapeEditor::_mode_changed));
 	main_vb->add_child(mode_tabs);
@@ -1096,6 +1485,101 @@ LandscapeEditor::LandscapeEditor() {
 		paint->set_pressed(true);
 	}
 
+	/* Splines */
+	splines_panel = memnew(VBoxContainer);
+	main_vb->add_child(splines_panel);
+	{
+		Label *create_title = memnew(Label(TTR("Create")));
+		create_title->set_theme_type_variation("HeaderSmall");
+		splines_panel->add_child(create_title);
+		GridContainer *create_grid = memnew(GridContainer);
+		create_grid->set_columns(2);
+		splines_panel->add_child(create_grid);
+		static const char *create_names[] = { TTRC("Road"), TTRC("River"), TTRC("Stream"), TTRC("Lake") };
+		static const char *create_tooltips[] = {
+			TTRC("A road: the mesh is extruded along the spline and the terrain is flattened under it."),
+			TTRC("A river: the water surface follows the spline, a channel is carved below it."),
+			TTRC("A small, fast stream with a narrow channel."),
+			TTRC("A lake: draw its shore (closed spline). The water level is the height of the node."),
+		};
+		for (int i = 0; i < 4; i++) {
+			Button *button = memnew(Button(TTRGET(create_names[i])));
+			button->set_tooltip_text(TTRGET(create_tooltips[i]));
+			button->set_h_size_flags(SIZE_EXPAND_FILL);
+			button->connect(SceneStringName(pressed), callable_mp(this, &LandscapeEditor::_create_spline).bind(i));
+			create_grid->add_child(button);
+		}
+
+		Label *list_title = memnew(Label(TTR("Splines")));
+		list_title->set_theme_type_variation("HeaderSmall");
+		splines_panel->add_child(list_title);
+		spline_list = memnew(ItemList);
+		spline_list->set_custom_minimum_size(Size2(0, 110 * EDSCALE));
+		spline_list->connect(SceneStringName(item_selected), callable_mp(this, &LandscapeEditor::_spline_list_selected));
+		splines_panel->add_child(spline_list);
+
+		spline_info = memnew(Label);
+		spline_info->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+		spline_info->set_custom_minimum_size(Size2(200 * EDSCALE, 0));
+		splines_panel->add_child(spline_info);
+
+		spline_draw = memnew(Button(TTR("Draw Points")));
+		spline_draw->set_toggle_mode(true);
+		spline_draw->set_tooltip_text(TTR("Click on the terrain to add points at the end of the spline (or on the spline to insert one). Right click, Escape or Enter to stop."));
+		spline_draw->connect(SceneStringName(toggled), callable_mp(this, &LandscapeEditor::_spline_draw_toggled));
+		splines_panel->add_child(spline_draw);
+
+		GridContainer *actions = memnew(GridContainer);
+		actions->set_columns(2);
+		splines_panel->add_child(actions);
+		auto add_action = [&](const String &p_text, const String &p_tooltip, SplineAction p_action) {
+			Button *button = memnew(Button(p_text));
+			button->set_tooltip_text(p_tooltip);
+			button->set_h_size_flags(SIZE_EXPAND_FILL);
+			button->connect(SceneStringName(pressed), callable_mp(this, &LandscapeEditor::_spline_action).bind(p_action));
+			actions->add_child(button);
+			return button;
+		};
+		add_action(TTR("Delete Points"), TTR("Delete the selected points (also with the Delete key)."), SPLINE_ACTION_DELETE_POINTS);
+		add_action(TTR("Snap to Terrain"), TTR("Put the points on the terrain (without the splines). Lakes: set the water level to the lowest point of the shore."), SPLINE_ACTION_SNAP);
+		add_action(TTR("Reverse"), TTR("Reverse the direction of the spline (the flow of rivers and streams)."), SPLINE_ACTION_REVERSE);
+		spline_downhill = add_action(TTR("Make Downhill"), TTR("Lower the points so that the water always flows downhill, from the first point to the last one."), SPLINE_ACTION_DOWNHILL);
+
+		spline_snap = memnew(CheckBox(TTR("Moved Points Follow the Terrain")));
+		spline_snap->set_tooltip_text(TTR("Points moved with the transform gizmo stay on the terrain."));
+		spline_snap->connect(SceneStringName(toggled), callable_mp(this, &LandscapeEditor::_spline_snap_toggled));
+		splines_panel->add_child(spline_snap);
+
+		point_panel = memnew(VBoxContainer);
+		splines_panel->add_child(point_panel);
+		point_label = memnew(Label);
+		point_label->set_theme_type_variation("HeaderSmall");
+		point_panel->add_child(point_label);
+		point_width = _make_spin(0.1, 500.0, 0.01, 6.0, "m", true);
+		_add_setting(point_panel, TTR("Width"), point_width, TTR("Width of the road, or of the water surface at the banks. Also edited with the handles on the sides of the points."));
+		point_depth = _make_spin(0.0, 100.0, 0.01, 1.0, "m", true);
+		point_depth_row = _add_setting(point_panel, TTR("Depth"), point_depth, TTR("Depth of the channel below the water surface."));
+		point_tilt = _make_spin(-60.0, 60.0, 0.1, 0.0, U"°");
+		point_tilt_row = _add_setting(point_panel, TTR("Banking"), point_tilt, TTR("Banking of the road around its direction (positive raises the right side)."));
+		point_speed = _make_spin(-20.0, 20.0, 0.01, 1.0, "m/s");
+		point_speed_row = _add_setting(point_panel, TTR("Flow Speed"), point_speed, TTR("Speed of the water at this point (faster in rapids)."));
+		for (SpinBox *spin : { point_width, point_depth, point_tilt, point_speed }) {
+			spin->connect(SceneStringName(value_changed), callable_mp(this, &LandscapeEditor::_point_attribute_changed));
+		}
+
+		splines_panel->add_child(memnew(HSeparator));
+		Button *rebuild = memnew(Button(TTR("Rebuild Terrain From Splines")));
+		rebuild->set_tooltip_text(TTR("Apply every spline to the terrain again (the terrain under splines is always rebuilt from the sculpted terrain, nothing is lost)."));
+		rebuild->connect(SceneStringName(pressed), callable_mp(this, &LandscapeEditor::_spline_action).bind(SPLINE_ACTION_REBUILD));
+		splines_panel->add_child(rebuild);
+
+		Label *help = memnew(Label(TTR("Select points in the viewport to move them with the gizmo (box selection works), drag the side handles to change the width, Delete removes the selected points. The terrain follows the splines non-destructively: sculpting and painting under them edit the terrain below.")));
+		help->set_modulate(Color(1, 1, 1, 0.6));
+		help->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+		help->set_custom_minimum_size(Size2(200 * EDSCALE, 0));
+		splines_panel->add_child(help);
+	}
+
 	/* Brush */
 	brush_panel = memnew(VBoxContainer);
 	main_vb->add_child(brush_panel);
@@ -1251,9 +1735,17 @@ void LandscapeEditorPlugin::_notification(int p_what) {
 			landscape_editor->close();
 			gizmo_plugin.instantiate();
 			Node3DEditor::get_singleton()->add_gizmo_plugin(gizmo_plugin);
+			spline_gizmo_plugin.instantiate();
+			Node3DEditor::get_singleton()->add_gizmo_plugin(spline_gizmo_plugin);
+			material_conversion_plugin.instantiate();
+			add_resource_conversion_plugin(material_conversion_plugin);
 		} break;
 
 		case NOTIFICATION_EXIT_TREE: {
+			remove_resource_conversion_plugin(material_conversion_plugin);
+			material_conversion_plugin.unref();
+			Node3DEditor::get_singleton()->remove_gizmo_plugin(spline_gizmo_plugin);
+			spline_gizmo_plugin.unref();
 			Node3DEditor::get_singleton()->remove_gizmo_plugin(gizmo_plugin);
 			gizmo_plugin.unref();
 			EditorDockManager::get_singleton()->remove_dock(landscape_editor);
@@ -1274,11 +1766,16 @@ void LandscapeEditorPlugin::edit(Object *p_object) {
 	if (!landscape_editor) {
 		return; // Called while the editor shuts down.
 	}
+	LandscapeSpline3D *spline = Object::cast_to<LandscapeSpline3D>(p_object);
+	if (spline) {
+		landscape_editor->edit_spline(spline);
+		return;
+	}
 	landscape_editor->edit(Object::cast_to<Landscape3D>(p_object));
 }
 
 bool LandscapeEditorPlugin::handles(Object *p_object) const {
-	return Object::cast_to<Landscape3D>(p_object) != nullptr;
+	return Object::cast_to<Landscape3D>(p_object) != nullptr || Object::cast_to<LandscapeSpline3D>(p_object) != nullptr;
 }
 
 void LandscapeEditorPlugin::make_visible(bool p_visible) {

@@ -34,6 +34,7 @@
 #include "landscape_gpu.h"
 #include "landscape_layer.h"
 #include "landscape_lod_tree.h"
+#include "landscape_spline_system.h"
 #include "landscape_streamer.h"
 
 #include "core/templates/hash_map.h"
@@ -42,6 +43,7 @@
 #include "scene/resources/shader.h"
 
 class Camera3D;
+class LandscapeSpline3D;
 class TriangleMesh;
 
 // Built-in terrain node.
@@ -54,6 +56,9 @@ class TriangleMesh;
 //
 // The terrain data is streamed: only the pages (tiles of the data mip levels) needed by the
 // current view are resident on the GPU, in a pool of fixed size (see LandscapeStreamer).
+//
+// LandscapeSpline3D descendants (roads, rivers, streams, lakes) modify the terrain
+// non-destructively (see LandscapeSplineSystem).
 class Landscape3D : public Node3D {
 	GDCLASS(Landscape3D, Node3D);
 
@@ -199,6 +204,11 @@ private:
 	void _update_micro_detail();
 	AABB _get_local_aabb() const;
 
+	// Splines.
+	LandscapeSplineSystem spline_system;
+	void _update_splines(bool p_immediate);
+	TypedArray<LandscapeSpline3D> _get_splines_bind() const;
+
 	void _clear_collision();
 	void _update_collision();
 	void _mark_collision_dirty(const Rect2i &p_rect);
@@ -285,6 +295,17 @@ public:
 	Vector3 global_to_local(const Vector3 &p_global) const;
 	Vector3 local_to_global(const Vector3 &p_local) const;
 	Vector2 local_to_texel(const Vector3 &p_local) const;
+
+	// Splines.
+	void _register_spline(LandscapeSpline3D *p_spline);
+	void _unregister_spline(LandscapeSpline3D *p_spline);
+	void _spline_changed(LandscapeSpline3D *p_spline, bool p_force = false);
+	const LocalVector<LandscapeSpline3D *> &get_splines() const { return spline_system.get_splines(); }
+	void update_splines(); // Applies the pending spline changes to the terrain now.
+	void rebuild_splines(); // Applies every spline again.
+	bool has_pending_spline_changes() const { return spline_system.has_pending_changes(); }
+	// Position of the camera used for the LOD (and to build spline meshes around it).
+	bool get_view_position(Vector3 &r_global) const;
 
 	// Editor support.
 	void set_brush_preview(bool p_visible, const Vector3 &p_local_center = Vector3(), real_t p_radius = 0.0, real_t p_falloff = 0.0, const Color &p_color = Color(0.25, 0.6, 1.0));

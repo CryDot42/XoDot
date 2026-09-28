@@ -75,6 +75,10 @@ public:
 // file, and evicted in LRU order when the memory budget is exceeded. Modified tiles that
 // must be evicted are spilled to a temporary overlay file until the data is saved.
 // Tiles that were never written don't use any memory or disk space (constant defaults).
+//
+// Mip 0 tiles may also hold a "base" copy of their heights and weights: the terrain as sculpted
+// and painted by the user, before the landscape splines (roads, rivers...) were composited into
+// the final data. Only tiles under splines have a base, see LandscapeData.
 class LandscapeStorage {
 public:
 	static constexpr int TILE_SHIFT = 7;
@@ -92,6 +96,13 @@ public:
 		LAYER_WEIGHTS_2,
 		LAYER_WEIGHTS_3,
 		LAYER_HOLES,
+		// Base (edit) layers, mip 0 only. Reads return the base where the tile has one and the
+		// final data elsewhere, writes only modify the tiles that have a base.
+		LAYER_BASE_HEIGHTS,
+		LAYER_BASE_WEIGHTS_0,
+		LAYER_BASE_WEIGHTS_1,
+		LAYER_BASE_WEIGHTS_2,
+		LAYER_BASE_WEIGHTS_3,
 		LAYER_MAX,
 	};
 
@@ -100,13 +111,17 @@ public:
 		MASK_HEIGHTS = 1,
 		MASK_WEIGHTS = 2,
 		MASK_HOLES = 4,
-		MASK_ALL = MASK_HEIGHTS | MASK_WEIGHTS | MASK_HOLES,
+		MASK_BASE = 8,
+		MASK_ALL = MASK_HEIGHTS | MASK_WEIGHTS | MASK_HOLES | MASK_BASE,
 	};
 
 	struct Tile {
 		Vector<float> heights;
 		Vector<uint8_t> weights[MAX_WEIGHTMAPS]; // RGBA8.
 		Vector<uint8_t> holes; // Empty when the tile has no hole (0: solid, 255: hole).
+		// Base layer (mip 0 tiles under splines only, empty otherwise).
+		Vector<float> base_heights;
+		Vector<uint8_t> base_weights[MAX_WEIGHTMAPS];
 	};
 
 	class LoadJob;
@@ -121,6 +136,7 @@ public:
 		uint8_t loaded = 0; // LayerMask of the loaded layers.
 		bool dirty = false; // Differs from its persistent copy.
 		bool range_valid = true; // Mip 0 only: min/max heights are up to date.
+		bool has_base = false; // Mip 0 only: the tile holds a base layer.
 		uint16_t pins = 0;
 		uint32_t version = 0; // Incremented on every change (also for derived mips).
 		uint64_t offset = 0;
@@ -186,8 +202,13 @@ private:
 	_FORCE_INLINE_ TileInfo &_info(int p_mip, int p_tx, int p_tz) { return mips[p_mip].infos[p_tz * mips[p_mip].tiles.x + p_tx]; }
 	_FORCE_INLINE_ const TileInfo &_info(int p_mip, int p_tx, int p_tz) const { return mips[p_mip].infos[p_tz * mips[p_mip].tiles.x + p_tx]; }
 
+	int base_tiles = 0;
+
 	static int _layer_texel_size(int p_layer) { return p_layer == LAYER_HOLES ? 1 : 4; }
 	static uint8_t _layer_group(int p_layer);
+	static bool _is_base_layer(int p_layer) { return p_layer >= LAYER_BASE_HEIGHTS && p_layer <= LAYER_BASE_WEIGHTS_3; }
+	// Data of a layer in a loaded tile (null for empty hole masks). Base layers fall back to the final data.
+	const uint8_t *_tile_layer_data(int p_layer, int p_mip, int p_tx, int p_tz);
 	int64_t _tile_bytes(const Tile *p_tile) const;
 	void _update_memory(TileInfo &r_info, int64_t p_before);
 
@@ -262,6 +283,17 @@ public:
 	void set_hole(int p_x, int p_z, bool p_hole);
 	// Height of a texel of any mip level (exact terrain height at that vertex).
 	float get_mip_height(int p_mip, int p_x, int p_z);
+
+	// Base layer (mip 0). Enabling the base of a tile copies its current heights and weights,
+	// disabling it drops the base (the final data is kept as is).
+	bool tile_has_base(int p_tx, int p_tz) const;
+	void set_tile_base(int p_tx, int p_tz, bool p_enable);
+	bool has_base_in_rect(const Rect2i &p_rect) const; // Mip 0 texels.
+	int get_base_tile_count() const { return base_tiles; }
+	// Base texel access: reads return the final data of tiles without base, writes are ignored there.
+	float get_base_height(int p_x, int p_z);
+	void get_base_weights(int p_x, int p_z, uint8_t *r_weights);
+	void set_base_weights(int p_x, int p_z, const uint8_t *p_weights);
 
 	// Propagates the pending mip 0 changes to the other mip levels.
 	void update_mips() { _flush_mips(); }

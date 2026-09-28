@@ -39,11 +39,27 @@
 #include "core/os/os.h"
 
 static constexpr uint32_t FILE_MAGIC = 0x534c4447; // "GDLS"
-static constexpr uint32_t FILE_VERSION = 1;
+// Version 2 adds the base layer chunks. Files without base tiles are still written as version 1.
+static constexpr uint32_t FILE_VERSION = 2;
 static constexpr uint32_t FILE_HEADER_SIZE = 72;
 static constexpr uint32_t INDEX_ENTRY_SIZE = 24;
+// Tile blob: byte 0 holds the stored layer groups, byte 1 the weightmap count, followed by the
+// compressed size of each chunk (heights, weights, holes, then base heights and base weights when
+// the MASK_BASE bit is set, which extends the header).
 static constexpr uint32_t BLOB_HEADER_SIZE = 16;
+static constexpr uint32_t BLOB_HEADER_SIZE_EXTENDED = 24;
+static constexpr int BLOB_CHUNKS = 5;
 static constexpr uint32_t INDEX_FLAG_DATA = 1;
+static constexpr uint32_t INDEX_FLAG_BASE = 2;
+
+// Layer group of each blob chunk.
+static constexpr uint8_t blob_chunk_groups[BLOB_CHUNKS] = {
+	LandscapeStorage::MASK_HEIGHTS,
+	LandscapeStorage::MASK_WEIGHTS,
+	LandscapeStorage::MASK_HOLES,
+	LandscapeStorage::MASK_BASE,
+	LandscapeStorage::MASK_BASE,
+};
 
 /* LandscapeStorageFile */
 
@@ -160,6 +176,7 @@ void LandscapeStorage::init(const Vector2i &p_size, int p_weightmap_count, float
 	weightmap_count = CLAMP(p_weightmap_count, 1, MAX_WEIGHTMAPS);
 	has_holes = false;
 	default_height = p_default_height;
+	base_tiles = 0;
 	_setup_layout(p_size);
 }
 
@@ -180,17 +197,23 @@ void LandscapeStorage::set_weightmap_count(int p_count) {
 	// Loaded tiles get empty (zero) weights for the new weightmaps. Stored tiles are extended when decoded.
 	for (Mip &mip : mips) {
 		for (TileInfo &info : mip.infos) {
-			if (!info.tile || !(info.loaded & MASK_WEIGHTS)) {
+			if (!info.tile || !(info.loaded & (MASK_WEIGHTS | MASK_BASE))) {
 				continue;
 			}
 			const int64_t before = _tile_bytes(info.tile);
 			for (int i = 0; i < MAX_WEIGHTMAPS; i++) {
-				Vector<uint8_t> &weights = info.tile->weights[i];
-				if (i < weightmap_count && weights.is_empty()) {
-					weights.resize(TILE_TEXELS * 4);
-					memset(weights.ptrw(), 0, weights.size());
-				} else if (i >= weightmap_count) {
-					weights.clear();
+				Vector<uint8_t> *maps[2] = { &info.tile->weights[i], &info.tile->base_weights[i] };
+				for (int b = 0; b < 2; b++) {
+					if (!(info.loaded & (b == 0 ? MASK_WEIGHTS : MASK_BASE)) || (b == 1 && info.tile->base_heights.is_empty())) {
+						continue;
+					}
+					Vector<uint8_t> &weights = *maps[b];
+					if (i < weightmap_count && weights.is_empty()) {
+						weights.resize(TILE_TEXELS * 4);
+						memset(weights.ptrw(), 0, weights.size());
+					} else if (i >= weightmap_count) {
+						weights.clear();
+					}
 				}
 			}
 			_update_memory(info, before);
@@ -218,6 +241,9 @@ void LandscapeStorage::set_has_holes(bool p_holes) {
 /* Tiles */
 
 uint8_t LandscapeStorage::_layer_group(int p_layer) {
+	if (_is_base_layer(p_layer)) {
+		return MASK_BASE;
+	}
 	switch (p_layer) {
 		case LAYER_HEIGHTS:
 			return MASK_HEIGHTS;
@@ -233,8 +259,9 @@ int64_t LandscapeStorage::_tile_bytes(const Tile *p_tile) const {
 		return 0;
 	}
 	int64_t bytes = int64_t(sizeof(Tile)) + p_tile->heights.size() * int64_t(sizeof(float)) + p_tile->holes.size();
-	for (const Vector<uint8_t> &weights : p_tile->weights) {
-		bytes += weights.size();
+	bytes += p_tile->base_heights.size() * int64_t(sizeof(float));
+	for (int i = 0; i < MAX_WEIGHTMAPS; i++) {
+		bytes += p_tile->weights[i].size() + p_tile->base_weights[i].size();
 	}
 	return bytes;
 }
@@ -275,6 +302,20 @@ void LandscapeStorage::_fill_default(Tile *p_tile, uint8_t p_mask) const {
 	if (p_mask & MASK_HOLES) {
 		p_tile->holes.clear();
 	}
+	if (p_mask & MASK_BASE) {
+		p_tile->base_heights.clear();
+		for (Vector<uint8_t> &weights : p_tile->base_weights) {
+			weights.clear();
+		}
+	}
+}
+
+static uint32_t _landscape_blob_header_size(uint8_t p_first_byte) {
+	return (p_first_byte & LandscapeStorage::MASK_BASE) ? BLOB_HEADER_SIZE_EXTENDED : BLOB_HEADER_SIZE;
+}
+
+static int _landscape_blob_chunk_count(uint8_t p_first_byte) {
+	return (p_first_byte & LandscapeStorage::MASK_BASE) ? BLOB_CHUNKS : 3;
 }
 
 Vector<uint8_t> LandscapeStorage::_read_blob(const Ref<LandscapeStorageFile> &p_file, uint64_t p_offset, uint32_t p_size, uint8_t p_mask) {
@@ -283,16 +324,20 @@ Vector<uint8_t> LandscapeStorage::_read_blob(const Ref<LandscapeStorageFile> &p_
 		return p_file->read(p_offset, p_size);
 	}
 	// Partial load: only read the chunks of the requested layers.
-	const Vector<uint8_t> header = p_file->read(p_offset, BLOB_HEADER_SIZE);
-	ERR_FAIL_COND_V(header.size() != int(BLOB_HEADER_SIZE), Vector<uint8_t>());
-	uint32_t sizes[3];
-	for (int c = 0; c < 3; c++) {
+	Vector<uint8_t> header = p_file->read(p_offset, MIN(p_size, BLOB_HEADER_SIZE_EXTENDED));
+	ERR_FAIL_COND_V(header.size() < int(BLOB_HEADER_SIZE), Vector<uint8_t>());
+	const uint32_t header_size = _landscape_blob_header_size(header[0]);
+	const int chunk_count = _landscape_blob_chunk_count(header[0]);
+	ERR_FAIL_COND_V(header.size() < int(header_size), Vector<uint8_t>());
+	header.resize(header_size);
+	uint32_t sizes[BLOB_CHUNKS] = {};
+	for (int c = 0; c < chunk_count; c++) {
 		sizes[c] = decode_uint32(header.ptr() + 4 + c * 4);
 	}
 	Vector<uint8_t> blob = header;
-	uint64_t chunk_offset = p_offset + BLOB_HEADER_SIZE;
-	for (int c = 0; c < 3; c++) {
-		if ((p_mask & (1 << c)) && sizes[c] > 0) {
+	uint64_t chunk_offset = p_offset + header_size;
+	for (int c = 0; c < chunk_count; c++) {
+		if ((p_mask & blob_chunk_groups[c]) && sizes[c] > 0) {
 			blob.append_array(p_file->read(chunk_offset, sizes[c]));
 		} else {
 			encode_uint32(0, blob.ptrw() + 4 + c * 4);
@@ -302,53 +347,108 @@ Vector<uint8_t> LandscapeStorage::_read_blob(const Ref<LandscapeStorageFile> &p_
 	return blob;
 }
 
+static Vector<uint8_t> _landscape_compress(const uint8_t *p_src, int64_t p_size) {
+	Vector<uint8_t> out;
+	out.resize(Compression::get_max_compressed_buffer_size(p_size, Compression::MODE_ZSTD));
+	const int64_t written = Compression::compress(out.ptrw(), p_src, p_size, Compression::MODE_ZSTD);
+	out.resize(MAX(written, int64_t(0)));
+	return out;
+}
+
+static Vector<uint8_t> _landscape_compress_heights(const Vector<float> &p_heights) {
+	// Byte planes compress much better than interleaved floats.
+	Vector<uint8_t> shuffled;
+	shuffled.resize(LandscapeStorage::TILE_TEXELS * 4);
+	const uint8_t *src = reinterpret_cast<const uint8_t *>(p_heights.ptr());
+	uint8_t *dst = shuffled.ptrw();
+	for (int i = 0; i < LandscapeStorage::TILE_TEXELS; i++) {
+		for (int b = 0; b < 4; b++) {
+			dst[b * LandscapeStorage::TILE_TEXELS + i] = src[i * 4 + b];
+		}
+	}
+	return _landscape_compress(shuffled.ptr(), shuffled.size());
+}
+
+static bool _landscape_decompress_heights(const uint8_t *p_chunk, uint32_t p_size, Vector<float> &r_heights) {
+	Vector<uint8_t> shuffled;
+	shuffled.resize(LandscapeStorage::TILE_TEXELS * 4);
+	ERR_FAIL_COND_V(Compression::decompress(shuffled.ptrw(), shuffled.size(), p_chunk, p_size, Compression::MODE_ZSTD) != LandscapeStorage::TILE_TEXELS * 4, false);
+	r_heights.resize(LandscapeStorage::TILE_TEXELS);
+	uint8_t *dst = reinterpret_cast<uint8_t *>(r_heights.ptrw());
+	const uint8_t *s = shuffled.ptr();
+	for (int i = 0; i < LandscapeStorage::TILE_TEXELS; i++) {
+		for (int b = 0; b < 4; b++) {
+			dst[i * 4 + b] = s[b * LandscapeStorage::TILE_TEXELS + i];
+		}
+	}
+	return true;
+}
+
+static Vector<uint8_t> _landscape_compress_weights(const Vector<uint8_t> *p_weights, int p_weightmap_count) {
+	Vector<uint8_t> weights;
+	weights.resize(int64_t(p_weightmap_count) * LandscapeStorage::TILE_TEXELS * 4);
+	for (int i = 0; i < p_weightmap_count; i++) {
+		uint8_t *dst = weights.ptrw() + int64_t(i) * LandscapeStorage::TILE_TEXELS * 4;
+		if (p_weights[i].size() == LandscapeStorage::TILE_TEXELS * 4) {
+			memcpy(dst, p_weights[i].ptr(), LandscapeStorage::TILE_TEXELS * 4);
+		} else {
+			memset(dst, 0, LandscapeStorage::TILE_TEXELS * 4);
+		}
+	}
+	return _landscape_compress(weights.ptr(), weights.size());
+}
+
+static bool _landscape_decompress_weights(const uint8_t *p_chunk, uint32_t p_size, int p_blob_weightmaps, int p_weightmap_count, Vector<uint8_t> *r_weights) {
+	Vector<uint8_t> weights;
+	const int64_t raw_size = int64_t(p_blob_weightmaps) * LandscapeStorage::TILE_TEXELS * 4;
+	weights.resize(raw_size);
+	if (raw_size > 0) {
+		ERR_FAIL_COND_V(Compression::decompress(weights.ptrw(), raw_size, p_chunk, p_size, Compression::MODE_ZSTD) != raw_size, false);
+	}
+	for (int i = 0; i < LandscapeStorage::MAX_WEIGHTMAPS; i++) {
+		if (i >= p_weightmap_count) {
+			r_weights[i].clear();
+			continue;
+		}
+		r_weights[i].resize(LandscapeStorage::TILE_TEXELS * 4);
+		if (i < p_blob_weightmaps) {
+			memcpy(r_weights[i].ptrw(), weights.ptr() + int64_t(i) * LandscapeStorage::TILE_TEXELS * 4, LandscapeStorage::TILE_TEXELS * 4);
+		} else {
+			memset(r_weights[i].ptrw(), 0, LandscapeStorage::TILE_TEXELS * 4);
+		}
+	}
+	return true;
+}
+
 Vector<uint8_t> LandscapeStorage::_encode_tile(const Tile *p_tile) const {
-	Vector<uint8_t> chunks[3];
-	auto compress = [](const uint8_t *p_src, int64_t p_size) {
-		Vector<uint8_t> out;
-		out.resize(Compression::get_max_compressed_buffer_size(p_size, Compression::MODE_ZSTD));
-		const int64_t written = Compression::compress(out.ptrw(), p_src, p_size, Compression::MODE_ZSTD);
-		out.resize(MAX(written, int64_t(0)));
-		return out;
-	};
-
+	Vector<uint8_t> chunks[BLOB_CHUNKS];
 	if (p_tile->heights.size() == TILE_TEXELS) {
-		// Byte planes compress much better than interleaved floats.
-		Vector<uint8_t> shuffled;
-		shuffled.resize(TILE_TEXELS * 4);
-		const uint8_t *src = reinterpret_cast<const uint8_t *>(p_tile->heights.ptr());
-		uint8_t *dst = shuffled.ptrw();
-		for (int i = 0; i < TILE_TEXELS; i++) {
-			for (int b = 0; b < 4; b++) {
-				dst[b * TILE_TEXELS + i] = src[i * 4 + b];
-			}
-		}
-		chunks[0] = compress(shuffled.ptr(), shuffled.size());
+		chunks[0] = _landscape_compress_heights(p_tile->heights);
 	}
-	{
-		Vector<uint8_t> weights;
-		weights.resize(int64_t(weightmap_count) * TILE_TEXELS * 4);
-		for (int i = 0; i < weightmap_count; i++) {
-			if (p_tile->weights[i].size() == TILE_TEXELS * 4) {
-				memcpy(weights.ptrw() + int64_t(i) * TILE_TEXELS * 4, p_tile->weights[i].ptr(), TILE_TEXELS * 4);
-			} else {
-				memset(weights.ptrw() + int64_t(i) * TILE_TEXELS * 4, 0, TILE_TEXELS * 4);
-			}
-		}
-		chunks[1] = compress(weights.ptr(), weights.size());
-	}
+	chunks[1] = _landscape_compress_weights(p_tile->weights, weightmap_count);
 	if (has_holes && p_tile->holes.size() == TILE_TEXELS) {
-		chunks[2] = compress(p_tile->holes.ptr(), TILE_TEXELS);
+		chunks[2] = _landscape_compress(p_tile->holes.ptr(), TILE_TEXELS);
+	}
+	const bool base = p_tile->base_heights.size() == TILE_TEXELS;
+	if (base) {
+		chunks[3] = _landscape_compress_heights(p_tile->base_heights);
+		chunks[4] = _landscape_compress_weights(p_tile->base_weights, weightmap_count);
 	}
 
+	const uint32_t header_size = base ? BLOB_HEADER_SIZE_EXTENDED : BLOB_HEADER_SIZE;
+	const int chunk_count = base ? BLOB_CHUNKS : 3;
+	int64_t total = header_size;
+	for (int c = 0; c < chunk_count; c++) {
+		total += chunks[c].size();
+	}
 	Vector<uint8_t> blob;
-	blob.resize(BLOB_HEADER_SIZE + chunks[0].size() + chunks[1].size() + chunks[2].size());
+	blob.resize(total);
 	uint8_t *w = blob.ptrw();
-	memset(w, 0, BLOB_HEADER_SIZE);
-	w[0] = uint8_t((chunks[0].is_empty() ? 0 : MASK_HEIGHTS) | MASK_WEIGHTS | (chunks[2].is_empty() ? 0 : MASK_HOLES));
+	memset(w, 0, header_size);
+	w[0] = uint8_t((chunks[0].is_empty() ? 0 : MASK_HEIGHTS) | MASK_WEIGHTS | (chunks[2].is_empty() ? 0 : MASK_HOLES) | (base ? MASK_BASE : 0));
 	w[1] = uint8_t(weightmap_count);
-	uint32_t offset = BLOB_HEADER_SIZE;
-	for (int c = 0; c < 3; c++) {
+	uint32_t offset = header_size;
+	for (int c = 0; c < chunk_count; c++) {
 		encode_uint32(chunks[c].size(), w + 4 + c * 4);
 		if (!chunks[c].is_empty()) {
 			memcpy(w + offset, chunks[c].ptr(), chunks[c].size());
@@ -361,15 +461,18 @@ Vector<uint8_t> LandscapeStorage::_encode_tile(const Tile *p_tile) const {
 bool LandscapeStorage::_decode_tile(const Vector<uint8_t> &p_blob, uint8_t p_mask, int p_weightmap_count, Tile &r_tile, uint8_t &r_mask) {
 	ERR_FAIL_COND_V(p_blob.size() < int(BLOB_HEADER_SIZE), false);
 	const uint8_t *src = p_blob.ptr();
+	const uint32_t header_size = _landscape_blob_header_size(src[0]);
+	const int chunk_count = _landscape_blob_chunk_count(src[0]);
+	ERR_FAIL_COND_V(p_blob.size() < int(header_size), false);
 	const int blob_weightmaps = src[1];
-	uint32_t sizes[3];
-	for (int c = 0; c < 3; c++) {
+	uint32_t sizes[BLOB_CHUNKS] = {};
+	for (int c = 0; c < chunk_count; c++) {
 		sizes[c] = decode_uint32(src + 4 + c * 4);
 	}
 	r_mask = 0;
-	uint32_t offset = BLOB_HEADER_SIZE;
-	for (int c = 0; c < 3; c++) {
-		const uint8_t group = uint8_t(1 << c);
+	uint32_t offset = header_size;
+	for (int c = 0; c < BLOB_CHUNKS; c++) {
+		const uint8_t group = blob_chunk_groups[c];
 		if (!(p_mask & group)) {
 			offset += sizes[c];
 			continue;
@@ -377,45 +480,38 @@ bool LandscapeStorage::_decode_tile(const Vector<uint8_t> &p_blob, uint8_t p_mas
 		ERR_FAIL_COND_V(offset + sizes[c] > uint32_t(p_blob.size()), false);
 		const uint8_t *chunk = src + offset;
 		offset += sizes[c];
-		if (c == 0) {
-			ERR_FAIL_COND_V_MSG(sizes[c] == 0, false, "Landscape tile without heights.");
-			Vector<uint8_t> shuffled;
-			shuffled.resize(TILE_TEXELS * 4);
-			ERR_FAIL_COND_V(Compression::decompress(shuffled.ptrw(), shuffled.size(), chunk, sizes[c], Compression::MODE_ZSTD) != TILE_TEXELS * 4, false);
-			r_tile.heights.resize(TILE_TEXELS);
-			uint8_t *dst = reinterpret_cast<uint8_t *>(r_tile.heights.ptrw());
-			const uint8_t *s = shuffled.ptr();
-			for (int i = 0; i < TILE_TEXELS; i++) {
-				for (int b = 0; b < 4; b++) {
-					dst[i * 4 + b] = s[b * TILE_TEXELS + i];
-				}
-			}
-		} else if (c == 1) {
-			Vector<uint8_t> weights;
-			const int64_t raw_size = int64_t(blob_weightmaps) * TILE_TEXELS * 4;
-			weights.resize(raw_size);
-			if (raw_size > 0) {
-				ERR_FAIL_COND_V(Compression::decompress(weights.ptrw(), raw_size, chunk, sizes[c], Compression::MODE_ZSTD) != raw_size, false);
-			}
-			for (int i = 0; i < MAX_WEIGHTMAPS; i++) {
-				if (i >= p_weightmap_count) {
-					r_tile.weights[i].clear();
-					continue;
-				}
-				r_tile.weights[i].resize(TILE_TEXELS * 4);
-				if (i < blob_weightmaps) {
-					memcpy(r_tile.weights[i].ptrw(), weights.ptr() + int64_t(i) * TILE_TEXELS * 4, TILE_TEXELS * 4);
+		switch (c) {
+			case 0: {
+				ERR_FAIL_COND_V_MSG(sizes[c] == 0, false, "Landscape tile without heights.");
+				ERR_FAIL_COND_V(!_landscape_decompress_heights(chunk, sizes[c], r_tile.heights), false);
+			} break;
+			case 1: {
+				ERR_FAIL_COND_V(!_landscape_decompress_weights(chunk, sizes[c], blob_weightmaps, p_weightmap_count, r_tile.weights), false);
+			} break;
+			case 2: {
+				if (sizes[c] == 0) {
+					r_tile.holes.clear();
 				} else {
-					memset(r_tile.weights[i].ptrw(), 0, TILE_TEXELS * 4);
+					r_tile.holes.resize(TILE_TEXELS);
+					ERR_FAIL_COND_V(Compression::decompress(r_tile.holes.ptrw(), TILE_TEXELS, chunk, sizes[c], Compression::MODE_ZSTD) != TILE_TEXELS, false);
 				}
-			}
-		} else {
-			if (sizes[c] == 0) {
-				r_tile.holes.clear();
-			} else {
-				r_tile.holes.resize(TILE_TEXELS);
-				ERR_FAIL_COND_V(Compression::decompress(r_tile.holes.ptrw(), TILE_TEXELS, chunk, sizes[c], Compression::MODE_ZSTD) != TILE_TEXELS, false);
-			}
+			} break;
+			case 3: {
+				if (sizes[c] == 0) {
+					r_tile.base_heights.clear();
+				} else {
+					ERR_FAIL_COND_V(!_landscape_decompress_heights(chunk, sizes[c], r_tile.base_heights), false);
+				}
+			} break;
+			case 4: {
+				if (sizes[c] == 0 || r_tile.base_heights.is_empty()) {
+					for (Vector<uint8_t> &weights : r_tile.base_weights) {
+						weights.clear();
+					}
+				} else {
+					ERR_FAIL_COND_V(!_landscape_decompress_weights(chunk, sizes[c], blob_weightmaps, p_weightmap_count, r_tile.base_weights), false);
+				}
+			} break;
 		}
 		r_mask |= group;
 	}
@@ -449,6 +545,12 @@ void LandscapeStorage::_ensure_layers(TileInfo &r_info, uint8_t p_mask) {
 			}
 			if (needed & MASK_HOLES) {
 				r_info.tile->holes = decoded.holes;
+			}
+			if (needed & MASK_BASE) {
+				r_info.tile->base_heights = decoded.base_heights;
+				for (int i = 0; i < MAX_WEIGHTMAPS; i++) {
+					r_info.tile->base_weights[i] = decoded.base_weights[i];
+				}
 			}
 			loaded = true;
 		} else {
@@ -572,6 +674,17 @@ void LandscapeStorage::_finish_load(LoadJob *p_job) {
 	}
 	if (groups & MASK_HOLES) {
 		info.tile->holes = p_job->result.holes;
+	}
+	if (groups & MASK_BASE) {
+		info.tile->base_heights = p_job->result.base_heights;
+		for (int i = 0; i < MAX_WEIGHTMAPS; i++) {
+			Vector<uint8_t> weights = (i < weightmap_count && !info.tile->base_heights.is_empty()) ? p_job->result.base_weights[i] : Vector<uint8_t>();
+			if (i < weightmap_count && !info.tile->base_heights.is_empty() && weights.size() != TILE_TEXELS * 4) {
+				weights.resize(TILE_TEXELS * 4);
+				memset(weights.ptrw(), 0, weights.size());
+			}
+			info.tile->base_weights[i] = weights;
+		}
 	}
 	info.loaded |= groups;
 	info.last_used = ++use_counter;
@@ -717,9 +830,32 @@ void LandscapeStorage::trim() {
 
 /* Regions */
 
+const uint8_t *LandscapeStorage::_tile_layer_data(int p_layer, int p_mip, int p_tx, int p_tz) {
+	int layer = p_layer;
+	if (_is_base_layer(layer) && !_info(p_mip, p_tx, p_tz).has_base) {
+		// No base: the base is the final data (LAYER_BASE_* - LAYER_BASE_HEIGHTS maps to the final layer).
+		layer -= LAYER_BASE_HEIGHTS;
+	}
+	const Tile *tile = _load(p_mip, p_tx, p_tz, _layer_group(layer));
+	switch (layer) {
+		case LAYER_HEIGHTS:
+			return reinterpret_cast<const uint8_t *>(tile->heights.ptr());
+		case LAYER_HOLES:
+			return tile->holes.is_empty() ? nullptr : tile->holes.ptr();
+		case LAYER_BASE_HEIGHTS:
+			return reinterpret_cast<const uint8_t *>(tile->base_heights.ptr());
+		default:
+			if (layer >= LAYER_BASE_WEIGHTS_0) {
+				return tile->base_weights[layer - LAYER_BASE_WEIGHTS_0].ptr();
+			}
+			return tile->weights[layer - LAYER_WEIGHTS_0].ptr();
+	}
+}
+
 void LandscapeStorage::read_region(int p_layer, int p_mip, const Rect2i &p_rect, void *r_data) {
 	ERR_FAIL_INDEX(p_layer, LAYER_MAX);
 	ERR_FAIL_INDEX(p_mip, int(mips.size()));
+	ERR_FAIL_COND_MSG(_is_base_layer(p_layer) && p_mip != 0, "Landscape base layers only exist at mip 0.");
 	if (!p_rect.has_area()) {
 		return;
 	}
@@ -727,11 +863,11 @@ void LandscapeStorage::read_region(int p_layer, int p_mip, const Rect2i &p_rect,
 		_flush_mips();
 	}
 	const int texel_size = _layer_texel_size(p_layer);
-	const uint8_t group = _layer_group(p_layer);
 	const Mip &mip = mips[p_mip];
 	uint8_t *dst = static_cast<uint8_t *>(r_data);
 
-	if (p_layer >= LAYER_WEIGHTS_0 && p_layer <= LAYER_WEIGHTS_3 && p_layer - LAYER_WEIGHTS_0 >= weightmap_count) {
+	const int weights_index = p_layer >= LAYER_BASE_WEIGHTS_0 ? p_layer - LAYER_BASE_WEIGHTS_0 : p_layer - LAYER_WEIGHTS_0;
+	if (((p_layer >= LAYER_WEIGHTS_0 && p_layer <= LAYER_WEIGHTS_3) || p_layer >= LAYER_BASE_WEIGHTS_0) && weights_index >= weightmap_count) {
 		memset(dst, 0, int64_t(p_rect.size.x) * p_rect.size.y * texel_size);
 		return;
 	}
@@ -753,19 +889,7 @@ void LandscapeStorage::read_region(int p_layer, int p_mip, const Rect2i &p_rect,
 
 	for (int tz = cz0 >> TILE_SHIFT; tz <= cz1 >> TILE_SHIFT; tz++) {
 		for (int tx = cx0 >> TILE_SHIFT; tx <= cx1 >> TILE_SHIFT; tx++) {
-			const Tile *tile = _load(p_mip, tx, tz, group);
-			const uint8_t *src = nullptr;
-			switch (p_layer) {
-				case LAYER_HEIGHTS:
-					src = reinterpret_cast<const uint8_t *>(tile->heights.ptr());
-					break;
-				case LAYER_HOLES:
-					src = tile->holes.is_empty() ? nullptr : tile->holes.ptr();
-					break;
-				default:
-					src = tile->weights[p_layer - LAYER_WEIGHTS_0].ptr();
-					break;
-			}
+			const uint8_t *src = _tile_layer_data(p_layer, p_mip, tx, tz);
 			const int x0 = MAX(cx0, tx << TILE_SHIFT);
 			const int x1 = MIN(cx1, (tx << TILE_SHIFT) + TILE_MASK);
 			const int z0 = MAX(cz0, tz << TILE_SHIFT);
@@ -916,11 +1040,15 @@ void LandscapeStorage::_flush_mips() {
 void LandscapeStorage::_write_mip_region(int p_layer, int p_mip, const Rect2i &p_rect, const void *p_data) {
 	const Mip &mip = mips[p_mip];
 	ERR_FAIL_COND(p_rect.position.x < 0 || p_rect.position.y < 0 || p_rect.get_end().x - 1 > mip.last.x || p_rect.get_end().y - 1 > mip.last.y);
+	ERR_FAIL_COND(_is_base_layer(p_layer) && p_mip != 0);
 	const int texel_size = _layer_texel_size(p_layer);
 	const uint8_t group = _layer_group(p_layer);
 	const uint8_t *src = static_cast<const uint8_t *>(p_data);
 	if (p_layer >= LAYER_WEIGHTS_0 && p_layer <= LAYER_WEIGHTS_3) {
 		ERR_FAIL_COND(p_layer - LAYER_WEIGHTS_0 >= weightmap_count);
+	}
+	if (p_layer >= LAYER_BASE_WEIGHTS_0) {
+		ERR_FAIL_COND(p_layer - LAYER_BASE_WEIGHTS_0 >= weightmap_count);
 	}
 
 	const int x_end = p_rect.get_end().x - 1;
@@ -928,6 +1056,9 @@ void LandscapeStorage::_write_mip_region(int p_layer, int p_mip, const Rect2i &p
 	for (int tz = p_rect.position.y >> TILE_SHIFT; tz <= z_end >> TILE_SHIFT; tz++) {
 		for (int tx = p_rect.position.x >> TILE_SHIFT; tx <= x_end >> TILE_SHIFT; tx++) {
 			TileInfo &info = _info(p_mip, tx, tz);
+			if (_is_base_layer(p_layer) && !info.has_base) {
+				continue; // Base layers are only written where the tile has a base.
+			}
 			const int x0 = MAX(p_rect.position.x, tx << TILE_SHIFT);
 			const int x1 = MIN(x_end, (tx << TILE_SHIFT) + TILE_MASK);
 			const int z0 = MAX(p_rect.position.y, tz << TILE_SHIFT);
@@ -951,10 +1082,18 @@ void LandscapeStorage::_write_mip_region(int p_layer, int p_mip, const Rect2i &p
 					}
 					dst = tile->holes.ptrw();
 				} break;
+				case LAYER_BASE_HEIGHTS:
+					dst = reinterpret_cast<uint8_t *>(tile->base_heights.ptrw());
+					break;
 				default:
-					dst = tile->weights[p_layer - LAYER_WEIGHTS_0].ptrw();
+					if (p_layer >= LAYER_BASE_WEIGHTS_0) {
+						dst = tile->base_weights[p_layer - LAYER_BASE_WEIGHTS_0].ptrw();
+					} else {
+						dst = tile->weights[p_layer - LAYER_WEIGHTS_0].ptrw();
+					}
 					break;
 			}
+			ERR_CONTINUE(!dst);
 			for (int z = z0; z <= z1; z++) {
 				uint8_t *row = dst + ((z & TILE_MASK) * TILE_SIZE + (x0 & TILE_MASK)) * texel_size;
 				if (src) {
@@ -977,6 +1116,13 @@ void LandscapeStorage::_write_mip_region(int p_layer, int p_mip, const Rect2i &p
 void LandscapeStorage::write_region(int p_layer, const Rect2i &p_rect, const void *p_data) {
 	ERR_FAIL_INDEX(p_layer, LAYER_MAX);
 	if (!p_rect.has_area()) {
+		return;
+	}
+	if (_is_base_layer(p_layer)) {
+		// Base layers have no mip levels.
+		if (has_base_in_rect(p_rect)) {
+			_write_mip_region(p_layer, 0, p_rect, p_data);
+		}
 		return;
 	}
 	if (p_layer == LAYER_HOLES && !has_holes) {
@@ -1100,6 +1246,103 @@ float LandscapeStorage::get_mip_height(int p_mip, int p_x, int p_z) {
 	return tile->heights[(p_z & TILE_MASK) * TILE_SIZE + (p_x & TILE_MASK)];
 }
 
+/* Base layer */
+
+bool LandscapeStorage::tile_has_base(int p_tx, int p_tz) const {
+	return has_tile(0, p_tx, p_tz) && _info(0, p_tx, p_tz).has_base;
+}
+
+void LandscapeStorage::set_tile_base(int p_tx, int p_tz, bool p_enable) {
+	ERR_FAIL_COND(!has_tile(0, p_tx, p_tz));
+	TileInfo &info = _info(0, p_tx, p_tz);
+	if (info.has_base == p_enable) {
+		return;
+	}
+	Tile *tile = _load(0, p_tx, p_tz, p_enable ? uint8_t(MASK_HEIGHTS | MASK_WEIGHTS | MASK_BASE) : uint8_t(MASK_BASE));
+	const int64_t before = _tile_bytes(tile);
+	if (p_enable) {
+		// The base starts as a copy of the current (final) data.
+		tile->base_heights = tile->heights;
+		for (int i = 0; i < MAX_WEIGHTMAPS; i++) {
+			tile->base_weights[i] = tile->weights[i];
+		}
+		base_tiles++;
+	} else {
+		tile->base_heights.clear();
+		for (Vector<uint8_t> &weights : tile->base_weights) {
+			weights.clear();
+		}
+		base_tiles--;
+	}
+	info.has_base = p_enable;
+	info.dirty = true;
+	info.version++;
+	unsaved = true;
+	_update_memory(info, before);
+}
+
+bool LandscapeStorage::has_base_in_rect(const Rect2i &p_rect) const {
+	if (base_tiles == 0 || mips.is_empty() || !p_rect.has_area()) {
+		return false;
+	}
+	const Mip &mip = mips[0];
+	const int tx0 = CLAMP(p_rect.position.x, 0, mip.last.x) >> TILE_SHIFT;
+	const int tz0 = CLAMP(p_rect.position.y, 0, mip.last.y) >> TILE_SHIFT;
+	const int tx1 = CLAMP(p_rect.get_end().x - 1, 0, mip.last.x) >> TILE_SHIFT;
+	const int tz1 = CLAMP(p_rect.get_end().y - 1, 0, mip.last.y) >> TILE_SHIFT;
+	for (int tz = tz0; tz <= tz1; tz++) {
+		for (int tx = tx0; tx <= tx1; tx++) {
+			if (mip.infos[tz * mip.tiles.x + tx].has_base) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+float LandscapeStorage::get_base_height(int p_x, int p_z) {
+	ERR_FAIL_COND_V(mips.is_empty(), 0.0);
+	p_x = CLAMP(p_x, 0, size.x - 1);
+	p_z = CLAMP(p_z, 0, size.y - 1);
+	const TileInfo &base_info = _info(0, p_x >> TILE_SHIFT, p_z >> TILE_SHIFT);
+	if (!base_info.has_base) {
+		return get_height(p_x, p_z);
+	}
+	const TileInfo &info = _texel_info(p_x, p_z, MASK_BASE);
+	return info.tile->base_heights[(p_z & TILE_MASK) * TILE_SIZE + (p_x & TILE_MASK)];
+}
+
+void LandscapeStorage::get_base_weights(int p_x, int p_z, uint8_t *r_weights) {
+	p_x = CLAMP(p_x, 0, size.x - 1);
+	p_z = CLAMP(p_z, 0, size.y - 1);
+	const TileInfo &base_info = _info(0, p_x >> TILE_SHIFT, p_z >> TILE_SHIFT);
+	if (!base_info.has_base) {
+		get_weights(p_x, p_z, r_weights);
+		return;
+	}
+	const TileInfo &info = _texel_info(p_x, p_z, MASK_BASE);
+	const int offset = ((p_z & TILE_MASK) * TILE_SIZE + (p_x & TILE_MASK)) * 4;
+	for (int i = 0; i < weightmap_count; i++) {
+		memcpy(r_weights + i * 4, info.tile->base_weights[i].ptr() + offset, 4);
+	}
+}
+
+void LandscapeStorage::set_base_weights(int p_x, int p_z, const uint8_t *p_weights) {
+	ERR_FAIL_INDEX(p_x, size.x);
+	ERR_FAIL_INDEX(p_z, size.y);
+	if (!_info(0, p_x >> TILE_SHIFT, p_z >> TILE_SHIFT).has_base) {
+		return;
+	}
+	TileInfo &info = _texel_info(p_x, p_z, MASK_BASE);
+	const int offset = ((p_z & TILE_MASK) * TILE_SIZE + (p_x & TILE_MASK)) * 4;
+	for (int i = 0; i < weightmap_count; i++) {
+		memcpy(info.tile->base_weights[i].ptrw() + offset, p_weights + i * 4, 4);
+	}
+	info.dirty = true;
+	info.version++;
+	unsaved = true;
+}
+
 Vector2 LandscapeStorage::get_height_range() {
 	if (mips.is_empty()) {
 		return Vector2();
@@ -1161,13 +1404,16 @@ Error LandscapeStorage::open_file(const String &p_path, Dictionary &r_header) {
 	const Vector<uint8_t> index = new_file->read(index_offset, index_count * INDEX_ENTRY_SIZE);
 	ERR_FAIL_COND_V(index.size() != int64_t(index_count) * INDEX_ENTRY_SIZE, ERR_FILE_CORRUPT);
 	const uint8_t *e = index.ptr();
-	for (Mip &mip : mips) {
-		for (TileInfo &info : mip.infos) {
+	for (uint32_t m = 0; m < mips.size(); m++) {
+		for (TileInfo &info : mips[m].infos) {
+			const uint32_t entry_flags = decode_uint32(e + 20);
 			info.offset = decode_uint64(e);
 			info.size = decode_uint32(e + 8);
 			info.min_height = decode_float(e + 12);
 			info.max_height = decode_float(e + 16);
-			info.source = (decode_uint32(e + 20) & INDEX_FLAG_DATA) ? TileInfo::SOURCE_FILE : TileInfo::SOURCE_DEFAULT;
+			info.source = (entry_flags & INDEX_FLAG_DATA) ? TileInfo::SOURCE_FILE : TileInfo::SOURCE_DEFAULT;
+			info.has_base = m == 0 && (entry_flags & INDEX_FLAG_DATA) && (entry_flags & INDEX_FLAG_BASE);
+			base_tiles += info.has_base ? 1 : 0;
 			info.range_valid = true;
 			e += INDEX_ENTRY_SIZE;
 		}
@@ -1237,7 +1483,7 @@ Error LandscapeStorage::save_file(const String &p_path, const Dictionary &p_head
 				if (!blob.is_empty()) {
 					entry.offset = out->get_position();
 					entry.size = blob.size();
-					entry.flags = INDEX_FLAG_DATA;
+					entry.flags = INDEX_FLAG_DATA | (info.has_base ? INDEX_FLAG_BASE : 0);
 					out->store_buffer(blob);
 				}
 				entries.push_back(entry);
@@ -1276,7 +1522,8 @@ Error LandscapeStorage::save_file(const String &p_path, const Dictionary &p_head
 
 		uint8_t *hw = header.ptrw();
 		encode_uint32(FILE_MAGIC, hw);
-		encode_uint32(FILE_VERSION, hw + 4);
+		// Files without base layers stay readable by version 1 readers.
+		encode_uint32(base_tiles > 0 ? FILE_VERSION : 1, hw + 4);
 		encode_uint32(size.x, hw + 8);
 		encode_uint32(size.y, hw + 12);
 		encode_uint32(weightmap_count, hw + 16);

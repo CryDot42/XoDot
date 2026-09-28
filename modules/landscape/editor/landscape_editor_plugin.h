@@ -32,7 +32,10 @@
 
 #include "../landscape_3d.h"
 #include "../landscape_brush.h"
+#include "../landscape_spline_3d.h"
+#include "landscape_spline_editor.h"
 
+#include "core/object/undo_redo.h"
 #include "editor/docks/editor_dock.h"
 #include "editor/plugins/editor_plugin.h"
 #include "editor/scene/3d/node_3d_editor_gizmos.h"
@@ -63,7 +66,8 @@ public:
 	void redraw(EditorNode3DGizmo *p_gizmo) override;
 };
 
-// UE-like "Landscape Mode" panel: Manage, Sculpt and Paint tools with shared brush settings.
+// UE-like "Landscape Mode" panel: Manage, Sculpt and Paint tools with shared brush settings,
+// and the Splines tools (roads, rivers, streams, lakes).
 class LandscapeEditor : public EditorDock {
 	GDCLASS(LandscapeEditor, EditorDock);
 
@@ -72,6 +76,15 @@ public:
 		MODE_MANAGE,
 		MODE_SCULPT,
 		MODE_PAINT,
+		MODE_SPLINES,
+	};
+
+	enum SplineAction {
+		SPLINE_ACTION_DELETE_POINTS,
+		SPLINE_ACTION_SNAP,
+		SPLINE_ACTION_REVERSE,
+		SPLINE_ACTION_DOWNHILL,
+		SPLINE_ACTION_REBUILD,
 	};
 
 private:
@@ -158,6 +171,44 @@ private:
 
 	bool updating_ui = false;
 
+	// Splines.
+	VBoxContainer *splines_panel = nullptr;
+	ItemList *spline_list = nullptr;
+	uint64_t spline_list_hash = 0;
+	ObjectID spline_id;
+	Label *spline_info = nullptr;
+	Button *spline_draw = nullptr;
+	CheckBox *spline_snap = nullptr;
+	VBoxContainer *point_panel = nullptr;
+	Label *point_label = nullptr;
+	SpinBox *point_width = nullptr;
+	SpinBox *point_depth = nullptr;
+	SpinBox *point_tilt = nullptr;
+	SpinBox *point_speed = nullptr;
+	Control *point_depth_row = nullptr;
+	Control *point_tilt_row = nullptr;
+	Control *point_speed_row = nullptr;
+	Button *spline_downhill = nullptr;
+	Vector<int> point_selection;
+	bool updating_points = false;
+	double spline_timer = 0.0;
+
+	LandscapeSpline3D *_get_spline() const;
+	void _create_spline(int p_type);
+	void _update_spline_list();
+	void _spline_list_selected(int p_index);
+	void _select_spline(LandscapeSpline3D *p_spline);
+	void _spline_action(int p_action);
+	void _spline_draw_toggled(bool p_pressed);
+	void _spline_snap_toggled(bool p_pressed);
+	void _update_spline_panel();
+	void _point_attribute_changed(double p_value);
+	Vector<int> _get_selected_points() const;
+	Dictionary _snapshot_spline(LandscapeSpline3D *p_spline) const;
+	void _commit_spline(LandscapeSpline3D *p_spline, const String &p_action, const Dictionary &p_before, UndoRedo::MergeMode p_merge = UndoRedo::MERGE_DISABLE);
+	void _add_spline_point(LandscapeSpline3D *p_spline, const Vector3 &p_global);
+	EditorPlugin::AfterGUIInput _spline_gui_input(Camera3D *p_camera, const Ref<InputEvent> &p_event);
+
 	Control *_add_setting(VBoxContainer *p_parent, const String &p_label, Control *p_control, const String &p_tooltip = String());
 	SpinBox *_make_spin(double p_min, double p_max, double p_step, double p_value, const String &p_suffix = String(), bool p_allow_greater = false);
 	Button *_make_tool_button(Container *p_parent, const String &p_text, const String &p_icon, const Ref<ButtonGroup> &p_group, LandscapeBrush::Tool p_tool, const String &p_tooltip);
@@ -211,6 +262,7 @@ protected:
 public:
 	EditorPlugin::AfterGUIInput forward_3d_gui_input(Camera3D *p_camera, const Ref<InputEvent> &p_event);
 	void edit(Landscape3D *p_landscape);
+	void edit_spline(LandscapeSpline3D *p_spline);
 	Landscape3D *get_landscape() const { return landscape; }
 
 	LandscapeEditor();
@@ -221,6 +273,8 @@ class LandscapeEditorPlugin : public EditorPlugin {
 
 	LandscapeEditor *landscape_editor = nullptr;
 	Ref<LandscapeGizmoPlugin> gizmo_plugin;
+	Ref<LandscapeSplineGizmoPlugin> spline_gizmo_plugin;
+	Ref<LandscapeSplineMaterialConversionPlugin> material_conversion_plugin;
 
 	static Camera3D *_get_editor_camera();
 

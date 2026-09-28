@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LandscapeRoadMaterial" inherits="LandscapeSplineMaterial" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Built-in road material of [LandscapeSpline3D].
+	</brief_description>
+	<description>
+		A road shader made for the meshes of [LandscapeSpline3D] roads, which works without any texture:
+		- Procedural surface: aggregate grain, large patches and wheel tracks, multiplied with the optional [member albedo_texture] and [member normal_texture].
+		- Lane markings: edge lines, dashed lines between the lanes and a configurable center line.
+		- Dirt along the edges, which are irregular and blend into the terrain (alpha scissor).
+		- Wet surface and puddles.
+		Use [method apply_preset] to switch between asphalt, dirt and gravel roads.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="apply_preset">
+			<return type="void" />
+			<param index="0" name="preset" type="int" enum="LandscapeRoadMaterial.Preset" />
+			<description>
+				Resets the parameters (except the textures) to the values of [param preset].
+			</description>
+		</method>
+		<method name="get_builtin_shader_code" qualifiers="static">
+			<return type="String" />
+			<description>
+				Returns the code of the built-in road shader.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="albedo_color" type="Color" setter="_set_parameter" getter="_get_parameter" default="Color(0.16, 0.16, 0.17, 1)">
+			Base color of the road.
+		</member>
+		<member name="albedo_texture" type="Texture2D" setter="_set_parameter" getter="_get_parameter">
+			Optional albedo texture, multiplied with [member albedo_color].
+		</member>
+		<member name="center_line" type="int" setter="_set_parameter" getter="_get_parameter" default="1">
+			The line in the middle of roads with an even [member lane_count]: [code]0[/code] none, [code]1[/code] dashed, [code]2[/code] solid, [code]3[/code] double solid.
+		</member>
+		<member name="center_line_color" type="Color" setter="_set_parameter" getter="_get_parameter" default="Color(0.86, 0.86, 0.82, 1)">
+			Color of the center line (e.g. yellow).
+		</member>
+		<member name="dash_gap" type="float" setter="_set_parameter" getter="_get_parameter" default="6.0">
+			Gap between the dashes of the dashed lines.
+		</member>
+		<member name="dash_length" type="float" setter="_set_parameter" getter="_get_parameter" default="3.0">
+			Length of the dashes of the dashed lines.
+		</member>
+		<member name="edge_color" type="Color" setter="_set_parameter" getter="_get_parameter" default="Color(0.3, 0.26, 0.2, 1)">
+			Color of the dirt along the edges of the road and on its skirts.
+		</member>
+		<member name="edge_line_offset" type="float" setter="_set_parameter" getter="_get_parameter" default="0.25">
+			Distance between the edge lines and the edges of the road.
+		</member>
+		<member name="edge_noise" type="float" setter="_set_parameter" getter="_get_parameter" default="0.3">
+			Irregularity of the edges of the road and of the dirt along them.
+		</member>
+		<member name="edge_width" type="float" setter="_set_parameter" getter="_get_parameter" default="0.5">
+			Width of the dirt along the edges of the road.
+		</member>
+		<member name="grain" type="float" setter="_set_parameter" getter="_get_parameter" default="0.35">
+			Contrast of the procedural aggregate grain.
+		</member>
+		<member name="grain_scale" type="float" setter="_set_parameter" getter="_get_parameter" default="0.06">
+			Size of the procedural aggregate grain.
+		</member>
+		<member name="lane_count" type="int" setter="_set_parameter" getter="_get_parameter" default="2">
+			Number of lanes, separated by dashed lines (and the [member center_line] in the middle).
+		</member>
+		<member name="lane_markings" type="bool" setter="_set_parameter" getter="_get_parameter" default="true">
+			If [code]true[/code], lane markings are painted on the road.
+		</member>
+		<member name="marking_color" type="Color" setter="_set_parameter" getter="_get_parameter" default="Color(0.86, 0.86, 0.82, 1)">
+			Color of the lane markings.
+		</member>
+		<member name="marking_width" type="float" setter="_set_parameter" getter="_get_parameter" default="0.12">
+			Width of the lane markings.
+		</member>
+		<member name="normal_strength" type="float" setter="_set_parameter" getter="_get_parameter" default="1.0">
+			Strength of [member normal_texture].
+		</member>
+		<member name="normal_texture" type="Texture2D" setter="_set_parameter" getter="_get_parameter">
+			Optional normal map.
+		</member>
+		<member name="puddles" type="float" setter="_set_parameter" getter="_get_parameter" default="0.0">
+			Amount of puddles on the road.
+		</member>
+		<member name="roughness" type="float" setter="_set_parameter" getter="_get_parameter" default="0.82">
+			Roughness of the dry road.
+		</member>
+		<member name="texture_scale" type="Vector2" setter="_set_parameter" getter="_get_parameter" default="Vector2(1, 4)">
+			Size of the textures: [code]x[/code] across the road ([code]1[/code] is the width of the road), [code]y[/code] along the road, in meters.
+		</member>
+		<member name="wear" type="float" setter="_set_parameter" getter="_get_parameter" default="0.25">
+			Wear of the road: darker wheel tracks and worn lane markings.
+		</member>
+		<member name="wetness" type="float" setter="_set_parameter" getter="_get_parameter" default="0.0">
+			Wetness of the road: darker and glossier surface.
+		</member>
+	</members>
+	<constants>
+		<constant name="PRESET_ASPHALT" value="0" enum="Preset">
+			Asphalt road with lane markings (default parameters).
+		</constant>
+		<constant name="PRESET_DIRT" value="1" enum="Preset">
+			Dirt road with ruts, without markings.
+		</constant>
+		<constant name="PRESET_GRAVEL" value="2" enum="Preset">
+			Gravel road, without markings.
+		</constant>
+	</constants>
+</class>

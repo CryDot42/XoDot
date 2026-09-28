@@ -205,7 +205,7 @@ Rect2i LandscapeBrush::_apply_heights(LandscapeData *p_data, const Vector2 &p_ce
 	// Local copy of the modified texels, written back at the end.
 	LocalVector<float> heights;
 	heights.resize(rect.size.x * rect.size.y);
-	p_data->read_heights(rect, heights.ptr());
+	p_data->read_edit_heights(rect, heights.ptr());
 	auto height_at = [&](int p_x, int p_z) -> float & {
 		return heights[(p_z - rect.position.y) * rect.size.x + (p_x - rect.position.x)];
 	};
@@ -218,7 +218,7 @@ Rect2i LandscapeBrush::_apply_heights(LandscapeData *p_data, const Vector2 &p_ce
 	LocalVector<float> src;
 	if (tool == TOOL_SMOOTH || tool == TOOL_EROSION) {
 		src.resize(src_rect.size.x * src_rect.size.y);
-		p_data->read_heights(src_rect, src.ptr());
+		p_data->read_edit_heights(src_rect, src.ptr());
 	}
 
 	// Separable box blur for the smooth tool.
@@ -294,7 +294,7 @@ Rect2i LandscapeBrush::_apply_heights(LandscapeData *p_data, const Vector2 &p_ce
 				height_at(x, z) = current[(z - src_rect.position.y) * w + (x - src_rect.position.x)];
 			}
 		}
-		p_data->write_heights(rect, heights.ptr());
+		p_data->write_edit_heights(rect, heights.ptr());
 		p_data->notify_region_changed(rect, LandscapeData::CHANGED_HEIGHTS);
 		return rect;
 	}
@@ -354,7 +354,7 @@ Rect2i LandscapeBrush::_apply_heights(LandscapeData *p_data, const Vector2 &p_ce
 		}
 	}
 
-	p_data->write_heights(rect, heights.ptr());
+	p_data->write_edit_heights(rect, heights.ptr());
 	p_data->notify_region_changed(rect, LandscapeData::CHANGED_HEIGHTS);
 	return rect;
 }
@@ -385,7 +385,7 @@ Rect2i LandscapeBrush::_apply_weights(LandscapeData *p_data, const Vector2 &p_ce
 		float tmp_weights[LandscapeData::MAX_LAYERS];
 		for (int z = 0; z < h; z++) {
 			for (int x = 0; x < w; x++) {
-				p_data->get_weights(src_rect.position.x + x, src_rect.position.y + z, tmp_weights);
+				p_data->get_edit_weights(src_rect.position.x + x, src_rect.position.y + z, tmp_weights);
 				for (int l = 0; l < layers; l++) {
 					src[(z * w + x) * layers + l] = tmp_weights[l];
 				}
@@ -425,7 +425,7 @@ Rect2i LandscapeBrush::_apply_weights(LandscapeData *p_data, const Vector2 &p_ce
 			if (brush <= 0.0f) {
 				continue;
 			}
-			p_data->get_weights(x, z, weights);
+			p_data->get_edit_weights(x, z, weights);
 			const float amount = MIN(brush * rate * 4.0f, 1.0f);
 			switch (tool) {
 				case TOOL_PAINT_SMOOTH: {
@@ -433,7 +433,7 @@ Rect2i LandscapeBrush::_apply_weights(LandscapeData *p_data, const Vector2 &p_ce
 					for (int l = 0; l < layers; l++) {
 						weights[l] = Math::lerp(weights[l], blurred[base + l], amount);
 					}
-					p_data->set_weights(x, z, weights);
+					p_data->set_edit_weights(x, z, weights);
 				} break;
 				case TOOL_PAINT:
 				case TOOL_PAINT_FLATTEN:
@@ -468,7 +468,7 @@ Rect2i LandscapeBrush::_apply_weights(LandscapeData *p_data, const Vector2 &p_ce
 						// Nothing else painted here: give the remaining weight to the first other layer.
 						weights[layer == 0 ? 1 : 0] = 1.0f - new_weight;
 					}
-					p_data->set_weights(x, z, weights);
+					p_data->set_edit_weights(x, z, weights);
 				} break;
 				default:
 					break;
