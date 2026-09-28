@@ -78,6 +78,7 @@ public:
 		uint64_t prev_camera_data_frame = 0;
 
 		bool use_occlusion_culling = false;
+		bool use_hzb_occlusion_culling = false;
 		bool occlusion_buffer_dirty = false;
 
 		DisplayServerEnums::WindowID viewport_to_screen = DisplayServerEnums::INVALID_WINDOW_ID;
@@ -170,6 +171,7 @@ public:
 			screen_space_aa = RSE::VIEWPORT_SCREEN_SPACE_AA_DISABLED;
 			use_debanding = false;
 			use_occlusion_culling = false;
+			use_hzb_occlusion_culling = false;
 			occlusion_buffer_dirty = true;
 
 			snap_2d_transforms_to_pixel = false;
@@ -213,8 +215,13 @@ private:
 	DisplayServerEnums::WindowID _get_containing_window(Viewport *p_viewport);
 
 	int occlusion_rays_per_thread = 512;
+	int hzb_occlusion_buffer_height = 144;
 
 	void _resize_occlusion_culling_buffer(const Size2i &p_size);
+	_FORCE_INLINE_ static bool _viewport_has_occlusion_buffer(const Viewport *p_viewport) {
+		return p_viewport->use_occlusion_culling || p_viewport->use_hzb_occlusion_culling;
+	}
+	void _viewport_update_occlusion_buffer(Viewport *p_viewport, bool p_had_occlusion_buffer);
 
 public:
 	RID viewport_allocate();
@@ -282,6 +289,7 @@ public:
 	void viewport_set_use_debanding(RID p_viewport, bool p_use_debanding);
 	void viewport_set_force_motion_vectors(RID p_viewport, bool p_force_motion_vectors);
 	void viewport_set_use_occlusion_culling(RID p_viewport, bool p_use_occlusion_culling);
+	void viewport_set_use_hzb_occlusion_culling(RID p_viewport, bool p_use_hzb_occlusion_culling);
 	void viewport_set_occlusion_rays_per_thread(int p_rays_per_thread);
 	void viewport_set_occlusion_culling_build_quality(RSE::ViewportOcclusionCullingBuildQuality p_quality);
 	void viewport_set_mesh_lod_threshold(RID p_viewport, float p_pixels);

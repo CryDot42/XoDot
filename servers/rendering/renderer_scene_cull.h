@@ -357,6 +357,11 @@ public:
 		PagedArray<InstanceData> instance_data;
 		VisibilityArray instance_visibility;
 
+		// Bounds of geometry that moved, deformed or disappeared recently, and the frames it happened in (in order).
+		// The depth buffers used for HZB occlusion culling can't be trusted within them if they're older.
+		LocalVector<AABB> hzb_changed_bounds;
+		LocalVector<uint64_t> hzb_changed_frames;
+
 		Scenario() {
 			indexers[INDEXER_GEOMETRY].set_index(INDEXER_GEOMETRY);
 			indexers[INDEXER_VOLUMES].set_index(INDEXER_VOLUMES);
@@ -367,6 +372,17 @@ public:
 	int indexer_update_iterations = 0;
 
 	mutable RID_Owner<Scenario, true> scenario_owner;
+
+	// Depth buffers older than this (in frames) are not used for HZB occlusion culling,
+	// as they're likely to be too different from what's currently visible.
+	static constexpr uint64_t HZB_OCCLUSION_MAX_DEPTH_AGE = 8;
+	// Changes to the scene are only recorded while HZB occlusion culling is used.
+	bool hzb_occlusion_used = false;
+	uint64_t hzb_occlusion_last_used_frame = 0;
+
+	void _hzb_occlusion_record_change(Instance *p_instance) const;
+	static void _hzb_occlusion_prune_changes(Scenario *p_scenario, uint64_t p_frame);
+	Span<AABB> _hzb_occlusion_get_changes_since(Scenario *p_scenario, uint64_t p_frame);
 
 	static void _instance_pair(Instance *p_A, Instance *p_B);
 	static void _instance_unpair(Instance *p_A, Instance *p_B);

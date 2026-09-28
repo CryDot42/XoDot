@@ -911,6 +911,7 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 	RSE::ViewportMSAA msaa = rb->get_msaa_3d();
 	bool use_msaa = msaa != RSE::VIEWPORT_MSAA_DISABLED;
 	bool resolve_depth_buffer = (use_msaa && has_depth_texture_override); // We'll check more conditions later.
+	bool capture_hzb_occlusion_depth = false; // If true: the depth buffer is read back for HZB occlusion culling.
 
 	bool ce_has_post_opaque = _has_compositor_effect(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_OPAQUE, p_render_data);
 	bool ce_has_pre_transparent = _has_compositor_effect(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT, p_render_data);
@@ -1025,6 +1026,15 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 
 		if (use_msaa && (global_surface_data.depth_texture_used || scene_state.used_depth_texture)) {
 			resolve_depth_buffer = true;
+		}
+
+		if (hzb_occlusion->is_depth_requested(rb)) {
+			// Subsampled depth buffers can't be read, and multisampled depth buffers must be resolved first.
+			const bool subsampled = using_subpass_post_process && texture_storage->render_target_is_subsampled_enabled(render_target);
+			capture_hzb_occlusion_depth = !subsampled && (!use_msaa || supports_depth_resolve);
+			if (capture_hzb_occlusion_depth && use_msaa) {
+				resolve_depth_buffer = true;
+			}
 		}
 
 		if (using_subpass_post_process) {
@@ -1348,6 +1358,12 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 
 			// note, if MSAA is used we should get an automatic resolve of the color buffer here.
 
+			if (capture_hzb_occlusion_depth) {
+				// Transparent objects were rendered in the same pass, so objects drawn with `depth_draw_always` will act as occluders.
+				RENDER_TIMESTAMP("HZB Occlusion Depth");
+				hzb_occlusion->capture_depth(rb, p_render_data->scene_data, false);
+			}
+
 			if (use_msaa && has_depth_texture_override && !supports_depth_resolve) {
 				// We don't have a fallback for this, See PR #111322
 				WARN_PRINT_ONCE("MSAA Depth buffer resolve is not supported on this platform.");
@@ -1359,6 +1375,12 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 			RD::get_singleton()->draw_list_end();
 
 			RD::get_singleton()->draw_command_end_label(); // Render 3D Pass / Render Reflection Probe Pass
+
+			if (capture_hzb_occlusion_depth) {
+				// Only opaque objects can occlude, so capture the depth buffer before transparent objects are drawn.
+				RENDER_TIMESTAMP("HZB Occlusion Depth");
+				hzb_occlusion->capture_depth(rb, p_render_data->scene_data, false);
+			}
 
 			// rendering effects
 			if (ce_has_pre_transparent) {

@@ -514,6 +514,7 @@ void RaycastOcclusionCull::add_buffer(RID p_buffer) {
 
 void RaycastOcclusionCull::remove_buffer(RID p_buffer) {
 	ERR_FAIL_COND(!buffers.has(p_buffer));
+	buffers[p_buffer].clear(); // Frees the debug texture.
 	buffers.erase(p_buffer);
 }
 
@@ -593,29 +594,49 @@ Rect2 _get_viewport_rect(const Projection &p_cam_projection) {
 	return Rect2(bottom_left, 2 * half_extents);
 }
 
-void RaycastOcclusionCull::buffer_update(RID p_buffer, const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal) {
+void RaycastOcclusionCull::buffer_update(RID p_buffer, const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const DepthReadback *p_depth_readback, Span<AABB> p_changed_bounds) {
 	if (!buffers.has(p_buffer)) {
 		return;
 	}
 
 	RaycastHZBuffer &buffer = buffers[p_buffer];
 
-	if (buffer.is_empty() || !scenarios.has(buffer.scenario_rid)) {
+	if (buffer.is_empty()) {
 		return;
 	}
 
-	Scenario &scenario = scenarios[buffer.scenario_rid];
-	scenario.update();
+	const bool use_occluders = buffer.is_using_occluders() && scenarios.has(buffer.scenario_rid);
+	const bool use_depth_readback = buffer.is_using_depth_readback();
 
-	Rect2 vp_rect = _get_viewport_rect(p_cam_projection);
-	Vector2 bottom_left = vp_rect.position;
-	bottom_left += _get_jitter(vp_rect, buffer.get_occlusion_buffer_size());
-	Vector3 near_bottom_left = Vector3(bottom_left.x, bottom_left.y, -p_cam_projection.get_z_near());
+	if (!use_occluders && !use_depth_readback) {
+		return;
+	}
 
-	buffer.update_camera_rays(p_cam_transform, near_bottom_left, vp_rect.get_size(), p_cam_projection.get_z_far(), p_cam_orthogonal);
+	if (use_occluders) {
+		Scenario &scenario = scenarios[buffer.scenario_rid];
+		scenario.update();
 
-	scenario.raycast(buffer.camera_rays, buffer.camera_ray_masks.ptr(), buffer.camera_rays_tile_count);
-	buffer.sort_rays(-p_cam_transform.basis.get_column(2), p_cam_orthogonal);
+		Rect2 vp_rect = _get_viewport_rect(p_cam_projection);
+		Vector2 bottom_left = vp_rect.position;
+		bottom_left += _get_jitter(vp_rect, buffer.get_occlusion_buffer_size());
+		Vector3 near_bottom_left = Vector3(bottom_left.x, bottom_left.y, -p_cam_projection.get_z_near());
+
+		buffer.update_camera_rays(p_cam_transform, near_bottom_left, vp_rect.get_size(), p_cam_projection.get_z_far(), p_cam_orthogonal);
+
+		scenario.raycast(buffer.camera_rays, buffer.camera_ray_masks.ptr(), buffer.camera_rays_tile_count);
+		buffer.sort_rays(-p_cam_transform.basis.get_column(2), p_cam_orthogonal);
+	}
+
+	bool reprojected = false;
+	if (use_depth_readback && p_depth_readback) {
+		reprojected = buffer.reproject_depth(*p_depth_readback, p_cam_transform, p_cam_projection, p_cam_orthogonal, use_occluders, p_changed_bounds);
+	}
+
+	if (!use_occluders && !reprojected) {
+		// No depth buffer is available yet, don't occlude anything.
+		buffer.clear_data();
+	}
+
 	buffer.update_mips();
 }
 

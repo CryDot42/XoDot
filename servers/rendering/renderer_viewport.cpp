@@ -316,10 +316,17 @@ void RendererViewport::_draw_3d(Viewport *p_viewport) {
 #ifndef _3D_DISABLED
 	RENDER_TIMESTAMP("> Render 3D Scene");
 
-	if (p_viewport->use_occlusion_culling) {
+	if (_viewport_has_occlusion_buffer(p_viewport)) {
 		if (p_viewport->occlusion_buffer_dirty) {
 			float aspect = p_viewport->size.aspect();
-			int max_size = occlusion_rays_per_thread * WorkerThreadPool::get_singleton()->get_thread_count();
+			int max_size = 0;
+			if (p_viewport->use_occlusion_culling) {
+				max_size = occlusion_rays_per_thread * WorkerThreadPool::get_singleton()->get_thread_count();
+			}
+			if (p_viewport->use_hzb_occlusion_culling) {
+				// Reprojecting the depth buffer is much cheaper than tracing rays, so a higher resolution can be afforded.
+				max_size = MAX(max_size, int(hzb_occlusion_buffer_height * hzb_occlusion_buffer_height * aspect));
+			}
 
 			int viewport_size = p_viewport->size.width * p_viewport->size.height;
 			max_size = CLAMP(max_size, viewport_size / (32 * 32), viewport_size / (2 * 2)); // At least one depth pixel for every 16x16 region. At most one depth pixel for every 2x2 region.
@@ -1240,7 +1247,7 @@ RID RendererViewport::viewport_get_occluder_debug_texture(RID p_viewport) const 
 	const Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL_V(viewport, RID());
 
-	if (viewport->use_occlusion_culling && viewport->debug_draw == RSE::VIEWPORT_DEBUG_DRAW_OCCLUDERS) {
+	if (_viewport_has_occlusion_buffer(viewport) && viewport->debug_draw == RSE::VIEWPORT_DEBUG_DRAW_OCCLUDERS) {
 		return RendererSceneOcclusionCull::get_singleton()->buffer_get_debug_texture(p_viewport);
 	}
 	return RID();
@@ -1309,7 +1316,7 @@ void RendererViewport::viewport_set_scenario(RID p_viewport, RID p_scenario) {
 	}
 
 	viewport->scenario = p_scenario;
-	if (viewport->use_occlusion_culling) {
+	if (_viewport_has_occlusion_buffer(viewport)) {
 		RendererSceneOcclusionCull::get_singleton()->buffer_set_scenario(p_viewport, p_scenario);
 	}
 }
@@ -1513,16 +1520,42 @@ void RendererViewport::viewport_set_use_occlusion_culling(RID p_viewport, bool p
 	if (viewport->use_occlusion_culling == p_use_occlusion_culling) {
 		return;
 	}
-	viewport->use_occlusion_culling = p_use_occlusion_culling;
 
-	if (viewport->use_occlusion_culling) {
-		RendererSceneOcclusionCull::get_singleton()->add_buffer(p_viewport);
-		RendererSceneOcclusionCull::get_singleton()->buffer_set_scenario(p_viewport, viewport->scenario);
-	} else {
-		RendererSceneOcclusionCull::get_singleton()->remove_buffer(p_viewport);
+	bool had_occlusion_buffer = _viewport_has_occlusion_buffer(viewport);
+	viewport->use_occlusion_culling = p_use_occlusion_culling;
+	_viewport_update_occlusion_buffer(viewport, had_occlusion_buffer);
+}
+
+void RendererViewport::viewport_set_use_hzb_occlusion_culling(RID p_viewport, bool p_use_hzb_occlusion_culling) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+
+	if (viewport->use_hzb_occlusion_culling == p_use_hzb_occlusion_culling) {
+		return;
 	}
 
-	viewport->occlusion_buffer_dirty = true;
+	bool had_occlusion_buffer = _viewport_has_occlusion_buffer(viewport);
+	viewport->use_hzb_occlusion_culling = p_use_hzb_occlusion_culling;
+	_viewport_update_occlusion_buffer(viewport, had_occlusion_buffer);
+}
+
+void RendererViewport::_viewport_update_occlusion_buffer(Viewport *p_viewport, bool p_had_occlusion_buffer) {
+	// A single occlusion buffer is shared by occluders and the depth buffer (HZB).
+	bool has_occlusion_buffer = _viewport_has_occlusion_buffer(p_viewport);
+
+	if (has_occlusion_buffer && !p_had_occlusion_buffer) {
+		RendererSceneOcclusionCull::get_singleton()->add_buffer(p_viewport->self);
+		RendererSceneOcclusionCull::get_singleton()->buffer_set_scenario(p_viewport->self, p_viewport->scenario);
+	} else if (!has_occlusion_buffer && p_had_occlusion_buffer) {
+		RendererSceneOcclusionCull::get_singleton()->remove_buffer(p_viewport->self);
+	}
+
+	if (has_occlusion_buffer) {
+		RendererSceneOcclusionCull::get_singleton()->buffer_set_use_occluders(p_viewport->self, p_viewport->use_occlusion_culling);
+		RendererSceneOcclusionCull::get_singleton()->buffer_set_use_depth_readback(p_viewport->self, p_viewport->use_hzb_occlusion_culling);
+	}
+
+	p_viewport->occlusion_buffer_dirty = true;
 }
 
 void RendererViewport::viewport_set_occlusion_rays_per_thread(int p_rays_per_thread) {
@@ -1683,7 +1716,7 @@ bool RendererViewport::free(RID p_rid) {
 		active_viewports.erase(viewport);
 		sorted_active_viewports_dirty = true;
 
-		if (viewport->use_occlusion_culling) {
+		if (_viewport_has_occlusion_buffer(viewport)) {
 			RendererSceneOcclusionCull::get_singleton()->remove_buffer(p_rid);
 		}
 
@@ -1748,4 +1781,5 @@ int RendererViewport::get_num_viewports_with_motion_vectors() const {
 
 RendererViewport::RendererViewport() {
 	occlusion_rays_per_thread = GLOBAL_GET("rendering/occlusion_culling/occlusion_rays_per_thread");
+	hzb_occlusion_buffer_height = GLOBAL_GET("rendering/occlusion_culling/hzb_buffer_height");
 }

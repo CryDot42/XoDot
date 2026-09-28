@@ -33,6 +33,7 @@
 #include "core/math/projection.h"
 #include "core/templates/paged_array.h"
 #include "servers/rendering/renderer_geometry_instance.h"
+#include "servers/rendering/renderer_scene_occlusion_cull.h"
 #include "servers/rendering/rendering_server_types.h"
 #include "servers/rendering/storage/compositor_storage.h"
 #include "servers/rendering/storage/environment_storage.h"
@@ -320,6 +321,15 @@ public:
 	};
 
 	virtual void render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderSDFGIData *p_render_sdfgi_regions, int p_render_sdfgi_region_count, float p_window_output_max_value, const RenderSDFGIUpdateData *p_sdfgi_update_data = nullptr, RenderingServerTypes::RenderInfo *r_render_info = nullptr) = 0;
+
+	/* HZB OCCLUSION CULLING */
+
+	// Returns true if the renderer can read back its depth buffer for HZB occlusion culling.
+	virtual bool hzb_occlusion_is_supported() const { return false; }
+	// Requests the depth buffer of the next frame rendered into `p_render_buffers` to be downsampled to
+	// `p_size` and read back, and returns the most recent readback available (if any).
+	// The returned pointer remains valid until the next call to this function or to `render_scene()`.
+	virtual const RendererSceneOcclusionCull::DepthReadback *hzb_occlusion_request_depth(const Ref<RenderSceneBuffers> &p_render_buffers, const Size2i &p_size) { return nullptr; }
 
 	virtual void render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) = 0;
 	virtual void render_particle_collider_heightfield(RID p_collider, const Transform3D &p_transform, const PagedArray<RenderGeometryInstance *> &p_instances) = 0;

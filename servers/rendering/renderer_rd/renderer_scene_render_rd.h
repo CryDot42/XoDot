@@ -35,6 +35,7 @@
 #include "servers/rendering/renderer_rd/effects/copy_effects.h"
 #include "servers/rendering/renderer_rd/effects/debug_effects.h"
 #include "servers/rendering/renderer_rd/effects/fsr.h"
+#include "servers/rendering/renderer_rd/effects/hzb_occlusion.h"
 #include "servers/rendering/renderer_rd/effects/luminance.h"
 #include "servers/rendering/renderer_rd/effects/resolve.h"
 #include "servers/rendering/renderer_rd/effects/smaa.h"
@@ -69,6 +70,7 @@ protected:
 	RendererRD::FSR *fsr = nullptr;
 	RendererRD::VRS *vrs = nullptr;
 	RendererRD::Resolve *resolve_effects = nullptr;
+	RendererRD::HZBOcclusion *hzb_occlusion = nullptr;
 #ifdef METAL_ENABLED
 	RendererRD::MFXSpatialEffect *mfx_spatial = nullptr;
 #endif
@@ -246,6 +248,11 @@ public:
 	virtual void gi_set_use_half_resolution(bool p_enable) override;
 
 	RID render_buffers_get_default_voxel_gi_buffer();
+
+	/* HZB occlusion culling */
+
+	virtual bool hzb_occlusion_is_supported() const override { return hzb_occlusion != nullptr; }
+	virtual const RendererSceneOcclusionCull::DepthReadback *hzb_occlusion_request_depth(const Ref<RenderSceneBuffers> &p_render_buffers, const Size2i &p_size) override;
 
 	virtual void base_uniforms_changed() = 0;
 

@@ -3320,12 +3320,22 @@
 			The [url=https://en.wikipedia.org/wiki/Bounding_volume_hierarchy]Bounding Volume Hierarchy[/url] quality to use when rendering the occlusion culling buffer. Higher values will result in more accurate occlusion culling, at the cost of higher CPU usage. See also [member rendering/occlusion_culling/occlusion_rays_per_thread].
 			[b]Note:[/b] This property is only read when the project starts. To adjust the BVH build quality at runtime, use [method RenderingServer.viewport_set_occlusion_culling_build_quality].
 		</member>
+		<member name="rendering/occlusion_culling/hzb_buffer_height" type="int" setter="" getter="" default="144">
+			The height (in pixels) of the occlusion culling buffer used by HZB occlusion culling (see [member rendering/occlusion_culling/use_hzb_occlusion_culling]). Its width depends on the viewport's aspect ratio. The depth buffer is downsampled to this resolution on the GPU, read back and reprojected on the CPU. Higher values can cull objects more accurately (especially near the edges of occluding objects), at the cost of higher CPU usage and a larger GPU readback.
+			If occluders are also used (see [member rendering/occlusion_culling/use_occlusion_culling]), occlusion rays are traced at this resolution as well if it's higher than the one determined by [member rendering/occlusion_culling/occlusion_rays_per_thread].
+			[b]Note:[/b] This property is only read when the project starts.
+		</member>
 		<member name="rendering/occlusion_culling/jitter_projection" type="bool" setter="" getter="" default="true">
 			If [code]true[/code], the projection used for rendering the occlusion buffer will be jittered. This can help prevent objects being incorrectly culled when visible through small gaps.
 		</member>
 		<member name="rendering/occlusion_culling/occlusion_rays_per_thread" type="int" setter="" getter="" default="512">
 			The number of occlusion rays traced per CPU thread. Higher values will result in more accurate occlusion culling, at the cost of higher CPU usage. The occlusion culling buffer's pixel count is roughly equal to [code]occlusion_rays_per_thread * number_of_logical_cpu_cores[/code], so it will depend on the system's CPU. Therefore, CPUs with fewer cores will use a lower resolution to attempt keeping performance costs even across devices. See also [member rendering/occlusion_culling/bvh_build_quality].
 			[b]Note:[/b] This property is only read when the project starts. To adjust the number of occlusion rays traced per thread at runtime, use [method RenderingServer.viewport_set_occlusion_rays_per_thread].
+		</member>
+		<member name="rendering/occlusion_culling/use_hzb_occlusion_culling" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], the depth buffer rendered by the GPU will be used for occlusion culling in 3D in the root viewport (HZB, or Hierarchical Z-Buffer occlusion culling). In custom viewports, [member Viewport.use_hzb_occlusion_culling] must be set to [code]true[/code] instead.
+			Unlike [member rendering/occlusion_culling/use_occlusion_culling], this doesn't require placing [OccluderInstance3D] nodes: every opaque object can hide the objects behind it. The depth buffer is downsampled and read back asynchronously, then reprojected to match the current camera. Objects that moved since the depth buffer was rendered don't occlude anything until it catches up. Both methods can be enabled at the same time, in which case an object is culled if it's hidden by either occluders or the depth buffer.
+			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering methods. Unlike occluder-based occlusion culling, HZB occlusion culling doesn't require the [code]raycast[/code] module.
 		</member>
 		<member name="rendering/occlusion_culling/use_occlusion_culling" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], [OccluderInstance3D] nodes will be usable for occlusion culling in 3D in the root viewport. In custom viewports, [member Viewport.use_occlusion_culling] must be set to [code]true[/code] instead.
