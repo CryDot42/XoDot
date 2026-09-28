@@ -1581,6 +1581,14 @@ void LightStorage::_reflection_atlas_clear(ReflectionAtlas *p_reflection_atlas) 
 	RD::get_singleton()->free_rid(p_reflection_atlas->depth_buffer);
 	p_reflection_atlas->depth_buffer = RID();
 
+	// Also frees the views of every face and their framebuffers.
+	RD::get_singleton()->free_rid(p_reflection_atlas->color_buffer);
+	p_reflection_atlas->color_buffer = RID();
+	for (int i = 0; i < 6; i++) {
+		p_reflection_atlas->color_views[i] = RID();
+		p_reflection_atlas->color_fbs[i] = RID();
+	}
+
 	for (int i = 0; i < p_reflection_atlas->reflections.size(); i++) {
 		p_reflection_atlas->reflections.write[i].data.clear_reflection_data();
 		if (p_reflection_atlas->reflections[i].owner.is_null()) {
