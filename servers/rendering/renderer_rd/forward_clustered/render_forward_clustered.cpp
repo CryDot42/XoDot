@@ -767,7 +767,12 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 		scene_state.ubo.ssao_light_affect = environment_get_ssao_direct_light_affect(p_render_data->environment);
 		uint32_t ss_flags = 0;
 		if (p_opaque_render_buffers) {
-			ss_flags |= environment_get_ssao_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO : 0;
+			if (environment_get_ssao_enabled(p_render_data->environment)) {
+				ss_flags |= SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO;
+				if (ss_effects->ssao_is_using_bent_normals()) {
+					ss_flags |= SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO_BENT_NORMALS;
+				}
+			}
 			ss_flags |= environment_get_ssil_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL : 0;
 			ss_flags |= environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR : 0;
 			ss_flags |= bool(GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled")) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS : 0;
@@ -1447,7 +1452,7 @@ void RenderForwardClustered::setup_added_decal(const Transform3D &p_transform, c
 
 /* Render scene */
 
-void RenderForwardClustered::_process_ssao(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_buffers, const Projection *p_projections) {
+void RenderForwardClustered::_process_ssao(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_buffers, const Projection *p_projections, float p_taa_frame_count) {
 	ERR_FAIL_NULL(ss_effects);
 	ERR_FAIL_COND(p_render_buffers.is_null());
 	ERR_FAIL_COND(p_environment.is_null());
@@ -1460,10 +1465,9 @@ void RenderForwardClustered::_process_ssao(Ref<RenderSceneBuffersRD> p_render_bu
 	RendererRD::SSEffects::SSAOSettings settings;
 	settings.radius = environment_get_ssao_radius(p_environment);
 	settings.intensity = environment_get_ssao_intensity(p_environment);
-	settings.power = environment_get_ssao_power(p_environment);
-	settings.detail = environment_get_ssao_detail(p_environment);
-	settings.horizon = environment_get_ssao_horizon(p_environment);
-	settings.sharpness = environment_get_ssao_sharpness(p_environment);
+	settings.thin_occluder_compensation = environment_get_ssao_thin_occluder_compensation(p_environment);
+	// Temporal noise is only used when TAA is enabled, the frame count is always 0 otherwise.
+	settings.noise_index = uint32_t(p_taa_frame_count);
 	settings.full_screen_size = p_render_buffers->get_internal_size();
 
 	ss_effects->ssao_allocate_buffers(p_render_buffers, rb_data->ss_effects_data.ssao, settings);
@@ -1517,7 +1521,9 @@ void RenderForwardClustered::_process_ssr(Ref<RenderSceneBuffersRD> p_render_buf
 
 	RENDER_TIMESTAMP("Process SSR");
 
-	ss_effects->ssr_allocate_buffers(p_render_buffers, rb_data->ss_effects_data.ssr, p_render_buffers->get_base_data_format());
+	if (!ss_effects->ssr_allocate_buffers(p_render_buffers, rb_data->ss_effects_data.ssr, p_render_buffers->get_base_data_format())) {
+		return;
+	}
 
 	Projection reprojections[RendererSceneRender::MAX_RENDER_VIEWS];
 
@@ -1533,7 +1539,13 @@ void RenderForwardClustered::_process_ssr(Ref<RenderSceneBuffersRD> p_render_buf
 	}
 	rb_data->ss_effects_data.ssr_last_frame_transform = p_transform;
 
-	ss_effects->screen_space_reflection(p_render_buffers, rb_data->ss_effects_data.ssr, p_normal_slices, environment_get_ssr_max_steps(p_environment), environment_get_ssr_fade_in(p_environment), environment_get_ssr_fade_out(p_environment), environment_get_ssr_depth_tolerance(p_environment), p_projections, reprojections, p_eye_offsets, *copy_effects);
+	RendererRD::SSEffects::SSRSettings settings;
+	settings.max_steps = environment_get_ssr_max_steps(p_environment);
+	settings.fade_in = environment_get_ssr_fade_in(p_environment);
+	settings.fade_out = environment_get_ssr_fade_out(p_environment);
+	settings.depth_tolerance = environment_get_ssr_depth_tolerance(p_environment);
+
+	ss_effects->screen_space_reflection(p_render_buffers, rb_data->ss_effects_data.ssr, p_normal_slices, settings, p_projections, reprojections, p_eye_offsets);
 }
 
 void RenderForwardClustered::_process_sscs(Ref<RenderSceneBuffersRD> p_render_buffers, const Projection *p_projections, const Transform3D &p_transform, const LocalVector<int> &p_contact_shadows, const RenderShadowData *p_render_shadows, const float p_taa_frame_count) {
@@ -1700,20 +1712,18 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 			ss_effects->allocate_last_frame_buffer(rb, p_use_ssil || p_use_screen_probes, p_use_ssr);
 		}
 
-		if (p_use_ssao || p_use_ssil) {
-			RENDER_TIMESTAMP("Prepare Depth for SSAO/SSIL");
+		if (p_use_ssao) {
+			_process_ssao(rb, p_render_data->environment, p_normal_roughness_slices, p_render_data->scene_data->view_projection, p_render_data->scene_data->taa_frame_count);
+		}
+
+		if (p_use_ssil) {
+			RENDER_TIMESTAMP("Prepare Depth for SSIL");
 			// Convert our depth buffer data to linear data in
 			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 				ss_effects->downsample_depth(rb, v, p_render_data->scene_data->view_projection[v]);
 			}
 
-			if (p_use_ssao) {
-				_process_ssao(rb, p_render_data->environment, p_normal_roughness_slices, p_render_data->scene_data->view_projection);
-			}
-
-			if (p_use_ssil) {
-				_process_ssil(rb, p_render_data->environment, p_normal_roughness_slices, p_render_data->scene_data->view_projection, p_render_data->scene_data->cam_transform);
-			}
+			_process_ssil(rb, p_render_data->environment, p_normal_roughness_slices, p_render_data->scene_data->view_projection, p_render_data->scene_data->cam_transform);
 		}
 
 		if (p_use_sscs) {
@@ -2436,7 +2446,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		{
 			//just mix specular back
 			RENDER_TIMESTAMP("Merge Specular");
-			copy_effects->merge_specular(color_only_framebuffer, rb_data->get_specular(), !use_msaa ? RID() : rb->get_internal_texture(), RID(), p_render_data->scene_data->view_count);
+			copy_effects->merge_specular(color_only_framebuffer, rb_data->get_specular(), !use_msaa ? RID() : rb->get_internal_texture(), p_render_data->scene_data->view_count);
 		}
 	}
 
@@ -2676,9 +2686,22 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 	RID render_target = rb->get_render_target();
 
 	if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_SSAO && rb->has_texture(RB_SCOPE_SSAO, RB_FINAL)) {
+		// The visibility is stored in the red channel.
 		RID final = rb->get_texture_slice(RB_SCOPE_SSAO, RB_FINAL, 0, 0);
 		Size2i rtsize = texture_storage->render_target_get_size(render_target);
 		copy_effects->copy_to_fb_rect(final, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, true);
+	}
+
+	if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_SSAO_BENT_NORMALS && rb->has_texture(RB_SCOPE_SSAO, RB_FINAL) && rb->get_texture_format(RB_SCOPE_SSAO, RB_FINAL).format == RD::DATA_FORMAT_R8G8B8A8_UNORM) {
+		// The view space bent normal is stored in the green, blue and alpha channels.
+		RD::TextureView bent_normal_view;
+		bent_normal_view.swizzle_r = RD::TEXTURE_SWIZZLE_G;
+		bent_normal_view.swizzle_g = RD::TEXTURE_SWIZZLE_B;
+		bent_normal_view.swizzle_b = RD::TEXTURE_SWIZZLE_A;
+		bent_normal_view.swizzle_a = RD::TEXTURE_SWIZZLE_ONE;
+		RID bent_normals = rb->get_texture_slice_view(RB_SCOPE_SSAO, RB_FINAL, 0, 0, 1, 1, bent_normal_view);
+		Size2i rtsize = texture_storage->render_target_get_size(render_target);
+		copy_effects->copy_to_fb_rect(bent_normals, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, false, false, false, RID(), false, false, false, true);
 	}
 
 	if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_SSIL && rb->has_texture(RB_SCOPE_SSIL, RB_FINAL)) {
@@ -4117,10 +4140,11 @@ RID RenderForwardClustered::_render_buffers_get_velocity_texture(Ref<RenderScene
 	return p_render_buffers->get_velocity_buffer(false);
 }
 
-void RenderForwardClustered::environment_set_ssao_quality(RSE::EnvironmentSSAOQuality p_quality, bool p_half_size, float p_adaptive_target, int p_blur_passes, float p_fadeout_from, float p_fadeout_to) {
+void RenderForwardClustered::environment_set_ssao_quality(RSE::EnvironmentSSAOQuality p_quality, int p_denoise_passes, bool p_bent_normals) {
 	ERR_FAIL_NULL(ss_effects);
-	ERR_FAIL_COND(p_quality < RSE::EnvironmentSSAOQuality::ENV_SSAO_QUALITY_VERY_LOW || p_quality > RSE::EnvironmentSSAOQuality::ENV_SSAO_QUALITY_ULTRA);
-	ss_effects->ssao_set_quality(p_quality, p_half_size, p_adaptive_target, p_blur_passes, p_fadeout_from, p_fadeout_to);
+	ERR_FAIL_COND(p_quality < RSE::EnvironmentSSAOQuality::ENV_SSAO_QUALITY_LOW || p_quality > RSE::EnvironmentSSAOQuality::ENV_SSAO_QUALITY_ULTRA);
+	ERR_FAIL_COND(p_denoise_passes < 0 || p_denoise_passes > 3);
+	ss_effects->ssao_set_quality(p_quality, p_denoise_passes, p_bent_normals);
 }
 
 void RenderForwardClustered::environment_set_ssil_quality(RSE::EnvironmentSSILQuality p_quality, bool p_half_size, float p_adaptive_target, int p_blur_passes, float p_fadeout_from, float p_fadeout_to) {

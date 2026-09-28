@@ -692,7 +692,7 @@ float RendererEnvironmentStorage::environment_get_ssr_depth_tolerance(RID p_env)
 
 // SSAO
 
-void RendererEnvironmentStorage::environment_set_ssao(RID p_env, bool p_enable, float p_radius, float p_intensity, float p_power, float p_detail, float p_horizon, float p_sharpness, float p_light_affect, float p_ao_channel_affect) {
+void RendererEnvironmentStorage::environment_set_ssao(RID p_env, bool p_enable, float p_radius, float p_intensity, float p_thin_occluder_compensation, float p_light_affect, float p_ao_channel_affect) {
 	Environment *env = environment_owner.get_or_null(p_env);
 	ERR_FAIL_NULL(env);
 #ifdef DEBUG_ENABLED
@@ -703,10 +703,7 @@ void RendererEnvironmentStorage::environment_set_ssao(RID p_env, bool p_enable, 
 	env->ssao_enabled = p_enable;
 	env->ssao_radius = p_radius;
 	env->ssao_intensity = p_intensity;
-	env->ssao_power = p_power;
-	env->ssao_detail = p_detail;
-	env->ssao_horizon = p_horizon;
-	env->ssao_sharpness = p_sharpness;
+	env->ssao_thin_occluder_compensation = p_thin_occluder_compensation;
 	env->ssao_direct_light_affect = p_light_affect;
 	env->ssao_ao_channel_affect = p_ao_channel_affect;
 }
@@ -719,38 +716,20 @@ bool RendererEnvironmentStorage::environment_get_ssao_enabled(RID p_env) const {
 
 float RendererEnvironmentStorage::environment_get_ssao_radius(RID p_env) const {
 	Environment *env = environment_owner.get_or_null(p_env);
-	ERR_FAIL_NULL_V(env, 1.0);
+	ERR_FAIL_NULL_V(env, 0.5);
 	return env->ssao_radius;
 }
 
 float RendererEnvironmentStorage::environment_get_ssao_intensity(RID p_env) const {
 	Environment *env = environment_owner.get_or_null(p_env);
-	ERR_FAIL_NULL_V(env, 2.0);
+	ERR_FAIL_NULL_V(env, 1.0);
 	return env->ssao_intensity;
 }
 
-float RendererEnvironmentStorage::environment_get_ssao_power(RID p_env) const {
+float RendererEnvironmentStorage::environment_get_ssao_thin_occluder_compensation(RID p_env) const {
 	Environment *env = environment_owner.get_or_null(p_env);
-	ERR_FAIL_NULL_V(env, 1.5);
-	return env->ssao_power;
-}
-
-float RendererEnvironmentStorage::environment_get_ssao_detail(RID p_env) const {
-	Environment *env = environment_owner.get_or_null(p_env);
-	ERR_FAIL_NULL_V(env, 0.5);
-	return env->ssao_detail;
-}
-
-float RendererEnvironmentStorage::environment_get_ssao_horizon(RID p_env) const {
-	Environment *env = environment_owner.get_or_null(p_env);
-	ERR_FAIL_NULL_V(env, 0.06);
-	return env->ssao_horizon;
-}
-
-float RendererEnvironmentStorage::environment_get_ssao_sharpness(RID p_env) const {
-	Environment *env = environment_owner.get_or_null(p_env);
-	ERR_FAIL_NULL_V(env, 0.98);
-	return env->ssao_sharpness;
+	ERR_FAIL_NULL_V(env, 0.0);
+	return env->ssao_thin_occluder_compensation;
 }
 
 float RendererEnvironmentStorage::environment_get_ssao_direct_light_affect(RID p_env) const {

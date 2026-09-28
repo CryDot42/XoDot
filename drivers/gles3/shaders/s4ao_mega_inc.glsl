@@ -1,13 +1,8 @@
 // S4AO (Stupid Simple Screen Space Ambient Occlusion) - Jonathan Dummer (O1S)
 // The mega version uses N concentric rings of samples.
 
-#if defined(USE_SSAO_MEGA)
 const int rings = 4; // Start with the outer ring.
 const int samps[] = int[](24, 18, 12, 6); // ( 9, 6, 3 ) is a minimum, but I want better.
-#else
-const int rings = 3; // Start with the outer ring.
-const int samps[] = int[](15, 10, 5, 1); // ( 9, 6, 3 ) is a minimum, but I want better.
-#endif
 const float average_samples = 1.0 / float(samps[0] + samps[1] * int(rings > 1) + samps[2] * int(rings > 2) + samps[3] * int(rings > 3));
 const float ssao_falloff_frac = 0.25;
 // Perform the SSAO.

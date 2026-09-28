@@ -256,32 +256,28 @@
 			The rotation to use for sky rendering.
 		</member>
 		<member name="ssao_ao_channel_affect" type="float" setter="set_ssao_ao_channel_affect" getter="get_ssao_ao_channel_affect" default="0.0">
-			The screen-space ambient occlusion intensity on materials that have an AO texture defined. Values higher than [code]0[/code] will make the SSAO effect visible in areas darkened by AO textures.
-		</member>
-		<member name="ssao_detail" type="float" setter="set_ssao_detail" getter="get_ssao_detail" default="0.5">
-			Sets the strength of the additional level of detail for the screen-space ambient occlusion effect. A high value makes the detail pass more prominent, but it may contribute to aliasing in your final image.
+			The screen-space ambient occlusion intensity on materials that have an AO texture defined. At [code]0.0[/code], the darkest of the material's ambient occlusion and SSAO is used, so the SSAO effect isn't visible in areas already darkened by AO textures. Values higher than [code]0.0[/code] blend towards multiplying both terms, which makes the SSAO effect visible in areas darkened by AO textures.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</member>
 		<member name="ssao_enabled" type="bool" setter="set_ssao_enabled" getter="is_ssao_enabled" default="false">
-			If [code]true[/code], the screen-space ambient occlusion effect is enabled. This darkens objects' corners and cavities to simulate ambient light not reaching the entire object as in real life. This works well for small, dynamic objects, but baked lighting or ambient occlusion textures will do a better job at displaying ambient occlusion on large static objects. Godot uses a form of SSAO called Adaptive Screen Space Ambient Occlusion which is itself a form of Horizon Based Ambient Occlusion.
-			[b]Note:[/b] SSAO is only supported in the Forward+ and Compatibility rendering methods, not Mobile.
+			If [code]true[/code], the screen-space ambient occlusion effect is enabled. This darkens objects' corners and cavities to simulate ambient light not reaching the entire object as in real life. This works well for small, dynamic objects, but baked lighting or ambient occlusion textures will do a better job at displaying ambient occlusion on large static objects.
+			When using the Forward+ rendering method, Godot uses XeGTAO, an implementation of Ground Truth Ambient Occlusion (GTAO). GTAO computes a radiometrically correct ambient occlusion term by finding the horizons of the visible hemisphere along several screen-space slices around each pixel. If [member ProjectSettings.rendering/environment/ssao/bent_normals] is enabled, it also computes bent normals (the average unoccluded direction around each pixel), which are used to sample indirect diffuse lighting and to occlude indirect specular lighting (reflections). The quality and denoising of the effect can be adjusted in the project settings, see [member ProjectSettings.rendering/environment/ssao/quality] and [member ProjectSettings.rendering/environment/ssao/denoise_passes].
+			[b]Note:[/b] SSAO is only supported in the Forward+ and Compatibility rendering methods, not Mobile. The Compatibility rendering method uses a simpler post-processing effect that only supports [member ssao_radius] and [member ssao_intensity].
 		</member>
-		<member name="ssao_horizon" type="float" setter="set_ssao_horizon" getter="get_ssao_horizon" default="0.06">
-			The threshold for considering whether a given point on a surface is occluded or not represented as an angle from the horizon mapped into the [code]0.0-1.0[/code] range. A value of [code]1.0[/code] results in no occlusion.
-		</member>
-		<member name="ssao_intensity" type="float" setter="set_ssao_intensity" getter="get_ssao_intensity" default="2.0">
-			The primary screen-space ambient occlusion intensity. Acts as a multiplier for the screen-space ambient occlusion effect. A higher value results in darker occlusion.
+		<member name="ssao_intensity" type="float" setter="set_ssao_intensity" getter="get_ssao_intensity" default="1.0">
+			The strength of the screen-space ambient occlusion effect. Higher values result in darker occlusion, [code]0.0[/code] disables the occlusion. The visibility term computed by GTAO is raised to the power of [code]2.2 * ssao_intensity[/code]; the default value of [code]1.0[/code] was tuned to match a ray traced reference.
 		</member>
 		<member name="ssao_light_affect" type="float" setter="set_ssao_direct_light_affect" getter="get_ssao_direct_light_affect" default="0.0">
 			The screen-space ambient occlusion intensity in direct light. In real life, ambient occlusion only applies to indirect light, which means its effects can't be seen in direct light. Values higher than [code]0[/code] will make the SSAO effect visible in direct light.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</member>
-		<member name="ssao_power" type="float" setter="set_ssao_power" getter="get_ssao_power" default="1.5">
-			The distribution of occlusion. A higher value results in darker occlusion, similar to [member ssao_intensity], but with a sharper falloff.
+		<member name="ssao_radius" type="float" setter="set_ssao_radius" getter="get_ssao_radius" default="0.5">
+			The world-space radius (in meters) at which objects can occlude each other when calculating screen-space ambient occlusion. Higher values result in occlusion over a greater distance, but make small details less pronounced and increase sampling noise, as the same number of samples covers a larger area. The effect fades out when the radius becomes smaller than a few pixels on screen.
+			[b]Note:[/b] When using the Forward+ rendering method, this radius is internally multiplied by [code]1.457[/code], a heuristic that counteracts the biases inherent to screen-space ambient occlusion.
 		</member>
-		<member name="ssao_radius" type="float" setter="set_ssao_radius" getter="get_ssao_radius" default="1.0">
-			The distance at which objects can occlude each other when calculating screen-space ambient occlusion. Higher values will result in occlusion over a greater distance at the cost of performance and quality.
-		</member>
-		<member name="ssao_sharpness" type="float" setter="set_ssao_sharpness" getter="get_ssao_sharpness" default="0.98">
-			The amount that the screen-space ambient occlusion effect is allowed to blur over the edges of objects. Setting too high will result in aliasing around the edges of objects. Setting too low will make object edges appear blurry.
+		<member name="ssao_thin_occluder_compensation" type="float" setter="set_ssao_thin_occluder_compensation" getter="get_ssao_thin_occluder_compensation" default="0.0">
+			Reduces the influence of samples that are located behind the surface being shaded. Screen-space ambient occlusion only sees the surfaces closest to the camera and has to assume that they are infinitely thick, which overdarkens areas behind thin objects such as poles, foliage or railings. Increase this value to counteract this, at the cost of slightly reducing occlusion in general.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</member>
 		<member name="ssil_enabled" type="bool" setter="set_ssil_enabled" getter="is_ssil_enabled" default="false">
 			If [code]true[/code], the screen-space indirect lighting effect is enabled. Screen space indirect lighting is a form of indirect lighting that allows diffuse light to bounce between nearby objects. Screen-space indirect lighting works very similarly to screen-space ambient occlusion, in that it only affects a limited range. It is intended to be used along with a form of proper global illumination like SDFGI or [VoxelGI]. Screen-space indirect lighting is not affected by individual light's [member Light3D.light_indirect_energy].

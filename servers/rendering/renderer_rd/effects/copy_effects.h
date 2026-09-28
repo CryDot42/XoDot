@@ -332,14 +332,10 @@ private:
 
 	enum SpecularMergeMode {
 		SPECULAR_MERGE_ADD,
-		SPECULAR_MERGE_SSR,
 		SPECULAR_MERGE_ADDITIVE_ADD,
-		SPECULAR_MERGE_ADDITIVE_SSR,
 
 		SPECULAR_MERGE_ADD_MULTIVIEW,
-		SPECULAR_MERGE_SSR_MULTIVIEW,
 		SPECULAR_MERGE_ADDITIVE_ADD_MULTIVIEW,
-		SPECULAR_MERGE_ADDITIVE_SSR_MULTIVIEW,
 
 		SPECULAR_MERGE_MAX
 	};
@@ -395,7 +391,7 @@ public:
 	void octmap_roughness(RID p_source_rd_texture, RID p_dest_texture, uint32_t p_sample_count, float p_roughness, uint32_t p_source_size, uint32_t p_dest_size, float p_border_size);
 	void octmap_roughness_raster(RID p_source_rd_texture, RID p_dest_framebuffer, uint32_t p_sample_count, float p_roughness, uint32_t p_source_size, uint32_t p_dest_size, float p_border_size);
 
-	void merge_specular(RID p_dest_framebuffer, RID p_specular, RID p_base, RID p_reflection, uint32_t p_view_count);
+	void merge_specular(RID p_dest_framebuffer, RID p_specular, RID p_base, uint32_t p_view_count);
 };
 
 } // namespace RendererRD

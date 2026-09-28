@@ -48,6 +48,26 @@ static _FORCE_INLINE_ void store_camera(const Projection &p_mtx, float *p_array)
 	}
 }
 
+// From XeGTAO (https://github.com/GameTechDev/XeGTAO), based on https://www.shadertoy.com/view/3tB3z3.
+static uint32_t gtao_hilbert_index(uint32_t p_pos_x, uint32_t p_pos_y) {
+	const uint32_t hilbert_width = 64; // 6 level Hilbert curve.
+	uint32_t index = 0;
+	for (uint32_t cur_level = hilbert_width / 2; cur_level > 0; cur_level /= 2) {
+		uint32_t region_x = (p_pos_x & cur_level) > 0;
+		uint32_t region_y = (p_pos_y & cur_level) > 0;
+		index += cur_level * cur_level * ((3 * region_x) ^ region_y);
+		if (region_y == 0) {
+			if (region_x == 1) {
+				p_pos_x = hilbert_width - 1 - p_pos_x;
+				p_pos_y = hilbert_width - 1 - p_pos_y;
+			}
+
+			SWAP(p_pos_x, p_pos_y);
+		}
+	}
+	return index;
+}
+
 SSEffects::SSEffects() {
 	singleton = this;
 
@@ -60,7 +80,6 @@ SSEffects::SSEffects() {
 		downsampler_modes.push_back("\n#define GENERATE_MIPS\n#define USE_HALF_SIZE\n");
 		downsampler_modes.push_back("\n#define USE_HALF_BUFFERS\n");
 		downsampler_modes.push_back("\n#define USE_HALF_BUFFERS\n#define USE_HALF_SIZE\n");
-		downsampler_modes.push_back("\n#define GENERATE_MIPS\n#define GENERATE_FULL_MIPS");
 
 		ss_effects.downsample_shader.initialize(downsampler_modes);
 
@@ -97,6 +116,17 @@ SSEffects::SSEffects() {
 		}
 
 		RD::get_singleton()->buffer_update(ss_effects.gather_constants_buffer, 0, sizeof(SSEffectsGatherConstants), &gather_constants);
+
+		RD::SamplerState sampler;
+		sampler.mag_filter = RD::SAMPLER_FILTER_NEAREST;
+		sampler.min_filter = RD::SAMPLER_FILTER_NEAREST;
+		sampler.mip_filter = RD::SAMPLER_FILTER_NEAREST;
+		sampler.repeat_u = RD::SAMPLER_REPEAT_MODE_MIRRORED_REPEAT;
+		sampler.repeat_v = RD::SAMPLER_REPEAT_MODE_MIRRORED_REPEAT;
+		sampler.repeat_w = RD::SAMPLER_REPEAT_MODE_MIRRORED_REPEAT;
+		sampler.max_lod = 4;
+
+		ss_effects.mirror_sampler = RD::get_singleton()->sampler_create(sampler);
 	}
 
 	// Initialize Screen Space Indirect Lighting (SSIL)
@@ -176,105 +206,93 @@ SSEffects::SSEffects() {
 		}
 	}
 
-	// Initialize Screen Space Ambient Occlusion (SSAO)
-	ssao_set_quality(RSE::EnvironmentSSAOQuality(int(GLOBAL_GET("rendering/environment/ssao/quality"))), GLOBAL_GET("rendering/environment/ssao/half_size"), GLOBAL_GET("rendering/environment/ssao/adaptive_target"), GLOBAL_GET("rendering/environment/ssao/blur_passes"), GLOBAL_GET("rendering/environment/ssao/fadeout_from"), GLOBAL_GET("rendering/environment/ssao/fadeout_to"));
+	// Initialize Screen Space Ambient Occlusion (SSAO), implemented using XeGTAO.
+	ssao_set_quality(RSE::EnvironmentSSAOQuality(int(GLOBAL_GET("rendering/environment/ssao/quality"))), GLOBAL_GET("rendering/environment/ssao/denoise_passes"), GLOBAL_GET("rendering/environment/ssao/bent_normals"));
+
+	{
+		Vector<String> prefilter_depths_modes;
+		prefilter_depths_modes.push_back("\n");
+
+		ssao.prefilter_depths_shader.initialize(prefilter_depths_modes);
+		ssao.prefilter_depths_shader_version = ssao.prefilter_depths_shader.version_create();
+		ssao.prefilter_depths_pipeline.create_compute_pipeline(ssao.prefilter_depths_shader.version_get_shader(ssao.prefilter_depths_shader_version, 0));
+	}
+
+	{
+		// Variants are ordered by quality, first without and then with bent normals (see SSAOGTAOMode).
+		static_assert(SSAO_GTAO_MAX == 2 * RSE::ENV_SSAO_QUALITY_MAX);
+
+		// Number of slices and steps per slice (per side) for each quality level, these match XeGTAO's presets.
+		const int slice_count[RSE::ENV_SSAO_QUALITY_MAX] = { 1, 2, 3, 9 };
+		const int steps_per_slice[RSE::ENV_SSAO_QUALITY_MAX] = { 2, 2, 3, 3 };
+
+		Vector<String> gtao_modes;
+		for (int bent_normals = 0; bent_normals < 2; bent_normals++) {
+			for (int quality = 0; quality < RSE::ENV_SSAO_QUALITY_MAX; quality++) {
+				String defines = vformat("\n#define SLICE_COUNT %d\n#define STEPS_PER_SLICE %d\n", slice_count[quality], steps_per_slice[quality]);
+				if (bent_normals) {
+					defines += "#define USE_BENT_NORMALS\n";
+				}
+				gtao_modes.push_back(defines);
+			}
+		}
+
+		ssao.gtao_shader.initialize(gtao_modes);
+		ssao.gtao_shader_version = ssao.gtao_shader.version_create();
+
+		for (int i = 0; i < SSAO_GTAO_MAX; i++) {
+			ssao.gtao_pipelines[i].create_compute_pipeline(ssao.gtao_shader.version_get_shader(ssao.gtao_shader_version, i));
+		}
+	}
+
+	{
+		Vector<String> denoise_modes;
+		denoise_modes.push_back("\n"); // SSAO_DENOISE
+		denoise_modes.push_back("\n#define FINAL_APPLY\n"); // SSAO_DENOISE_FINAL
+		denoise_modes.push_back("\n#define USE_BENT_NORMALS\n"); // SSAO_DENOISE_BENT_NORMALS
+		denoise_modes.push_back("\n#define USE_BENT_NORMALS\n#define FINAL_APPLY\n"); // SSAO_DENOISE_FINAL_BENT_NORMALS
+
+		ssao.denoise_shader.initialize(denoise_modes);
+		ssao.denoise_shader_version = ssao.denoise_shader.version_create();
+
+		for (int i = 0; i < SSAO_DENOISE_MAX; i++) {
+			ssao.denoise_pipelines[i].create_compute_pipeline(ssao.denoise_shader.version_get_shader(ssao.denoise_shader_version, i));
+		}
+	}
+
+	{
+		// Precompute the Hilbert curve indices, this is faster than computing them in the shader.
+		const uint32_t lut_size = 64;
+
+		RD::TextureFormat tf;
+		tf.format = RD::DATA_FORMAT_R16_UINT;
+		tf.width = lut_size;
+		tf.height = lut_size;
+		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT;
+
+		Vector<uint8_t> data;
+		data.resize(lut_size * lut_size * sizeof(uint16_t));
+		uint16_t *lut = reinterpret_cast<uint16_t *>(data.ptrw());
+		for (uint32_t y = 0; y < lut_size; y++) {
+			for (uint32_t x = 0; x < lut_size; x++) {
+				lut[y * lut_size + x] = uint16_t(gtao_hilbert_index(x, y));
+			}
+		}
+
+		ssao.hilbert_lut = RD::get_singleton()->texture_create(tf, RD::TextureView(), Vector<Vector<uint8_t>>{ data });
+		RD::get_singleton()->set_resource_name(ssao.hilbert_lut, "XeGTAO Hilbert LUT");
+	}
 
 	{
 		RD::SamplerState sampler;
 		sampler.mag_filter = RD::SAMPLER_FILTER_NEAREST;
 		sampler.min_filter = RD::SAMPLER_FILTER_NEAREST;
 		sampler.mip_filter = RD::SAMPLER_FILTER_NEAREST;
-		sampler.repeat_u = RD::SAMPLER_REPEAT_MODE_MIRRORED_REPEAT;
-		sampler.repeat_v = RD::SAMPLER_REPEAT_MODE_MIRRORED_REPEAT;
-		sampler.repeat_w = RD::SAMPLER_REPEAT_MODE_MIRRORED_REPEAT;
-		sampler.max_lod = 4;
+		sampler.repeat_u = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+		sampler.repeat_v = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+		sampler.repeat_w = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
 
-		uint32_t pipeline = 0;
-		{
-			Vector<String> ssao_modes;
-
-			ssao_modes.push_back("\n");
-			ssao_modes.push_back("\n#define SSAO_BASE\n");
-			ssao_modes.push_back("\n#define ADAPTIVE\n");
-
-			ssao.gather_shader.initialize(ssao_modes);
-
-			ssao.gather_shader_version = ssao.gather_shader.version_create();
-
-			for (int i = 0; i <= SSAO_GATHER_ADAPTIVE; i++) {
-				ssao.pipelines[pipeline].create_compute_pipeline(ssao.gather_shader.version_get_shader(ssao.gather_shader_version, i));
-				pipeline++;
-			}
-		}
-
-		{
-			Vector<String> ssao_modes;
-			ssao_modes.push_back("\n#define GENERATE_MAP\n");
-			ssao_modes.push_back("\n#define PROCESS_MAPA\n");
-			ssao_modes.push_back("\n#define PROCESS_MAPB\n");
-
-			ssao.importance_map_shader.initialize(ssao_modes);
-
-			ssao.importance_map_shader_version = ssao.importance_map_shader.version_create();
-
-			for (int i = SSAO_GENERATE_IMPORTANCE_MAP; i <= SSAO_PROCESS_IMPORTANCE_MAPB; i++) {
-				ssao.pipelines[pipeline].create_compute_pipeline(ssao.importance_map_shader.version_get_shader(ssao.importance_map_shader_version, i - SSAO_GENERATE_IMPORTANCE_MAP));
-
-				pipeline++;
-			}
-
-			ssao.importance_map_load_counter = RD::get_singleton()->storage_buffer_create(sizeof(uint32_t));
-			int zero[1] = { 0 };
-			RD::get_singleton()->buffer_update(ssao.importance_map_load_counter, 0, sizeof(uint32_t), &zero);
-			RD::get_singleton()->set_resource_name(ssao.importance_map_load_counter, "Importance Map Load Counter");
-
-			Vector<RD::Uniform> uniforms;
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-				u.binding = 0;
-				u.append_id(ssao.importance_map_load_counter);
-				uniforms.push_back(u);
-			}
-			ssao.counter_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, ssao.importance_map_shader.version_get_shader(ssao.importance_map_shader_version, 2), 2);
-			RD::get_singleton()->set_resource_name(ssao.counter_uniform_set, "Load Counter Uniform Set");
-		}
-
-		{
-			Vector<String> ssao_modes;
-			ssao_modes.push_back("\n#define MODE_NON_SMART\n");
-			ssao_modes.push_back("\n#define MODE_SMART\n");
-			ssao_modes.push_back("\n#define MODE_WIDE\n");
-
-			ssao.blur_shader.initialize(ssao_modes);
-
-			ssao.blur_shader_version = ssao.blur_shader.version_create();
-
-			for (int i = SSAO_BLUR_PASS; i <= SSAO_BLUR_PASS_WIDE; i++) {
-				ssao.pipelines[pipeline].create_compute_pipeline(ssao.blur_shader.version_get_shader(ssao.blur_shader_version, i - SSAO_BLUR_PASS));
-
-				pipeline++;
-			}
-		}
-
-		{
-			Vector<String> ssao_modes;
-			ssao_modes.push_back("\n#define MODE_NON_SMART\n");
-			ssao_modes.push_back("\n#define MODE_SMART\n");
-			ssao_modes.push_back("\n#define MODE_HALF\n");
-
-			ssao.interleave_shader.initialize(ssao_modes);
-
-			ssao.interleave_shader_version = ssao.interleave_shader.version_create();
-			for (int i = SSAO_INTERLEAVE; i <= SSAO_INTERLEAVE_HALF; i++) {
-				ssao.pipelines[pipeline].create_compute_pipeline(ssao.interleave_shader.version_get_shader(ssao.interleave_shader_version, i - SSAO_INTERLEAVE));
-				pipeline++;
-			}
-		}
-
-		ERR_FAIL_COND(pipeline != SSAO_MAX);
-
-		ss_effects.mirror_sampler = RD::get_singleton()->sampler_create(sampler);
+		ssao.point_clamp_sampler = RD::get_singleton()->sampler_create(sampler);
 	}
 
 	// Screen Space Reflections
@@ -283,25 +301,18 @@ SSEffects::SSEffects() {
 	{
 		{
 			Vector<String> ssr_downsample_modes;
-			ssr_downsample_modes.push_back("\n"); // SCREEN_SPACE_REFLECTION_DOWNSAMPLE_DEFAULT
-			ssr_downsample_modes.push_back("\n#define MODE_ODD_WIDTH\n"); // SCREEN_SPACE_REFLECTION_DOWNSAMPLE_ODD_WIDTH
-			ssr_downsample_modes.push_back("\n#define MODE_ODD_HEIGHT\n"); // SCREEN_SPACE_REFLECTION_DOWNSAMPLE_ODD_HEIGHT
-			ssr_downsample_modes.push_back("\n#define MODE_ODD_WIDTH\n#define MODE_ODD_HEIGHT\n"); // SCREEN_SPACE_REFLECTION_DOWNSAMPLE_ODD_WIDTH_AND_HEIGHT
+			ssr_downsample_modes.push_back("\n");
 
 			ssr.downsample_shader.initialize(ssr_downsample_modes);
 			ssr.downsample_shader_version = ssr.downsample_shader.version_create();
 
-			for (uint32_t i = 0; i < SCREEN_SPACE_REFLECTION_DOWNSAMPLE_MAX; i++) {
-				ssr.downsample_pipelines[i].create_compute_pipeline(ssr.downsample_shader.version_get_shader(ssr.downsample_shader_version, i));
-			}
+			ssr.downsample_pipeline.create_compute_pipeline(ssr.downsample_shader.version_get_shader(ssr.downsample_shader_version, 0));
 		}
 
 		{
 			Vector<String> ssr_hiz_modes;
 			ssr_hiz_modes.push_back("\n"); // SCREEN_SPACE_REFLECTION_HIZ_DEFAULT
-			ssr_hiz_modes.push_back("\n#define MODE_ODD_WIDTH\n"); // SCREEN_SPACE_REFLECTION_HIZ_ODD_WIDTH
-			ssr_hiz_modes.push_back("\n#define MODE_ODD_HEIGHT\n"); // SCREEN_SPACE_REFLECTION_HIZ_ODD_HEIGHT
-			ssr_hiz_modes.push_back("\n#define MODE_ODD_WIDTH\n#define MODE_ODD_HEIGHT\n"); // SCREEN_SPACE_REFLECTION_HIZ_ODD_WIDTH_AND_HEIGHT
+			ssr_hiz_modes.push_back("\n#define MODE_COPY_SOURCE\n"); // SCREEN_SPACE_REFLECTION_HIZ_COPY_SOURCE
 
 			ssr.hiz_shader.initialize(ssr_hiz_modes);
 			ssr.hiz_shader_version = ssr.hiz_shader.version_create();
@@ -449,9 +460,7 @@ void SSEffects::copy_internal_texture_to_last_frame(Ref<RenderSceneBuffersRD> p_
 SSEffects::~SSEffects() {
 	{
 		// Cleanup SS Reflections
-		for (int i = 0; i < SCREEN_SPACE_REFLECTION_DOWNSAMPLE_MAX; i++) {
-			ssr.downsample_pipelines[i].free();
-		}
+		ssr.downsample_pipeline.free();
 		for (int i = 0; i < SCREEN_SPACE_REFLECTION_HIZ_MAX; i++) {
 			ssr.hiz_pipelines[i].free();
 		}
@@ -508,16 +517,20 @@ SSEffects::~SSEffects() {
 
 	{
 		// Cleanup SSAO
-		for (int i = 0; i < SSAO_MAX; i++) {
-			ssao.pipelines[i].free();
+		ssao.prefilter_depths_pipeline.free();
+		for (int i = 0; i < SSAO_GTAO_MAX; i++) {
+			ssao.gtao_pipelines[i].free();
+		}
+		for (int i = 0; i < SSAO_DENOISE_MAX; i++) {
+			ssao.denoise_pipelines[i].free();
 		}
 
-		ssao.blur_shader.version_free(ssao.blur_shader_version);
-		ssao.gather_shader.version_free(ssao.gather_shader_version);
-		ssao.interleave_shader.version_free(ssao.interleave_shader_version);
-		ssao.importance_map_shader.version_free(ssao.importance_map_shader_version);
+		ssao.prefilter_depths_shader.version_free(ssao.prefilter_depths_shader_version);
+		ssao.gtao_shader.version_free(ssao.gtao_shader_version);
+		ssao.denoise_shader.version_free(ssao.denoise_shader_version);
 
-		RD::get_singleton()->free_rid(ssao.importance_map_load_counter);
+		RD::get_singleton()->free_rid(ssao.hilbert_lut);
+		RD::get_singleton()->free_rid(ssao.point_clamp_sampler);
 	}
 
 	{
@@ -549,34 +562,23 @@ void SSEffects::downsample_depth(Ref<RenderSceneBuffersRD> p_render_buffers, uin
 		p_render_buffers->create_texture(RB_SCOPE_SSDS, RB_LINEAR_DEPTH, RD::DATA_FORMAT_R16_SFLOAT, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, size, view_count * 4, 5);
 	}
 
-	// Downsample and deinterleave the depth buffer for SSAO and SSIL
+	// Downsample and deinterleave the depth buffer for SSIL.
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
 	int downsample_mode = SS_EFFECTS_DOWNSAMPLE;
-	bool use_mips = ssao_quality > RSE::ENV_SSAO_QUALITY_MEDIUM || ssil_quality > RSE::ENV_SSIL_QUALITY_MEDIUM;
+	bool use_mips = ssil_quality > RSE::ENV_SSIL_QUALITY_MEDIUM;
 
-	if (ssao_quality == RSE::ENV_SSAO_QUALITY_VERY_LOW && ssil_quality == RSE::ENV_SSIL_QUALITY_VERY_LOW) {
+	if (ssil_quality == RSE::ENV_SSIL_QUALITY_VERY_LOW) {
 		downsample_mode = SS_EFFECTS_DOWNSAMPLE_HALF;
 	} else if (use_mips) {
 		downsample_mode = SS_EFFECTS_DOWNSAMPLE_MIPMAP;
 	}
 
 	bool use_half_size = false;
-	bool use_full_mips = false;
 
-	if (ssao_half_size && ssil_half_size) {
+	if (ssil_half_size) {
 		downsample_mode++;
 		use_half_size = true;
-	} else if (ssao_half_size != ssil_half_size) {
-		if (use_mips) {
-			downsample_mode = SS_EFFECTS_DOWNSAMPLE_FULL_MIPS;
-			use_full_mips = true;
-		} else {
-			// Only need the first two mipmaps, but the cost to generate the next two is trivial
-			// TODO investigate the benefit of a shader version to generate only 2 mips
-			downsample_mode = SS_EFFECTS_DOWNSAMPLE_MIPMAP;
-			use_mips = true;
-		}
 	}
 
 	RID shader = ss_effects.downsample_shader.version_get_shader(ss_effects.downsample_shader_version, downsample_mode);
@@ -591,10 +593,7 @@ void SSEffects::downsample_depth(Ref<RenderSceneBuffersRD> p_render_buffers, uin
 		thread_local LocalVector<RD::Uniform> u_depths;
 		u_depths.clear();
 
-		// Note, use_full_mips is true if either SSAO or SSIL uses half size, but the other full size and we're using mips.
-		// That means we're filling all 5 levels.
-		// In this scenario `depth_index` will be 0.
-		for (int i = 0; i < (use_full_mips ? 4 : 3); i++) {
+		for (int i = 0; i < 3; i++) {
 			RID depth_mipmap = p_render_buffers->get_texture_slice(RB_SCOPE_SSDS, RB_LINEAR_DEPTH, p_view * 4, depth_index + i + 1, 4, 1);
 
 			RD::Uniform u_depth;
@@ -604,7 +603,6 @@ void SSEffects::downsample_depth(Ref<RenderSceneBuffersRD> p_render_buffers, uin
 			u_depths.push_back(u_depth);
 		}
 
-		// This before only used SS_EFFECTS_DOWNSAMPLE_MIPMAP or SS_EFFECTS_DOWNSAMPLE_FULL_MIPS
 		downsample_uniform_set = uniform_set_cache->get_cache_vec(shader, 2, u_depths);
 	}
 
@@ -653,7 +651,6 @@ void SSEffects::downsample_depth(Ref<RenderSceneBuffersRD> p_render_buffers, uin
 	RD::get_singleton()->draw_command_end_label();
 	RD::get_singleton()->compute_list_end();
 
-	ss_effects.used_full_mips_last_frame = use_full_mips;
 	ss_effects.used_half_size_last_frame = use_half_size;
 	ss_effects.used_mips_last_frame = use_mips;
 }
@@ -1077,381 +1074,237 @@ void SSEffects::screen_space_indirect_lighting(Ref<RenderSceneBuffersRD> p_rende
 
 /* SSAO */
 
-void SSEffects::ssao_set_quality(RSE::EnvironmentSSAOQuality p_quality, bool p_half_size, float p_adaptive_target, int p_blur_passes, float p_fadeout_from, float p_fadeout_to) {
-	ssao_quality = p_quality;
-	ssao_half_size = p_half_size;
-	ssao_adaptive_target = p_adaptive_target;
-	ssao_blur_passes = p_blur_passes;
-	ssao_fadeout_from = p_fadeout_from;
-	ssao_fadeout_to = p_fadeout_to;
+uint32_t SSEffects::_ssao_get_depth_mip_count(const Size2i &p_size) {
+	// XeGTAO uses 5 depth MIP levels, but very small viewports can't have that many.
+	uint32_t mip_count = 1;
+	while (mip_count < SSAO_DEPTH_MIP_LEVELS && (MAX(p_size.x, p_size.y) >> mip_count) > 0) {
+		mip_count++;
+	}
+	return mip_count;
 }
 
-void SSEffects::gather_ssao(RD::ComputeListID p_compute_list, const RID *p_ao_slices, const SSAOSettings &p_settings, bool p_adaptive_base_pass, RID p_gather_uniform_set, RID p_importance_map_uniform_set) {
-	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
-	ERR_FAIL_NULL(uniform_set_cache);
-
-	RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, p_gather_uniform_set, 0);
-	if ((ssao_quality == RSE::ENV_SSAO_QUALITY_ULTRA) && !p_adaptive_base_pass) {
-		RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, p_importance_map_uniform_set, 1);
-	}
-
-	RID shader = ssao.gather_shader.version_get_shader(ssao.gather_shader_version, 1); //
-
-	for (int i = 0; i < 4; i++) {
-		if ((ssao_quality == RSE::ENV_SSAO_QUALITY_VERY_LOW) && ((i == 1) || (i == 2))) {
-			continue;
-		}
-
-		RD::Uniform u_ao_slice(RD::UNIFORM_TYPE_IMAGE, 0, p_ao_slices[i]);
-
-		ssao.gather_push_constant.pass_coord_offset[0] = i % 2;
-		ssao.gather_push_constant.pass_coord_offset[1] = i / 2;
-		ssao.gather_push_constant.pass_uv_offset[0] = ((i % 2) - 0.0) / p_settings.full_screen_size.x;
-		ssao.gather_push_constant.pass_uv_offset[1] = ((i / 2) - 0.0) / p_settings.full_screen_size.y;
-		ssao.gather_push_constant.pass = i;
-		RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, uniform_set_cache->get_cache(shader, 2, u_ao_slice), 2);
-		RD::get_singleton()->compute_list_set_push_constant(p_compute_list, &ssao.gather_push_constant, sizeof(SSAOGatherPushConstant));
-
-		Size2i size;
-		// Make sure we use the same size as with which our buffer was created
-		if (ssao_half_size) {
-			size.x = (p_settings.full_screen_size.x + 3) / 4;
-			size.y = (p_settings.full_screen_size.y + 3) / 4;
-		} else {
-			size.x = (p_settings.full_screen_size.x + 1) / 2;
-			size.y = (p_settings.full_screen_size.y + 1) / 2;
-		}
-
-		RD::get_singleton()->compute_list_dispatch_threads(p_compute_list, size.x, size.y, 1);
-	}
-	RD::get_singleton()->compute_list_add_barrier(p_compute_list);
+void SSEffects::ssao_set_quality(RSE::EnvironmentSSAOQuality p_quality, int p_denoise_passes, bool p_bent_normals) {
+	// Projects made with the previous SSAO implementation can have an out of range quality level.
+	ssao_quality = RSE::EnvironmentSSAOQuality(CLAMP(int(p_quality), 0, int(RSE::ENV_SSAO_QUALITY_MAX) - 1));
+	ssao_denoise_passes = CLAMP(p_denoise_passes, 0, 3);
+	ssao_bent_normals = p_bent_normals;
 }
 
 void SSEffects::ssao_allocate_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, SSAORenderBuffers &p_ssao_buffers, const SSAOSettings &p_settings) {
-	if (p_ssao_buffers.half_size != ssao_half_size) {
+	if (p_ssao_buffers.bent_normals != ssao_bent_normals) {
+		// The formats of the working and final textures depend on whether bent normals are computed.
 		p_render_buffers->clear_context(RB_SCOPE_SSAO);
 	}
+	p_ssao_buffers.bent_normals = ssao_bent_normals;
 
-	p_ssao_buffers.half_size = ssao_half_size;
-	if (ssao_half_size) {
-		p_ssao_buffers.buffer_width = (p_settings.full_screen_size.x + 3) / 4;
-		p_ssao_buffers.buffer_height = (p_settings.full_screen_size.y + 3) / 4;
-		p_ssao_buffers.half_buffer_width = (p_settings.full_screen_size.x + 7) / 8;
-		p_ssao_buffers.half_buffer_height = (p_settings.full_screen_size.y + 7) / 8;
-	} else {
-		p_ssao_buffers.buffer_width = (p_settings.full_screen_size.x + 1) / 2;
-		p_ssao_buffers.buffer_height = (p_settings.full_screen_size.y + 1) / 2;
-		p_ssao_buffers.half_buffer_width = (p_settings.full_screen_size.x + 3) / 4;
-		p_ssao_buffers.half_buffer_height = (p_settings.full_screen_size.y + 3) / 4;
-	}
-
-	uint32_t view_count = p_render_buffers->get_view_count();
-	Size2i full_size = Size2i(p_ssao_buffers.buffer_width, p_ssao_buffers.buffer_height);
-	Size2i half_size = Size2i(p_ssao_buffers.half_buffer_width, p_ssao_buffers.half_buffer_height);
+	const uint32_t usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
 
 	// As we're not clearing these, and render buffers will return the cached texture if it already exists,
-	// we don't first check has_texture here
+	// we don't first check has_texture here. Buffers are automatically cleared if view count or size changes.
 
-	p_render_buffers->create_texture(RB_SCOPE_SSAO, RB_DEINTERLEAVED, RD::DATA_FORMAT_R8G8_UNORM, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, full_size, 4 * view_count);
-	p_render_buffers->create_texture(RB_SCOPE_SSAO, RB_DEINTERLEAVED_PONG, RD::DATA_FORMAT_R8G8_UNORM, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, full_size, 4 * view_count);
-	p_render_buffers->create_texture(RB_SCOPE_SSAO, RB_IMPORTANCE_MAP, RD::DATA_FORMAT_R8_UNORM, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, half_size);
-	p_render_buffers->create_texture(RB_SCOPE_SSAO, RB_IMPORTANCE_PONG, RD::DATA_FORMAT_R8_UNORM, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, half_size);
-	p_render_buffers->create_texture(RB_SCOPE_SSAO, RB_FINAL, RD::DATA_FORMAT_R8_UNORM, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1);
+	// View space depth with MIPs, stored in half float as XeGTAO is tuned for it.
+	p_render_buffers->create_texture(RB_SCOPE_SSAO, RB_GTAO_DEPTH, RD::DATA_FORMAT_R16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1, p_settings.full_screen_size, 0, _ssao_get_depth_mip_count(p_settings.full_screen_size));
+	// Depth based edges used by the denoiser.
+	p_render_buffers->create_texture(RB_SCOPE_SSAO, RB_EDGES, RD::DATA_FORMAT_R8_UNORM, usage_bits, RD::TEXTURE_SAMPLES_1, p_settings.full_screen_size);
+
+	// Working AO term, the visibility and bent normal are packed together into a single 32 bit value.
+	const RD::DataFormat term_format = ssao_bent_normals ? RD::DATA_FORMAT_R32_UINT : RD::DATA_FORMAT_R8_UNORM;
+	p_render_buffers->create_texture(RB_SCOPE_SSAO, RB_GTAO_TERM, term_format, usage_bits, RD::TEXTURE_SAMPLES_1, p_settings.full_screen_size);
+	if (ssao_denoise_passes > 1) {
+		p_render_buffers->create_texture(RB_SCOPE_SSAO, RB_GTAO_TERM_PONG, term_format, usage_bits, RD::TEXTURE_SAMPLES_1, p_settings.full_screen_size);
+	}
+
+	// Final result sampled by the scene shader: visibility in red and, if enabled, the view space bent normal in green, blue and alpha.
+	const RD::DataFormat final_format = ssao_bent_normals ? RD::DATA_FORMAT_R8G8B8A8_UNORM : RD::DATA_FORMAT_R8_UNORM;
+	p_render_buffers->create_texture(RB_SCOPE_SSAO, RB_FINAL, final_format, usage_bits, RD::TEXTURE_SAMPLES_1, p_settings.full_screen_size);
 }
 
 void SSEffects::generate_ssao(Ref<RenderSceneBuffersRD> p_render_buffers, SSAORenderBuffers &p_ssao_buffers, uint32_t p_view, RID p_normal_buffer, const Projection &p_projection, const SSAOSettings &p_settings) {
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	ERR_FAIL_NULL(uniform_set_cache);
-	MaterialStorage *material_storage = MaterialStorage::get_singleton();
-	ERR_FAIL_NULL(material_storage);
+
+	const Size2i size = p_settings.full_screen_size;
+	const bool bent_normals = p_ssao_buffers.bent_normals;
+	const int denoise_passes = ssao_denoise_passes;
 
 	// Obtain our (cached) buffer slices for the view we are rendering.
-	RID ao_deinterleaved = p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_DEINTERLEAVED, p_view * 4, 0, 4, 1);
-	RID ao_pong = p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_DEINTERLEAVED_PONG, p_view * 4, 0, 4, 1);
-	RID importance_map = p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_IMPORTANCE_MAP, p_view, 0);
-	RID importance_pong = p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_IMPORTANCE_PONG, p_view, 0);
+	const uint32_t depth_mip_count = _ssao_get_depth_mip_count(size);
+	RID depth_mips[SSAO_DEPTH_MIP_LEVELS];
+	for (uint32_t i = 0; i < SSAO_DEPTH_MIP_LEVELS; i++) {
+		// MIP levels that don't exist are never written to, but still need something bound.
+		depth_mips[i] = p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_GTAO_DEPTH, p_view, MIN(i, depth_mip_count - 1));
+	}
+	RID depth_all_mips = p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_GTAO_DEPTH, p_view, 0, 1, depth_mip_count);
+	RID edges = p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_EDGES, p_view, 0);
+	RID ao_term = p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_GTAO_TERM, p_view, 0);
+	RID ao_term_pong = denoise_passes > 1 ? p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_GTAO_TERM_PONG, p_view, 0) : RID();
 	RID ao_final = p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_FINAL, p_view, 0);
 
-	RID ao_deinterleaved_slices[4];
-	RID ao_pong_slices[4];
-	for (uint32_t i = 0; i < 4; i++) {
-		ao_deinterleaved_slices[i] = p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_DEINTERLEAVED, p_view * 4 + i, 0);
-		ao_pong_slices[i] = p_render_buffers->get_texture_slice(RB_SCOPE_SSAO, RB_DEINTERLEAVED_PONG, p_view * 4 + i, 0);
+	/* Constants, see XeGTAO::GTAOUpdateConstants() */
+
+	SSAOPushConstant &push_constant = ssao.push_constant;
+	memset(&push_constant, 0, sizeof(SSAOPushConstant));
+
+	push_constant.viewport_size[0] = size.x;
+	push_constant.viewport_size[1] = size.y;
+	push_constant.viewport_pixel_size[0] = 1.0f / size.x;
+	push_constant.viewport_pixel_size[1] = 1.0f / size.y;
+
+	const bool orthogonal = p_projection.is_orthogonal();
+	push_constant.orthogonal = orthogonal;
+
+	if (orthogonal) {
+		// Linear depth: z_far - depth * (z_far - z_near), with a reverse Z depth buffer.
+		const float z_near = p_projection.get_z_near();
+		const float z_far = p_projection.get_z_far();
+		push_constant.depth_unpack_consts[0] = z_near - z_far;
+		push_constant.depth_unpack_consts[1] = z_far;
+	} else {
+		Projection correction;
+		correction.set_depth_correction(false);
+		Projection temp = correction * p_projection;
+
+		float depth_linearize_mul = -temp.columns[3][2];
+		float depth_linearize_add = temp.columns[2][2];
+		if (depth_linearize_mul * depth_linearize_add < 0) {
+			depth_linearize_add = -depth_linearize_add;
+		}
+		push_constant.depth_unpack_consts[0] = depth_linearize_mul;
+		push_constant.depth_unpack_consts[1] = depth_linearize_add;
 	}
+
+	// Screen UV to view space XY. The UV origin is in the top left corner, view space +Y points up.
+	// Off-center projections (as used in XR) are accounted for.
+	const float proj_x = p_projection.columns[0][0];
+	const float proj_y = p_projection.columns[1][1];
+	push_constant.ndc_to_view_mul[0] = 2.0f / proj_x;
+	push_constant.ndc_to_view_mul[1] = -2.0f / proj_y;
+	if (orthogonal) {
+		push_constant.ndc_to_view_add[0] = -(1.0f + p_projection.columns[3][0]) / proj_x;
+		push_constant.ndc_to_view_add[1] = (1.0f - p_projection.columns[3][1]) / proj_y;
+	} else {
+		push_constant.ndc_to_view_add[0] = (p_projection.columns[2][0] - 1.0f) / proj_x;
+		push_constant.ndc_to_view_add[1] = (p_projection.columns[2][1] + 1.0f) / proj_y;
+	}
+	push_constant.ndc_to_view_mul_x_pixel_size[0] = push_constant.ndc_to_view_mul[0] * push_constant.viewport_pixel_size[0];
+	push_constant.ndc_to_view_mul_x_pixel_size[1] = push_constant.ndc_to_view_mul[1] * push_constant.viewport_pixel_size[1];
+
+	// Heuristics auto-tuned by XeGTAO to match ray traced ground truth.
+	const float default_radius_multiplier = 1.457f; // Counters inherent screen space biases.
+	const float default_falloff_range = 0.615f; // Distant samples contribute less.
+	const float default_sample_distribution_power = 2.0f; // Small crevices more important than big surfaces.
+	const float default_final_value_power = 2.2f;
+	const float default_depth_mip_sampling_offset = 3.30f; // Main trade-off between performance (memory bandwidth) and quality.
+
+	push_constant.effect_radius = MAX(p_settings.radius, 0.001f);
+	push_constant.effect_falloff_range = default_falloff_range;
+	push_constant.radius_multiplier = default_radius_multiplier;
+	push_constant.final_value_power = default_final_value_power * MAX(p_settings.intensity, 0.0f);
+	// A high value disables the denoiser; the (single) final pass is still needed to output the result.
+	push_constant.denoise_blur_beta = denoise_passes == 0 ? 1e4f : 1.2f;
+	push_constant.sample_distribution_power = default_sample_distribution_power;
+	push_constant.thin_occluder_compensation = CLAMP(p_settings.thin_occluder_compensation, 0.0f, 0.7f);
+	push_constant.depth_mip_sampling_offset = default_depth_mip_sampling_offset;
+	// Temporal noise only makes sense when TAA accumulates it over multiple frames.
+	push_constant.noise_index = denoise_passes > 0 ? p_settings.noise_index % 64 : 0;
+	push_constant.depth_mip_count = depth_mip_count;
 
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
-	memset(&ssao.gather_push_constant, 0, sizeof(SSAOGatherPushConstant));
+	RD::get_singleton()->draw_command_begin_label("Process Screen-Space Ambient Occlusion (XeGTAO)");
+
 	/* FIRST PASS */
+	// Prefilter depths: convert the depth buffer to view space depth and generate its MIP chain.
+	{
+		RD::get_singleton()->draw_command_begin_label("Prefilter Depths");
 
-	RID shader = ssao.gather_shader.version_get_shader(ssao.gather_shader_version, SSAO_GATHER);
-	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+		RID shader = ssao.prefilter_depths_shader.version_get_shader(ssao.prefilter_depths_shader_version, 0);
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssao.prefilter_depths_pipeline.get_rid());
 
-	RD::get_singleton()->draw_command_begin_label("Process Screen-Space Ambient Occlusion");
+		RD::Uniform u_source_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ ssao.point_clamp_sampler, p_render_buffers->get_depth_texture(p_view) }));
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_source_depth), 0);
+
+		RD::Uniform u_depth_mip0(RD::UNIFORM_TYPE_IMAGE, 0, depth_mips[0]);
+		RD::Uniform u_depth_mip1(RD::UNIFORM_TYPE_IMAGE, 1, depth_mips[1]);
+		RD::Uniform u_depth_mip2(RD::UNIFORM_TYPE_IMAGE, 2, depth_mips[2]);
+		RD::Uniform u_depth_mip3(RD::UNIFORM_TYPE_IMAGE, 3, depth_mips[3]);
+		RD::Uniform u_depth_mip4(RD::UNIFORM_TYPE_IMAGE, 4, depth_mips[4]);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 1, u_depth_mip0, u_depth_mip1, u_depth_mip2, u_depth_mip3, u_depth_mip4), 1);
+
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SSAOPushConstant));
+
+		// Each thread processes a 2x2 block of pixels, so each 8x8 group covers 16x16 pixels.
+		RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(size.x, 16), Math::division_round_up(size.y, 16), 1);
+		RD::get_singleton()->compute_list_add_barrier(compute_list);
+
+		RD::get_singleton()->draw_command_end_label(); // Prefilter Depths
+	}
+
 	/* SECOND PASS */
-	// Sample SSAO
+	// Compute the ambient occlusion term, the edges used by the denoiser and optionally the bent normals.
 	{
-		RD::get_singleton()->draw_command_begin_label("Gather Samples");
-		ssao.gather_push_constant.screen_size[0] = p_settings.full_screen_size.x;
-		ssao.gather_push_constant.screen_size[1] = p_settings.full_screen_size.y;
+		RD::get_singleton()->draw_command_begin_label("Main Pass");
 
-		ssao.gather_push_constant.half_screen_pixel_size[0] = 2.0 / p_settings.full_screen_size.x;
-		ssao.gather_push_constant.half_screen_pixel_size[1] = 2.0 / p_settings.full_screen_size.y;
-		if (ssao_half_size) {
-			ssao.gather_push_constant.half_screen_pixel_size[0] *= 2.0;
-			ssao.gather_push_constant.half_screen_pixel_size[1] *= 2.0;
-		}
-		ssao.gather_push_constant.half_screen_pixel_size_x025[0] = ssao.gather_push_constant.half_screen_pixel_size[0] * 0.75;
-		ssao.gather_push_constant.half_screen_pixel_size_x025[1] = ssao.gather_push_constant.half_screen_pixel_size[1] * 0.75;
-		float tan_half_fov_x = 1.0 / p_projection.columns[0][0];
-		float tan_half_fov_y = 1.0 / p_projection.columns[1][1];
-		ssao.gather_push_constant.NDC_to_view_mul[0] = tan_half_fov_x * 2.0;
-		ssao.gather_push_constant.NDC_to_view_mul[1] = tan_half_fov_y * -2.0;
-		ssao.gather_push_constant.NDC_to_view_add[0] = tan_half_fov_x * -1.0;
-		ssao.gather_push_constant.NDC_to_view_add[1] = tan_half_fov_y;
-		ssao.gather_push_constant.is_orthogonal = p_projection.is_orthogonal();
+		const int gtao_mode = (bent_normals ? SSAO_GTAO_LOW_BENT_NORMALS : SSAO_GTAO_LOW) + int(ssao_quality);
+		RID shader = ssao.gtao_shader.version_get_shader(ssao.gtao_shader_version, gtao_mode);
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssao.gtao_pipelines[gtao_mode].get_rid());
 
-		ssao.gather_push_constant.radius = p_settings.radius;
-		float radius_near_limit = (p_settings.radius * 1.2f);
-		if (ssao_quality <= RSE::ENV_SSAO_QUALITY_LOW) {
-			radius_near_limit *= 1.50f;
+		RD::Uniform u_depth_mips(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ ssao.point_clamp_sampler, depth_all_mips }));
+		RD::Uniform u_normal_buffer(RD::UNIFORM_TYPE_IMAGE, 1, p_normal_buffer);
+		RD::Uniform u_hilbert_lut(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ ssao.point_clamp_sampler, ssao.hilbert_lut }));
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_depth_mips, u_normal_buffer, u_hilbert_lut), 0);
 
-			if (ssao_quality == RSE::ENV_SSAO_QUALITY_VERY_LOW) {
-				ssao.gather_push_constant.radius *= 0.8f;
-			}
-		}
-		radius_near_limit /= tan_half_fov_y;
-		ssao.gather_push_constant.intensity = p_settings.intensity;
-		ssao.gather_push_constant.shadow_power = p_settings.power;
-		ssao.gather_push_constant.shadow_clamp = 0.98;
-		ssao.gather_push_constant.fade_out_mul = -1.0 / (ssao_fadeout_to - ssao_fadeout_from);
-		ssao.gather_push_constant.fade_out_add = ssao_fadeout_from / (ssao_fadeout_to - ssao_fadeout_from) + 1.0;
-		ssao.gather_push_constant.horizon_angle_threshold = p_settings.horizon;
-		ssao.gather_push_constant.inv_radius_near_limit = 1.0f / radius_near_limit;
-		ssao.gather_push_constant.neg_inv_radius = -1.0 / ssao.gather_push_constant.radius;
+		RD::Uniform u_ao_term(RD::UNIFORM_TYPE_IMAGE, 0, ao_term);
+		RD::Uniform u_edges(RD::UNIFORM_TYPE_IMAGE, 1, edges);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 1, u_ao_term, u_edges), 1);
 
-		ssao.gather_push_constant.load_counter_avg_div = 9.0 / float((p_ssao_buffers.half_buffer_width) * (p_ssao_buffers.half_buffer_height) * 255);
-		ssao.gather_push_constant.adaptive_sample_limit = ssao_adaptive_target;
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SSAOPushConstant));
 
-		ssao.gather_push_constant.detail_intensity = p_settings.detail;
-		ssao.gather_push_constant.quality = MAX(0, ssao_quality - 1);
-		ssao.gather_push_constant.size_multiplier = ssao_half_size ? 2 : 1;
+		RD::get_singleton()->compute_list_dispatch_threads(compute_list, size.x, size.y, 1);
+		RD::get_singleton()->compute_list_add_barrier(compute_list);
 
-		// We are using our uniform cache so our uniform sets are automatically freed when our textures are freed.
-		// It also ensures that we're reusing the right cached entry in a multiview situation without us having to
-		// remember each instance of the uniform set.
-		RID gather_uniform_set;
-		{
-			RID depth_texture_view = p_render_buffers->get_texture_slice(RB_SCOPE_SSDS, RB_LINEAR_DEPTH, p_view * 4, ssao_half_size ? 1 : 0, 4, 4);
-
-			RD::Uniform u_depth_texture_view;
-			u_depth_texture_view.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
-			u_depth_texture_view.binding = 0;
-			u_depth_texture_view.append_id(ss_effects.mirror_sampler);
-			u_depth_texture_view.append_id(depth_texture_view);
-
-			RD::Uniform u_normal_buffer;
-			u_normal_buffer.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-			u_normal_buffer.binding = 1;
-			u_normal_buffer.append_id(p_normal_buffer);
-
-			RD::Uniform u_gather_constants_buffer;
-			u_gather_constants_buffer.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
-			u_gather_constants_buffer.binding = 2;
-			u_gather_constants_buffer.append_id(ss_effects.gather_constants_buffer);
-
-			gather_uniform_set = uniform_set_cache->get_cache(shader, 0, u_depth_texture_view, u_normal_buffer, u_gather_constants_buffer);
-		}
-
-		RID importance_map_uniform_set;
-		{
-			RD::Uniform u_pong;
-			u_pong.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-			u_pong.binding = 0;
-			u_pong.append_id(ao_pong);
-
-			RD::Uniform u_importance_map;
-			u_importance_map.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
-			u_importance_map.binding = 1;
-			u_importance_map.append_id(default_sampler);
-			u_importance_map.append_id(importance_map);
-
-			RD::Uniform u_load_counter;
-			u_load_counter.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-			u_load_counter.binding = 2;
-			u_load_counter.append_id(ssao.importance_map_load_counter);
-
-			RID shader_adaptive = ssao.gather_shader.version_get_shader(ssao.gather_shader_version, SSAO_GATHER_ADAPTIVE);
-			importance_map_uniform_set = uniform_set_cache->get_cache(shader_adaptive, 1, u_pong, u_importance_map, u_load_counter);
-		}
-
-		if (ssao_quality == RSE::ENV_SSAO_QUALITY_ULTRA) {
-			RD::get_singleton()->draw_command_begin_label("Generate Importance Map");
-			ssao.importance_map_push_constant.half_screen_pixel_size[0] = 1.0 / p_ssao_buffers.buffer_width;
-			ssao.importance_map_push_constant.half_screen_pixel_size[1] = 1.0 / p_ssao_buffers.buffer_height;
-			ssao.importance_map_push_constant.intensity = p_settings.intensity;
-			ssao.importance_map_push_constant.power = p_settings.power;
-
-			//base pass
-			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssao.pipelines[SSAO_GATHER_BASE].get_rid());
-			gather_ssao(compute_list, ao_pong_slices, p_settings, true, gather_uniform_set, RID());
-
-			//generate importance map
-			RID gen_imp_shader = ssao.importance_map_shader.version_get_shader(ssao.importance_map_shader_version, 0);
-			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssao.pipelines[SSAO_GENERATE_IMPORTANCE_MAP].get_rid());
-
-			RD::Uniform u_ao_pong_with_sampler(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, ao_pong }));
-			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(gen_imp_shader, 0, u_ao_pong_with_sampler), 0);
-
-			RD::Uniform u_importance_map(RD::UNIFORM_TYPE_IMAGE, 0, Vector<RID>({ importance_map }));
-			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(gen_imp_shader, 1, u_importance_map), 1);
-
-			RD::get_singleton()->compute_list_set_push_constant(compute_list, &ssao.importance_map_push_constant, sizeof(SSAOImportanceMapPushConstant));
-			RD::get_singleton()->compute_list_dispatch_threads(compute_list, p_ssao_buffers.half_buffer_width, p_ssao_buffers.half_buffer_height, 1);
-			RD::get_singleton()->compute_list_add_barrier(compute_list);
-
-			//process importance map A
-			RID proc_imp_shader_a = ssao.importance_map_shader.version_get_shader(ssao.importance_map_shader_version, 1);
-			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssao.pipelines[SSAO_PROCESS_IMPORTANCE_MAPA].get_rid());
-
-			RD::Uniform u_importance_map_with_sampler(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, importance_map }));
-			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(proc_imp_shader_a, 0, u_importance_map_with_sampler), 0);
-
-			RD::Uniform u_importance_map_pong(RD::UNIFORM_TYPE_IMAGE, 0, Vector<RID>({ importance_pong }));
-			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(proc_imp_shader_a, 1, u_importance_map_pong), 1);
-
-			RD::get_singleton()->compute_list_set_push_constant(compute_list, &ssao.importance_map_push_constant, sizeof(SSAOImportanceMapPushConstant));
-			RD::get_singleton()->compute_list_dispatch_threads(compute_list, p_ssao_buffers.half_buffer_width, p_ssao_buffers.half_buffer_height, 1);
-			RD::get_singleton()->compute_list_add_barrier(compute_list);
-
-			//process Importance Map B
-			RID proc_imp_shader_b = ssao.importance_map_shader.version_get_shader(ssao.importance_map_shader_version, 2);
-			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssao.pipelines[SSAO_PROCESS_IMPORTANCE_MAPB].get_rid());
-
-			RD::Uniform u_importance_map_pong_with_sampler(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, importance_pong }));
-			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(proc_imp_shader_b, 0, u_importance_map_pong_with_sampler), 0);
-
-			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(proc_imp_shader_b, 1, u_importance_map), 1);
-			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, ssao.counter_uniform_set, 2);
-			RD::get_singleton()->compute_list_set_push_constant(compute_list, &ssao.importance_map_push_constant, sizeof(SSAOImportanceMapPushConstant));
-			RD::get_singleton()->compute_list_dispatch_threads(compute_list, p_ssao_buffers.half_buffer_width, p_ssao_buffers.half_buffer_height, 1);
-			RD::get_singleton()->compute_list_add_barrier(compute_list);
-
-			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssao.pipelines[SSAO_GATHER_ADAPTIVE].get_rid());
-			RD::get_singleton()->draw_command_end_label(); // Importance Map
-		} else {
-			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssao.pipelines[SSAO_GATHER].get_rid());
-		}
-
-		gather_ssao(compute_list, ao_deinterleaved_slices, p_settings, false, gather_uniform_set, importance_map_uniform_set);
-		RD::get_singleton()->draw_command_end_label(); // Gather SSAO
+		RD::get_singleton()->draw_command_end_label(); // Main Pass
 	}
 
-	//	/* THIRD PASS */
-	//	// Blur
-	//
+	/* THIRD PASS */
+	// Edge-aware spatial denoise. At least one pass is always needed as the last one outputs the final result.
 	{
-		RD::get_singleton()->draw_command_begin_label("Edge-Aware Blur");
-		ssao.blur_push_constant.edge_sharpness = 1.0 - p_settings.sharpness;
-		ssao.blur_push_constant.half_screen_pixel_size[0] = 1.0 / p_ssao_buffers.buffer_width;
-		ssao.blur_push_constant.half_screen_pixel_size[1] = 1.0 / p_ssao_buffers.buffer_height;
+		RD::get_singleton()->draw_command_begin_label("Denoise");
 
-		int blur_passes = ssao_quality > RSE::ENV_SSAO_QUALITY_VERY_LOW ? ssao_blur_passes : 1;
+		const int pass_count = MAX(1, denoise_passes);
+		RID source = ao_term;
+		for (int pass = 0; pass < pass_count; pass++) {
+			const bool final_apply = pass == pass_count - 1;
+			RID dest = final_apply ? ao_final : (source == ao_term ? ao_term_pong : ao_term);
 
-		shader = ssao.blur_shader.version_get_shader(ssao.blur_shader_version, 0);
-
-		for (int pass = 0; pass < blur_passes; pass++) {
-			int blur_pipeline = SSAO_BLUR_PASS;
-			if (ssao_quality > RSE::ENV_SSAO_QUALITY_VERY_LOW) {
-				if (pass < blur_passes - 2) {
-					blur_pipeline = SSAO_BLUR_PASS_WIDE;
-				} else {
-					blur_pipeline = SSAO_BLUR_PASS_SMART;
-				}
+			int denoise_mode = final_apply ? SSAO_DENOISE_FINAL : SSAO_DENOISE;
+			if (bent_normals) {
+				denoise_mode += SSAO_DENOISE_BENT_NORMALS;
 			}
 
-			for (int i = 0; i < 4; i++) {
-				if ((ssao_quality == RSE::ENV_SSAO_QUALITY_VERY_LOW) && ((i == 1) || (i == 2))) {
-					continue;
-				}
+			RID shader = ssao.denoise_shader.version_get_shader(ssao.denoise_shader_version, denoise_mode);
+			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssao.denoise_pipelines[denoise_mode].get_rid());
 
-				RID blur_shader = ssao.blur_shader.version_get_shader(ssao.blur_shader_version, blur_pipeline - SSAO_BLUR_PASS);
-				RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssao.pipelines[blur_pipeline].get_rid());
-				if (pass % 2 == 0) {
-					if (ssao_quality == RSE::ENV_SSAO_QUALITY_VERY_LOW) {
-						RD::Uniform u_ao_slices_with_sampler(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, ao_deinterleaved_slices[i] }));
-						RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(blur_shader, 0, u_ao_slices_with_sampler), 0);
-					} else {
-						RD::Uniform u_ao_slices_with_sampler(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ ss_effects.mirror_sampler, ao_deinterleaved_slices[i] }));
-						RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(blur_shader, 0, u_ao_slices_with_sampler), 0);
-					}
+			RD::Uniform u_source_ao_term(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ ssao.point_clamp_sampler, source }));
+			RD::Uniform u_source_edges(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ ssao.point_clamp_sampler, edges }));
+			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_source_ao_term, u_source_edges), 0);
 
-					RD::Uniform u_ao_pong_slices(RD::UNIFORM_TYPE_IMAGE, 0, Vector<RID>({ ao_pong_slices[i] }));
-					RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(blur_shader, 1, u_ao_pong_slices), 1);
-				} else {
-					if (ssao_quality == RSE::ENV_SSAO_QUALITY_VERY_LOW) {
-						RD::Uniform u_ao_pong_slices_with_sampler(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, ao_pong_slices[i] }));
-						RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(blur_shader, 0, u_ao_pong_slices_with_sampler), 0);
-					} else {
-						RD::Uniform u_ao_pong_slices_with_sampler(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ ss_effects.mirror_sampler, ao_pong_slices[i] }));
-						RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(blur_shader, 0, u_ao_pong_slices_with_sampler), 0);
-					}
+			RD::Uniform u_dest(RD::UNIFORM_TYPE_IMAGE, 0, dest);
+			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 1, u_dest), 1);
 
-					RD::Uniform u_ao_slices(RD::UNIFORM_TYPE_IMAGE, 0, Vector<RID>({ ao_deinterleaved_slices[i] }));
-					RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(blur_shader, 1, u_ao_slices), 1);
-				}
-				RD::get_singleton()->compute_list_set_push_constant(compute_list, &ssao.blur_push_constant, sizeof(SSAOBlurPushConstant));
+			RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SSAOPushConstant));
 
-				RD::get_singleton()->compute_list_dispatch_threads(compute_list, p_ssao_buffers.buffer_width, p_ssao_buffers.buffer_height, 1);
-			}
-
+			// Each thread processes 2 horizontal pixels.
+			RD::get_singleton()->compute_list_dispatch_threads(compute_list, Math::division_round_up(size.x, 2), size.y, 1);
 			RD::get_singleton()->compute_list_add_barrier(compute_list);
+
+			source = dest;
 		}
-		RD::get_singleton()->draw_command_end_label(); // Blur
+
+		RD::get_singleton()->draw_command_end_label(); // Denoise
 	}
 
-	/* FOURTH PASS */
-	// Interleave buffers
-	// back to full size
-	{
-		RD::get_singleton()->draw_command_begin_label("Interleave Buffers");
-		ssao.interleave_push_constant.inv_sharpness = 1.0 - p_settings.sharpness;
-		ssao.interleave_push_constant.pixel_size[0] = 1.0 / p_settings.full_screen_size.x;
-		ssao.interleave_push_constant.pixel_size[1] = 1.0 / p_settings.full_screen_size.y;
-		ssao.interleave_push_constant.size_modifier = uint32_t(ssao_half_size ? 4 : 2);
-
-		shader = ssao.interleave_shader.version_get_shader(ssao.interleave_shader_version, 0);
-
-		int interleave_pipeline = SSAO_INTERLEAVE_HALF;
-		if (ssao_quality == RSE::ENV_SSAO_QUALITY_LOW) {
-			interleave_pipeline = SSAO_INTERLEAVE;
-		} else if (ssao_quality >= RSE::ENV_SSAO_QUALITY_MEDIUM) {
-			interleave_pipeline = SSAO_INTERLEAVE_SMART;
-		}
-
-		RID interleave_shader = ssao.interleave_shader.version_get_shader(ssao.interleave_shader_version, interleave_pipeline - SSAO_INTERLEAVE);
-		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssao.pipelines[interleave_pipeline].get_rid());
-
-		RD::Uniform u_upscale_buffer(RD::UNIFORM_TYPE_IMAGE, 0, Vector<RID>({ ao_final }));
-		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(interleave_shader, 0, u_upscale_buffer), 0);
-
-		if (ssao_quality > RSE::ENV_SSAO_QUALITY_VERY_LOW && ssao_blur_passes % 2 == 0) {
-			RD::Uniform u_ao(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, ao_deinterleaved }));
-			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(interleave_shader, 1, u_ao), 1);
-		} else {
-			RD::Uniform u_ao(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, ao_pong }));
-			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(interleave_shader, 1, u_ao), 1);
-		}
-
-		RD::get_singleton()->compute_list_set_push_constant(compute_list, &ssao.interleave_push_constant, sizeof(SSAOInterleavePushConstant));
-
-		RD::get_singleton()->compute_list_dispatch_threads(compute_list, p_settings.full_screen_size.x, p_settings.full_screen_size.y, 1);
-		RD::get_singleton()->draw_command_end_label(); // Interleave
-	}
-	RD::get_singleton()->draw_command_end_label(); //SSAO
+	RD::get_singleton()->draw_command_end_label(); // SSAO
 	RD::get_singleton()->compute_list_end();
-
-	int zero[1] = { 0 };
-	RD::get_singleton()->buffer_update(ssao.importance_map_load_counter, 0, sizeof(uint32_t), &zero);
 }
 
 /* Screen Space Reflection */
@@ -1460,29 +1313,27 @@ void SSEffects::ssr_set_half_size(bool p_half_size) {
 	ssr_half_size = p_half_size;
 }
 
-void SSEffects::ssr_allocate_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, SSRRenderBuffers &p_ssr_buffers, const RD::DataFormat p_color_format) {
+bool SSEffects::ssr_allocate_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, SSRRenderBuffers &p_ssr_buffers, const RD::DataFormat p_color_format) {
 	if (p_ssr_buffers.half_size != ssr_half_size) {
 		p_render_buffers->clear_context(RB_SCOPE_SSR);
 	}
 
-	Vector2i internal_size = p_render_buffers->get_internal_size();
+	Size2i internal_size = p_render_buffers->get_internal_size();
 	p_ssr_buffers.size = ssr_half_size ? (internal_size / 2) : internal_size;
+	p_ssr_buffers.half_size = ssr_half_size;
 
-	uint32_t cur_width = p_ssr_buffers.size.width;
-	uint32_t cur_height = p_ssr_buffers.size.height;
-	p_ssr_buffers.mipmaps = 1;
-
-	while (cur_width > 1 && cur_height > 1) {
-		if (cur_width > 1) {
-			cur_width /= 2;
-		}
-		if (cur_height > 1) {
-			cur_height /= 2;
-		}
-		++p_ssr_buffers.mipmaps;
+	if (p_ssr_buffers.size.width < 2 || p_ssr_buffers.size.height < 2) {
+		// Tracing needs at least two levels of hierarchical depth. The scene shader falls back to
+		// black textures when the reflection buffers do not exist.
+		p_render_buffers->clear_context(RB_SCOPE_SSR);
+		return false;
 	}
 
-	p_ssr_buffers.half_size = ssr_half_size;
+	// Levels are halved until one of the dimensions reaches a single pixel.
+	p_ssr_buffers.mipmaps = 1;
+	for (Size2i level_size = p_ssr_buffers.size; level_size.width > 1 && level_size.height > 1; level_size /= 2) {
+		p_ssr_buffers.mipmaps++;
+	}
 
 	uint32_t view_count = p_render_buffers->get_view_count();
 
@@ -1497,9 +1348,11 @@ void SSEffects::ssr_allocate_buffers(Ref<RenderSceneBuffersRD> p_render_buffers,
 	if (ssr_half_size) {
 		p_render_buffers->create_texture(RB_SCOPE_SSR, RB_FINAL, p_color_format, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, internal_size, view_count);
 	}
+
+	return true;
 }
 
-void SSEffects::screen_space_reflection(Ref<RenderSceneBuffersRD> p_render_buffers, SSRRenderBuffers &p_ssr_buffers, const RID *p_normal_roughness_slices, int p_max_steps, float p_fade_in, float p_fade_out, float p_tolerance, const Projection *p_projections, const Projection *p_reprojections, const Vector3 *p_eye_offsets, RendererRD::CopyEffects &p_copy_effects) {
+void SSEffects::screen_space_reflection(Ref<RenderSceneBuffersRD> p_render_buffers, SSRRenderBuffers &p_ssr_buffers, const RID *p_normal_roughness_slices, const SSRSettings &p_settings, const Projection *p_projections, const Projection *p_reprojections, const Vector3 *p_eye_offsets) {
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	ERR_FAIL_NULL(uniform_set_cache);
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
@@ -1535,8 +1388,10 @@ void SSEffects::screen_space_reflection(Ref<RenderSceneBuffersRD> p_render_buffe
 	RID linear_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 
-	if (ssr_half_size) {
+	if (p_ssr_buffers.half_size) {
 		RD::get_singleton()->draw_command_begin_label("SSR Downsample");
+
+		RID downsample_shader = ssr.downsample_shader.version_get_shader(ssr.downsample_shader_version, 0);
 
 		for (uint32_t v = 0; v < view_count; v++) {
 			ScreenSpaceReflectionDownsamplePushConstant push_constant;
@@ -1547,23 +1402,6 @@ void SSEffects::screen_space_reflection(Ref<RenderSceneBuffersRD> p_render_buffe
 			RID dest_depth_texture = p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_HIZ, v, 0);
 			RID dest_normal_roughness_texture = p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_NORMAL_ROUGHNESS, v, 0);
 
-			Size2i parent_size = RD::get_singleton()->texture_size(source_depth_texture);
-			bool is_width_odd = (parent_size.width % 2) != 0;
-			bool is_height_odd = (parent_size.height % 2) != 0;
-
-			int32_t downsample_mode;
-			if (is_width_odd && is_height_odd) {
-				downsample_mode = SCREEN_SPACE_REFLECTION_DOWNSAMPLE_ODD_WIDTH_AND_HEIGHT;
-			} else if (is_width_odd) {
-				downsample_mode = SCREEN_SPACE_REFLECTION_DOWNSAMPLE_ODD_WIDTH;
-			} else if (is_height_odd) {
-				downsample_mode = SCREEN_SPACE_REFLECTION_DOWNSAMPLE_ODD_HEIGHT;
-			} else {
-				downsample_mode = SCREEN_SPACE_REFLECTION_DOWNSAMPLE_DEFAULT;
-			}
-
-			RID downsample_shader = ssr.downsample_shader.version_get_shader(ssr.downsample_shader_version, downsample_mode);
-
 			RD::Uniform u_source_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>{ nearest_sampler, source_depth_texture });
 			RD::Uniform u_source_normal_roughness(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>{ nearest_sampler, p_normal_roughness_slices[v] });
 			RD::Uniform u_dest_depth(RD::UNIFORM_TYPE_IMAGE, 2, dest_depth_texture);
@@ -1571,22 +1409,12 @@ void SSEffects::screen_space_reflection(Ref<RenderSceneBuffersRD> p_render_buffe
 
 			RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
-			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssr.downsample_pipelines[downsample_mode].get_rid());
+			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssr.downsample_pipeline.get_rid());
 			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(downsample_shader, 0, u_source_depth, u_source_normal_roughness, u_dest_depth, u_dest_normal_roughness), 0);
 			RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
 			RD::get_singleton()->compute_list_dispatch_threads(compute_list, push_constant.screen_size[0], push_constant.screen_size[1], 1);
 
 			RD::get_singleton()->compute_list_end();
-		}
-
-		RD::get_singleton()->draw_command_end_label();
-	} else {
-		RD::get_singleton()->draw_command_begin_label("SSR Copy Depth");
-
-		for (uint32_t v = 0; v < view_count; v++) {
-			RID src_texture = p_render_buffers->get_depth_texture(v);
-			RID dest_texture = p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_HIZ, v, 0);
-			p_copy_effects.copy_depth_to_rect(src_texture, dest_texture, Rect2i(Vector2i(), p_ssr_buffers.size));
 		}
 
 		RD::get_singleton()->draw_command_end_label();
@@ -1600,40 +1428,30 @@ void SSEffects::screen_space_reflection(Ref<RenderSceneBuffersRD> p_render_buffe
 			push_constant.screen_size[0] = MAX(1, p_ssr_buffers.size.width >> m);
 			push_constant.screen_size[1] = MAX(1, p_ssr_buffers.size.height >> m);
 
-			RID source;
-
-			if (!ssr_half_size && m == 1) { // Reuse the depth texture to not create a dependency on the previous depth copy pass.
-				source = p_render_buffers->get_depth_texture(v);
-			} else {
-				source = p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_HIZ, v, m - 1);
-			}
-
-			RID dest = p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_HIZ, v, m);
-
-			Size2i parent_size = RD::get_singleton()->texture_size(source);
-			bool is_width_odd = (parent_size.width % 2) != 0;
-			bool is_height_odd = (parent_size.height % 2) != 0;
-
-			int32_t hiz_mode;
-			if (is_width_odd && is_height_odd) {
-				hiz_mode = SCREEN_SPACE_REFLECTION_HIZ_ODD_WIDTH_AND_HEIGHT;
-			} else if (is_width_odd) {
-				hiz_mode = SCREEN_SPACE_REFLECTION_HIZ_ODD_WIDTH;
-			} else if (is_height_odd) {
-				hiz_mode = SCREEN_SPACE_REFLECTION_HIZ_ODD_HEIGHT;
-			} else {
-				hiz_mode = SCREEN_SPACE_REFLECTION_HIZ_DEFAULT;
-			}
-
+			// At full size, the first level is a copy of the depth buffer. It is written while building
+			// the second level from the depth buffer itself, instead of doing a separate copy pass.
+			bool copy_source = !p_ssr_buffers.half_size && m == 1;
+			ScreenSpaceReflectionHizMode hiz_mode = copy_source ? SCREEN_SPACE_REFLECTION_HIZ_COPY_SOURCE : SCREEN_SPACE_REFLECTION_HIZ_DEFAULT;
 			RID hiz_shader = ssr.hiz_shader.version_get_shader(ssr.hiz_shader_version, hiz_mode);
+
+			RID source = copy_source ? p_render_buffers->get_depth_texture(v) : p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_HIZ, v, m - 1);
+			RID dest = p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_HIZ, v, m);
 
 			RD::Uniform u_source(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>{ nearest_sampler, source });
 			RD::Uniform u_dest(RD::UNIFORM_TYPE_IMAGE, 1, dest);
 
+			RID uniform_set;
+			if (copy_source) {
+				RD::Uniform u_dest_source(RD::UNIFORM_TYPE_IMAGE, 2, p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_HIZ, v, 0));
+				uniform_set = uniform_set_cache->get_cache(hiz_shader, 0, u_source, u_dest, u_dest_source);
+			} else {
+				uniform_set = uniform_set_cache->get_cache(hiz_shader, 0, u_source, u_dest);
+			}
+
 			RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
 			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssr.hiz_pipelines[hiz_mode].get_rid());
-			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(hiz_shader, 0, u_source, u_dest), 0);
+			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 			RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
 			RD::get_singleton()->compute_list_dispatch_threads(compute_list, push_constant.screen_size[0], push_constant.screen_size[1], 1);
 
@@ -1656,21 +1474,21 @@ void SSEffects::screen_space_reflection(Ref<RenderSceneBuffersRD> p_render_buffe
 		push_constant.screen_size[0] = p_ssr_buffers.size.width;
 		push_constant.screen_size[1] = p_ssr_buffers.size.height;
 		push_constant.mipmaps = p_ssr_buffers.mipmaps;
-		push_constant.num_steps = p_max_steps;
-		push_constant.curve_fade_in = p_fade_in;
-		push_constant.distance_fade = p_fade_out;
-		push_constant.depth_tolerance = p_tolerance;
+		push_constant.num_steps = p_settings.max_steps;
+		push_constant.curve_fade_in = p_settings.fade_in;
+		push_constant.distance_fade = p_settings.fade_out;
+		push_constant.depth_tolerance = p_settings.depth_tolerance;
 		push_constant.orthogonal = p_projections[v].is_orthogonal();
 		push_constant.view_index = v;
 
 		RID last_frame_texture = p_render_buffers->get_texture_slice(RB_SCOPE_SSLF, RB_LAST_FRAME, v, 0);
-		if (ssr_half_size && RD::get_singleton()->texture_size(last_frame_texture) != p_ssr_buffers.size) {
+		if (p_ssr_buffers.half_size && RD::get_singleton()->texture_size(last_frame_texture) != p_ssr_buffers.size) {
 			// SSIL is likely also enabled. The texture we need is in the second mipmap in this case.
 			last_frame_texture = p_render_buffers->get_texture_slice(RB_SCOPE_SSLF, RB_LAST_FRAME, v, 1);
 		}
 
 		RID hiz_texture = p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_HIZ, v, 0, 1, p_ssr_buffers.mipmaps);
-		RID normal_roughness_texture = ssr_half_size ? p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_NORMAL_ROUGHNESS, v, 0) : p_normal_roughness_slices[v];
+		RID normal_roughness_texture = p_ssr_buffers.half_size ? p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_NORMAL_ROUGHNESS, v, 0) : p_normal_roughness_slices[v];
 		RID ssr_texture = p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_SSR, v, 0);
 		RID mip_level_texture = p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_MIP_LEVEL, v, 0);
 
@@ -1720,21 +1538,22 @@ void SSEffects::screen_space_reflection(Ref<RenderSceneBuffersRD> p_render_buffe
 
 	RD::get_singleton()->draw_command_end_label();
 
-	if (ssr_half_size) {
+	if (p_ssr_buffers.half_size) {
 		RD::get_singleton()->draw_command_begin_label("SSR Resolve");
 
 		RID resolve_shader = ssr.resolve_shader.version_get_shader(ssr.resolve_shader_version, 0);
+		Size2i internal_size = p_render_buffers->get_internal_size();
 
 		for (uint32_t v = 0; v < view_count; v++) {
 			RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
 			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, ssr.resolve_pipeline.get_rid());
 
-			Vector2i internal_size = p_render_buffers->get_internal_size();
-
 			ScreenSpaceReflectionResolvePushConstant push_constant;
-			push_constant.screen_size[0] = internal_size.x;
-			push_constant.screen_size[1] = internal_size.y;
+			push_constant.screen_size[0] = internal_size.width;
+			push_constant.screen_size[1] = internal_size.height;
+			push_constant.half_screen_size[0] = p_ssr_buffers.size.width;
+			push_constant.half_screen_size[1] = p_ssr_buffers.size.height;
 
 			RID depth_texture = p_render_buffers->get_depth_texture(v);
 			RID depth_half_texture = p_render_buffers->get_texture_slice(RB_SCOPE_SSR, RB_HIZ, v, 0);

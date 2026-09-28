@@ -33,26 +33,31 @@ void main() {
 		return;
 	}
 
-	ivec2 sample_pos = pixel_pos * 2 + ivec2(0, 0);
+	// Keep the closest (reverse Z) of the covered samples, along with its normal and roughness.
+	ivec2 sample_pos = pixel_pos * 2;
 	float depth = texelFetch(source_depth, sample_pos, 0).x;
 
 	get_sample(pixel_pos * 2 + ivec2(1, 0), depth, sample_pos);
 	get_sample(pixel_pos * 2 + ivec2(0, 1), depth, sample_pos);
 	get_sample(pixel_pos * 2 + ivec2(1, 1), depth, sample_pos);
 
-#ifdef MODE_ODD_WIDTH
-	get_sample(pixel_pos * 2 + ivec2(2, 0), depth, sample_pos);
-	get_sample(pixel_pos * 2 + ivec2(2, 1), depth, sample_pos);
-#endif
+	// When the source has an odd size, the samples of the last row or column are shared
+	// with their neighbors so that the whole source stays covered.
+	bvec2 odd = notEqual(textureSize(source_depth, 0) & 1, ivec2(0));
 
-#ifdef MODE_ODD_HEIGHT
-	get_sample(pixel_pos * 2 + ivec2(0, 2), depth, sample_pos);
-	get_sample(pixel_pos * 2 + ivec2(1, 2), depth, sample_pos);
-#endif
+	if (odd.x) {
+		get_sample(pixel_pos * 2 + ivec2(2, 0), depth, sample_pos);
+		get_sample(pixel_pos * 2 + ivec2(2, 1), depth, sample_pos);
+	}
 
-#if defined(MODE_ODD_WIDTH) && defined(MODE_ODD_HEIGHT)
-	get_sample(pixel_pos * 2 + ivec2(2, 2), depth, sample_pos);
-#endif
+	if (odd.y) {
+		get_sample(pixel_pos * 2 + ivec2(0, 2), depth, sample_pos);
+		get_sample(pixel_pos * 2 + ivec2(1, 2), depth, sample_pos);
+	}
+
+	if (all(odd)) {
+		get_sample(pixel_pos * 2 + ivec2(2, 2), depth, sample_pos);
+	}
 
 	imageStore(dest_depth, pixel_pos, vec4(depth, 0.0, 0.0, 0.0));
 	imageStore(dest_normal_roughness, pixel_pos, texelFetch(source_normal_roughness, sample_pos, 0));

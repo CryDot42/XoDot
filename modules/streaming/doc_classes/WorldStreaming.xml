@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="WorldStreaming" inherits="Object" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Shared infrastructure for streaming world content.
+	</brief_description>
+	<description>
+		[WorldStreaming] is the singleton used by the systems that stream world content, such as [Landscape3D]:
+		- a prioritized job queue executed by dedicated streaming threads (see [member ProjectSettings.streaming/threads/thread_count]), whose results are applied on the main thread,
+		- the registry of streaming sources ([StreamingSource3D]),
+		- named memory pools with budgets, also exposed as performance monitors (Debugger > Monitors > Streaming).
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_pool_limit" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="pool" type="StringName" />
+			<description>
+				Returns the budget of a memory pool in bytes ([code]0[/code] if unlimited).
+			</description>
+		</method>
+		<method name="get_pool_names" qualifiers="const">
+			<return type="PackedStringArray" />
+			<description>
+				Returns the names of the memory pools, e.g. Landscape CPU and Landscape GPU.
+			</description>
+		</method>
+		<method name="get_pool_usage" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="pool" type="StringName" />
+			<description>
+				Returns the memory used by a pool, in bytes.
+			</description>
+		</method>
+		<method name="get_queued_job_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of jobs waiting for a streaming thread.
+			</description>
+		</method>
+		<method name="get_running_job_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of jobs being executed.
+			</description>
+		</method>
+		<method name="get_source_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of registered streaming sources.
+			</description>
+		</method>
+		<method name="get_thread_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of streaming threads.
+			</description>
+		</method>
+		<method name="is_pool_over_limit" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="pool" type="StringName" />
+			<description>
+				Returns [code]true[/code] if the usage of the pool exceeds its budget.
+			</description>
+		</method>
+		<method name="process">
+			<return type="void" />
+			<description>
+				Applies the results of the finished jobs. This is done automatically every frame.
+			</description>
+		</method>
+		<method name="set_pool_limit">
+			<return type="void" />
+			<param index="0" name="pool" type="StringName" />
+			<param index="1" name="bytes" type="int" />
+			<description>
+				Sets the budget of a memory pool in bytes ([code]0[/code] for unlimited).
+			</description>
+		</method>
+	</methods>
+</class>

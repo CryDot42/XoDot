@@ -2968,23 +2968,18 @@
 		<member name="rendering/environment/screen_space_reflection/half_size" type="bool" setter="" getter="" default="true" keywords="resolution">
 			If [code]true[/code], screen-space reflections will be rendered at half size and then upscaled before being added to the scene. This is faster but may look pixelated or cause flickering. If [code]false[/code], screen-space reflections will be rendered at full size.
 		</member>
-		<member name="rendering/environment/ssao/adaptive_target" type="float" setter="" getter="" default="0.5">
-			Quality target to use when [member rendering/environment/ssao/quality] is set to [code]Ultra[/code]. A value of [code]0.0[/code] provides a quality and speed similar to [code]Medium[/code] while a value of [code]1.0[/code] provides much higher quality than any of the other settings at the cost of performance.
+		<member name="rendering/environment/ssao/bent_normals" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], screen-space ambient occlusion also computes bent normals: the average direction in which the surface around each pixel isn't occluded. Bent normals are used instead of the surface normal to sample indirect diffuse lighting (from the sky, reflection probes and lightmaps), which makes light come from the unoccluded directions. They are also used to occlude indirect specular lighting (reflections) based on the intersection between the cone of visible directions and the specular reflection cone. This noticeably improves the contact shadowing of indirect lighting, at the cost of making the screen-space ambient occlusion effect roughly 25% slower.
+			See also [member BaseMaterial3D.bent_normal_enabled], which is combined with the bent normals computed by screen-space ambient occlusion.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</member>
-		<member name="rendering/environment/ssao/blur_passes" type="int" setter="" getter="" default="2">
-			Number of blur passes to use when computing screen-space ambient occlusion. A higher number will result in a smoother look, but will be slower to compute and will have less high-frequency detail.
-		</member>
-		<member name="rendering/environment/ssao/fadeout_from" type="float" setter="" getter="" default="50.0">
-			Distance at which the screen-space ambient occlusion effect starts to fade out. Use this hide ambient occlusion from far away.
-		</member>
-		<member name="rendering/environment/ssao/fadeout_to" type="float" setter="" getter="" default="300.0">
-			Distance at which the screen-space ambient occlusion is fully faded out. Use this hide ambient occlusion from far away.
-		</member>
-		<member name="rendering/environment/ssao/half_size" type="bool" setter="" getter="" default="true" keywords="resolution">
-			If [code]true[/code], screen-space ambient occlusion will be rendered at half size and then upscaled before being added to the scene. This is significantly faster but may miss small details. If [code]false[/code], screen-space ambient occlusion will be rendered at full size.
+		<member name="rendering/environment/ssao/denoise_passes" type="int" setter="" getter="" default="2">
+			The number of edge-aware spatial denoising passes applied to the screen-space ambient occlusion. [code]Disabled[/code] leaves the sampling noise visible. [code]Sharp[/code] (1 pass) is recommended when temporal antialiasing ([member rendering/anti_aliasing/quality/use_taa] or FSR 2) is used, as the sampling pattern then varies every frame and the remaining noise is accumulated over multiple frames. [code]Medium[/code] (2 passes) and [code]Soft[/code] (3 passes) give smoother results without temporal antialiasing, at the cost of fine details.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</member>
 		<member name="rendering/environment/ssao/quality" type="int" setter="" getter="" default="2">
-			Sets the quality of the screen-space ambient occlusion effect. Higher values take more samples and so will result in better quality, at the cost of performance. Setting to [code]Ultra[/code] will use the [member rendering/environment/ssao/adaptive_target] setting.
+			Sets the quality of the screen-space ambient occlusion effect. Higher values take more samples (more slices and more steps per slice) and so will result in better quality, at the cost of performance. When using the Forward+ rendering method, [code]Low[/code] takes 4 samples per pixel, [code]Medium[/code] takes 8, [code]High[/code] takes 18 and [code]Ultra[/code] takes 54. See [enum RenderingServer.EnvironmentSSAOQuality].
+			[b]Note:[/b] The Compatibility rendering method uses a simpler screen-space ambient occlusion effect with its own number of samples for each quality level.
 		</member>
 		<member name="rendering/environment/ssil/adaptive_target" type="float" setter="" getter="" default="0.5">
 			Quality target to use when [member rendering/environment/ssil/quality] is set to [code]Ultra[/code]. A value of [code]0.0[/code] provides a quality and speed similar to [code]Medium[/code] while a value of [code]1.0[/code] provides much higher quality than any of the other settings at the cost of performance. When using the adaptive target, the performance cost scales with the complexity of the scene.
@@ -3147,6 +3142,9 @@
 		</member>
 		<member name="rendering/global_illumination/voxel_gi/screen_probes/temporal_frames" type="int" setter="" getter="" default="8">
 			The number of frames screen probe lighting is accumulated over. Higher values reduce noise, but make indirect light react more slowly to changes and can leave trails behind fast-moving objects. The accumulation starts over for pixels whose surface changed since the previous frame.
+		</member>
+		<member name="rendering/landscape/streaming/cpu_cache_size_mb" type="int" setter="" getter="" default="512">
+			Memory budget (in megabytes) of the tiles of every [LandscapeData] kept in memory. Tiles not needed anymore are evicted when the budget is exceeded (modified tiles are written to a temporary file until the data is saved).
 		</member>
 		<member name="rendering/lightmapping/bake_performance/max_rays_per_pass" type="int" setter="" getter="" default="4">
 			The maximum number of rays that can be thrown per pass when baking lightmaps with [LightmapGI]. Depending on the scene, adjusting this value may result in higher GPU utilization when baking lightmaps, leading to faster bake times.
@@ -3646,6 +3644,9 @@
 			- 8×4 = rgb(255, 170, 0) - #ffaa00 - Not supported on most hardware
 			- 8×8 = rgb(255, 255, 0) - #ffff00 - Not supported on most hardware
 			[/codeblock]
+		</member>
+		<member name="streaming/threads/thread_count" type="int" setter="" getter="" default="2">
+			Number of threads used by [WorldStreaming] to load and prepare streamed content (landscape tiles and pages).
 		</member>
 		<member name="threading/worker_pool/low_priority_thread_ratio" type="float" setter="" getter="" default="0.3">
 			The ratio of [WorkerThreadPool]'s threads that will be reserved for low-priority tasks. For example, if 10 threads are available and this value is set to [code]0.3[/code], 3 of the worker threads will be reserved for low-priority tasks. The actual value won't exceed the number of CPU cores minus one, and if possible, at least one worker thread will be dedicated to low-priority tasks.

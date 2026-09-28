@@ -301,6 +301,7 @@ private:
 		SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR = (1 << 2),
 		SCREEN_SPACE_EFFECTS_FLAGS_RESOLVE_SSR = (1 << 3),
 		SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS = (1 << 4),
+		SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO_BENT_NORMALS = (1 << 5),
 	};
 
 	struct SceneState {
@@ -792,7 +793,7 @@ private:
 	void _render_shadow_end();
 
 	/* Render Scene */
-	void _process_ssao(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_buffers, const Projection *p_projections);
+	void _process_ssao(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_buffers, const Projection *p_projections, float p_taa_frame_count);
 	void _process_ssil(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_buffers, const Projection *p_projections, const Transform3D &p_transform);
 	void _process_ssr(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_slices, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_transform);
 	void _process_sscs(Ref<RenderSceneBuffersRD> p_render_buffers, const Projection *p_projections, const Transform3D &p_transform, const LocalVector<int> &p_contact_shadows, const RenderShadowData *p_render_shadows, float p_taa_frame_count);
@@ -809,7 +810,7 @@ protected:
 	virtual RID _render_buffers_get_normal_texture(Ref<RenderSceneBuffersRD> p_render_buffers) override;
 	virtual RID _render_buffers_get_velocity_texture(Ref<RenderSceneBuffersRD> p_render_buffers) override;
 
-	virtual void environment_set_ssao_quality(RSE::EnvironmentSSAOQuality p_quality, bool p_half_size, float p_adaptive_target, int p_blur_passes, float p_fadeout_from, float p_fadeout_to) override;
+	virtual void environment_set_ssao_quality(RSE::EnvironmentSSAOQuality p_quality, int p_denoise_passes, bool p_bent_normals) override;
 	virtual void environment_set_ssil_quality(RSE::EnvironmentSSILQuality p_quality, bool p_half_size, float p_adaptive_target, int p_blur_passes, float p_fadeout_from, float p_fadeout_to) override;
 	virtual void environment_set_ssr_half_size(bool p_half_size) override;
 	virtual void environment_set_ssr_roughness_quality(RSE::EnvironmentSSRRoughnessQuality p_quality) override;

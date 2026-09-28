@@ -1171,7 +1171,8 @@ void RasterizerSceneGLES3::environment_set_ssr_half_size(bool p_half_size) {
 void RasterizerSceneGLES3::environment_set_ssr_roughness_quality(RSE::EnvironmentSSRRoughnessQuality p_quality) {
 }
 
-void RasterizerSceneGLES3::environment_set_ssao_quality(RSE::EnvironmentSSAOQuality p_quality, bool p_half_size, float p_adaptive_target, int p_blur_passes, float p_fadeout_from, float p_fadeout_to) {
+void RasterizerSceneGLES3::environment_set_ssao_quality(RSE::EnvironmentSSAOQuality p_quality, int p_denoise_passes, bool p_bent_normals) {
+	// The Compatibility renderer uses S4AO, which has no denoiser and doesn't compute bent normals.
 	ssao_quality = p_quality;
 }
 
@@ -3068,8 +3069,8 @@ void RasterizerSceneGLES3::_render_post_processing(const RenderDataGLES3 *p_rend
 		ssao_enabled = environment_get_ssao_enabled(p_render_data->environment);
 		// This SSAO is not implemented the same way, but uses the intensity and radius
 		// in a similar way.  The parameters are scaled so the SSAO defaults look ok.
-		ssao_strength = environment_get_ssao_intensity(p_render_data->environment) * 2.0;
-		ssao_radius = environment_get_ssao_radius(p_render_data->environment) * 0.5;
+		ssao_strength = environment_get_ssao_intensity(p_render_data->environment) * 4.0;
+		ssao_radius = environment_get_ssao_radius(p_render_data->environment);
 	}
 
 	uint64_t bcs_spec_constants = 0;
@@ -4669,6 +4670,7 @@ RasterizerSceneGLES3::RasterizerSceneGLES3() {
 	positional_soft_shadow_filter_set_quality((RSE::ShadowQuality)(int)GLOBAL_GET("rendering/lights_and_shadows/positional_shadow/soft_shadow_filter_quality"));
 	directional_soft_shadow_filter_set_quality((RSE::ShadowQuality)(int)GLOBAL_GET("rendering/lights_and_shadows/directional_shadow/soft_shadow_filter_quality"));
 	lightmaps_set_bicubic_filter(GLOBAL_GET("rendering/lightmapping/lightmap_gi/use_bicubic_filter"));
+	environment_set_ssao_quality(RSE::EnvironmentSSAOQuality(int(GLOBAL_GET("rendering/environment/ssao/quality"))), GLOBAL_GET("rendering/environment/ssao/denoise_passes"), GLOBAL_GET("rendering/environment/ssao/bent_normals"));
 
 	{ //decals
 		config->max_decals = MIN(config->max_decals, config->max_uniform_buffer_size / (int)sizeof(GLES3::DecalData));
