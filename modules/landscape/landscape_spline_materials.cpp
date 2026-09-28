@@ -322,6 +322,7 @@ enum {
 	WATER_NORMAL_STRENGTH,
 	WATER_DETAIL_SCALE,
 	WATER_DETAIL_STRENGTH,
+	WATER_TILING_VARIATION,
 	WATER_WIND_VELOCITY,
 	WATER_FLOW_SPEED_SCALE,
 	WATER_FLOW_CYCLE,
@@ -350,6 +351,7 @@ static const LandscapeSplineMaterial::ParameterInfo water_parameters[WATER_MAX] 
 	{ "normal_strength", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,2,0.01", "Ripples" },
 	{ "detail_scale", Variant::FLOAT, PROPERTY_HINT_RANGE, "0.1,64,0.01,or_greater,suffix:m", "Ripples" },
 	{ "detail_strength", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,2,0.01", "Ripples" },
+	{ "tiling_variation", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,1,0.01", "Ripples" },
 	{ "wind_velocity", Variant::VECTOR2, PROPERTY_HINT_NONE, "suffix:m/s", "Ripples" },
 	{ "flow_speed_scale", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,4,0.01,or_greater", "Flow" },
 	{ "flow_cycle", Variant::FLOAT, PROPERTY_HINT_RANGE, "0.1,8,0.01,suffix:s", "Flow" },
@@ -395,6 +397,8 @@ Variant LandscapeWaterMaterial::_get_parameter_default(int p_index) const {
 			return 1.6;
 		case WATER_DETAIL_STRENGTH:
 			return 0.35;
+		case WATER_TILING_VARIATION:
+			return 0.4;
 		case WATER_WIND_VELOCITY:
 			return Vector2(0.25, 0.1);
 		case WATER_FLOW_SPEED_SCALE:
@@ -497,6 +501,7 @@ uniform float normal_scale = 5.0; // Size (m) of the ripple pattern.
 uniform float normal_strength : hint_range(0.0, 2.0) = 0.5;
 uniform float detail_scale = 1.6;
 uniform float detail_strength : hint_range(0.0, 2.0) = 0.35;
+uniform float tiling_variation : hint_range(0.0, 1.0) = 0.4; // Breaks up the visible repetition of the tiling ripple texture.
 uniform vec2 wind_velocity = vec2(0.25, 0.1);
 uniform float flow_speed_scale = 1.0;
 uniform float flow_cycle = 1.5; // Seconds: the ripples are advected over a cycle, then crossfaded.
@@ -565,8 +570,13 @@ void fragment() {
 	vec2 drift = wind_velocity * TIME; // Constant drift: plain scrolling.
 	float blend;
 	vec2 offsets = ls_flow_phases(blend);
-	vec3 n1 = ls_ripples(UV - drift, flow, offsets, blend, max(normal_scale, 0.01), normal_strength);
-	vec3 n2 = ls_ripples(UV - drift * 1.7 + vec2(0.5), flow * 1.25, offsets, blend, max(detail_scale, 0.01), detail_strength);
+	// Breaks up the visible repetition of the tiling ripple texture: a coarse, slowly drifting
+	// distortion (the same texture sampled far larger) displaces the UVs of the ripple layers,
+	// so identical tiles no longer line up with each other.
+	vec2 warp_uv = (UV - drift * 0.3) / max(normal_scale * 6.0, 0.01) + vec2(0.13, 0.71);
+	vec2 warp = (texture(normal_texture, warp_uv).rg - 0.5) * (normal_scale * tiling_variation);
+	vec3 n1 = ls_ripples(UV - drift + warp, flow, offsets, blend, max(normal_scale, 0.01), normal_strength);
+	vec3 n2 = ls_ripples(UV - drift * 1.7 + warp * 0.6 + vec2(0.5), flow * 1.25, offsets, blend, max(detail_scale, 0.01), detail_strength);
 	vec3 ts = normalize(vec3(n1.xy + n2.xy, n1.z * n2.z));
 	vec3 normal = normalize(TANGENT * ts.x + BINORMAL * ts.y + NORMAL * ts.z);
 
@@ -574,7 +584,10 @@ void fragment() {
 	float surface = -VERTEX.z;
 	float ground = ls_view_depth(SCREEN_UV, INV_PROJECTION_MATRIX);
 	float thickness = max(ground - surface, 0.0);
-	vec2 refracted_uv = SCREEN_UV + normal.xy * refraction * clamp(thickness, 0.0, 1.0);
+	// The distortion is applied in pixels, not UV fractions: otherwise it would stretch unevenly
+	// between the horizontal and vertical axes on a non-square viewport.
+	float aspect = VIEWPORT_SIZE.y / max(VIEWPORT_SIZE.x, 1.0);
+	vec2 refracted_uv = SCREEN_UV + normal.xy * vec2(aspect, 1.0) * refraction * clamp(thickness, 0.0, 1.0);
 	float refracted_ground = ls_view_depth(refracted_uv, INV_PROJECTION_MATRIX);
 	if (refracted_ground < surface) {
 		// What is in front of the water is not refracted.
@@ -604,7 +617,10 @@ void fragment() {
 
 	ALBEDO = mix(scattered * (1.0 - transmittance) * (1.0 - fresnel), foam_color.rgb, foam);
 	EMISSION = transmitted * transmittance * (1.0 - fresnel) * (1.0 - foam);
-	ROUGHNESS = mix(roughness, 0.65, foam);
+	// Steeper ripples broaden the specular highlight (microfacet roughness), instead of a single
+	// flat value that keeps the reflection needle-sharp and invisible outside the exact mirror angle.
+	float ripple_amount = clamp(length(ts.xy) * 1.8, 0.0, 1.0);
+	ROUGHNESS = mix(mix(roughness, max(roughness, 0.18), ripple_amount), 0.65, foam);
 	SPECULAR = specular;
 	METALLIC = 0.0;
 	NORMAL = normalize(mix(normal, NORMAL, foam * 0.7));

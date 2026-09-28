@@ -98,6 +98,9 @@
 		<member name="specular" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.5">
 			Strength of the specular reflections.
 		</member>
+		<member name="tiling_variation" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.4">
+			Distorts the ripples at a large scale so that the repetition of the tiling normal map isn't obvious. [code]0[/code] disables it.
+		</member>
 		<member name="wave_height" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.0">
 			Height of the waves displacing the vertices of the surface. [code]0[/code] disables them.
 		</member>
