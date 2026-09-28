@@ -212,6 +212,7 @@ void main() {
 
 	int cur_level = 0;
 	int cur_iteration = params.num_steps;
+	bool behind_silhouette = false;
 
 	while (cur_level >= 0 && cur_iteration > 0 && t < t_max) {
 		vec3 cur_screen_pos = screen_pos + screen_ray_dir * t;
@@ -232,7 +233,21 @@ void main() {
 			float z0 = linearize_depth(cell_depth);
 			float z1 = linearize_depth(cur_screen_pos.z);
 
-			if ((z0 - z1) > params.depth_tolerance) {
+			if (!hit) {
+				behind_silhouette = false;
+			} else if (!facing_camera && z0 > z1 && !behind_silhouette) {
+				// The ray entered this cell already behind its surface, so it crossed that depth over the previous cell.
+				// When that cell belongs to a surface far behind this one, the ray went behind the silhouette of an object
+				// rather than hitting it. The depth buffer knows nothing about what is there (e.g. the underside of an object
+				// floating above a mirror), and accepting such hits makes hair-like streaks grow out of the reflection.
+				// Hits are rejected until the ray crosses a cell without reaching the depth of its surface.
+				float back = 0.05 / float(max(params.screen_size.x, params.screen_size.y));
+				ivec2 prev_cell = clamp(ivec2((cur_screen_pos.xy - screen_ray_dir.xy * back) * params.screen_size), ivec2(0), params.screen_size - 1);
+				float prev_z = linearize_depth(texelFetch(source_hiz, prev_cell, 0).x);
+				behind_silhouette = (z0 - prev_z) > params.depth_tolerance;
+			}
+
+			if (behind_silhouette || (z0 - z1) > params.depth_tolerance) {
 				hit = false;
 				mip_offset = 0; // Keep the mip index the same to prevent it from decreasing and increasing in repeat.
 			}
