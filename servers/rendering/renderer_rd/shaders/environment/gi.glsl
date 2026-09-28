@@ -90,7 +90,7 @@ struct VoxelGIData {
 	bool blend_ambient; // 4 - 92
 	uint mipmaps; // 4 - 96
 
-	vec3 pad; // 12 - 108
+	vec3 aniso; // 12 - 108 (enabled, slab axis, slab size)
 	float exposure_normalization; // 4 - 112
 };
 
@@ -100,6 +100,7 @@ layout(set = 0, binding = 16, std140) uniform VoxelGIs {
 voxel_gi_instances;
 
 layout(set = 0, binding = 17) uniform texture3D voxel_gi_textures[MAX_VOXEL_GI_INSTANCES];
+layout(set = 0, binding = 20) uniform texture3D voxel_gi_aniso_textures[MAX_VOXEL_GI_INSTANCES];
 
 layout(set = 0, binding = 18, std140) uniform SceneData {
 	mat4x4 inv_projection[2];
@@ -114,6 +115,32 @@ scene_data;
 
 #ifdef USE_VRS
 layout(r8ui, set = 0, binding = 19) uniform restrict readonly uimage2D vrs_buffer;
+#endif
+
+#ifdef USE_SCREEN_PROBES
+
+#include "screen_probes_inc.glsl"
+
+layout(set = 1, binding = 0) uniform texture2DArray probe_sh;
+layout(set = 1, binding = 1) uniform texture2D probe_history;
+layout(rgba16f, set = 1, binding = 2) uniform restrict writeonly image2D probe_history_out;
+layout(set = 1, binding = 3) uniform texture2D probe_history_surface; // Depth and normal.
+layout(rgba16f, set = 1, binding = 4) uniform restrict writeonly image2D probe_history_surface_out;
+
+layout(set = 1, binding = 5, std140) uniform ScreenProbeParams {
+	mat4 reprojection; // Camera relative world space to the clip space of the previous frame.
+	vec4 prev_view_z; // Dot with a camera relative world position to get its depth in the previous frame.
+
+	ivec2 probe_grid_size;
+	uint probe_spacing;
+	uint frame;
+
+	ivec2 buffer_size; // Size of the GI buffers.
+	float history_blend;
+	uint history_valid;
+}
+screen_probes;
+
 #endif
 
 layout(push_constant, std430) uniform Params {
@@ -483,8 +510,10 @@ void sdfgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, o
 	}
 }
 
+#include "voxel_gi_sample_inc.glsl"
+
 //standard voxel cone trace
-vec4 voxel_cone_trace(texture3D probe, vec3 cell_size, vec3 pos, vec3 direction, float tan_half_angle, float max_distance, float p_bias) {
+vec4 voxel_cone_trace(uint p_index, vec3 cell_size, vec3 pos, vec3 direction, float tan_half_angle, float max_distance, float p_bias, float p_normal_dot) {
 	float dist = p_bias;
 	vec4 color = vec4(0.0);
 
@@ -496,7 +525,7 @@ vec4 voxel_cone_trace(texture3D probe, vec3 cell_size, vec3 pos, vec3 direction,
 		if (any(greaterThan(abs(uvw_pos - 0.5), vec3(0.5f + half_diameter * cell_size)))) {
 			break;
 		}
-		vec4 scolor = textureLod(sampler3D(probe, linear_sampler_with_mipmaps), uvw_pos, log2(diameter));
+		vec4 scolor = voxel_gi_sample(p_index, uvw_pos, log2(diameter), direction, dist * p_normal_dot);
 		float a = (1.0 - color.a);
 		color += a * scolor;
 		dist += half_diameter;
@@ -505,7 +534,7 @@ vec4 voxel_cone_trace(texture3D probe, vec3 cell_size, vec3 pos, vec3 direction,
 	return color;
 }
 
-vec4 voxel_cone_trace_45_degrees(texture3D probe, vec3 cell_size, vec3 pos, vec3 direction, float max_distance, float p_bias) {
+vec4 voxel_cone_trace_45_degrees(uint p_index, vec3 cell_size, vec3 pos, vec3 direction, float max_distance, float p_bias, float p_normal_dot) {
 	float dist = p_bias;
 	vec4 color = vec4(0.0);
 	float radius = max(0.5, dist);
@@ -518,7 +547,7 @@ vec4 voxel_cone_trace_45_degrees(texture3D probe, vec3 cell_size, vec3 pos, vec3
 		if (any(greaterThan(abs(uvw_pos - 0.5), vec3(0.5f + radius * cell_size)))) {
 			break;
 		}
-		vec4 scolor = textureLod(sampler3D(probe, linear_sampler_with_mipmaps), uvw_pos, lod_level);
+		vec4 scolor = voxel_gi_sample(p_index, uvw_pos, lod_level, direction, dist * p_normal_dot);
 		lod_level += 1.0;
 
 		float a = (1.0 - color.a);
@@ -530,7 +559,7 @@ vec4 voxel_cone_trace_45_degrees(texture3D probe, vec3 cell_size, vec3 pos, vec3
 	return color;
 }
 
-void voxel_gi_compute(uint index, vec3 position, vec3 normal, vec3 ref_vec, mat3 normal_xform, float roughness, inout vec4 out_spec, inout vec4 out_diff, inout float out_blend) {
+void voxel_gi_compute(uint index, vec3 position, vec3 normal, vec3 ref_vec, mat3 normal_xform, float roughness, bool p_diffuse, inout vec4 out_spec, inout vec4 out_diff, inout float out_blend) {
 	position = (voxel_gi_instances.data[index].xform * vec4(position, 1.0)).xyz;
 	ref_vec = normalize((voxel_gi_instances.data[index].xform * vec4(ref_vec, 0.0)).xyz);
 	normal = normalize((voxel_gi_instances.data[index].xform * vec4(normal, 0.0)).xyz);
@@ -555,7 +584,9 @@ void voxel_gi_compute(uint index, vec3 position, vec3 normal, vec3 ref_vec, mat3
 
 	vec4 light = vec4(0.0);
 
-	if (params.high_quality_vct) {
+	if (!p_diffuse) {
+		// Diffuse comes from elsewhere (screen probes).
+	} else if (params.high_quality_vct) {
 		const uint cone_dir_count = 6;
 		vec3 cone_dirs[cone_dir_count] = vec3[](
 				vec3(0.0, 0.0, 1.0),
@@ -570,7 +601,7 @@ void voxel_gi_compute(uint index, vec3 position, vec3 normal, vec3 ref_vec, mat3
 
 		for (uint i = 0; i < cone_dir_count; i++) {
 			vec3 dir = normalize(dir_xform * cone_dirs[i]);
-			light += cone_weights[i] * voxel_cone_trace(voxel_gi_textures[index], cell_size, position, dir, cone_angle_tan, max_distance, voxel_gi_instances.data[index].bias);
+			light += cone_weights[i] * voxel_cone_trace(index, cell_size, position, dir, cone_angle_tan, max_distance, voxel_gi_instances.data[index].bias, dot(dir, normal));
 		}
 	} else {
 		const uint cone_dir_count = 4;
@@ -583,7 +614,7 @@ void voxel_gi_compute(uint index, vec3 position, vec3 normal, vec3 ref_vec, mat3
 		float cone_weights[cone_dir_count] = float[](0.25, 0.25, 0.25, 0.25);
 		for (int i = 0; i < cone_dir_count; i++) {
 			vec3 dir = normalize(dir_xform * cone_dirs[i]);
-			light += cone_weights[i] * voxel_cone_trace_45_degrees(voxel_gi_textures[index], cell_size, position, dir, max_distance, voxel_gi_instances.data[index].bias);
+			light += cone_weights[i] * voxel_cone_trace_45_degrees(index, cell_size, position, dir, max_distance, voxel_gi_instances.data[index].bias, dot(dir, normal));
 		}
 	}
 
@@ -595,7 +626,7 @@ void voxel_gi_compute(uint index, vec3 position, vec3 normal, vec3 ref_vec, mat3
 	out_diff += light * blend;
 
 	//radiance
-	vec4 irr_light = voxel_cone_trace(voxel_gi_textures[index], cell_size, position, ref_vec, tan(roughness * 0.5 * M_PI * 0.99), max_distance, voxel_gi_instances.data[index].bias);
+	vec4 irr_light = voxel_cone_trace(index, cell_size, position, ref_vec, tan(roughness * 0.5 * M_PI * 0.99), max_distance, voxel_gi_instances.data[index].bias, max(0.0, dot(ref_vec, normal)));
 	irr_light.rgb *= voxel_gi_instances.data[index].dynamic_range * voxel_gi_instances.data[index].exposure_normalization;
 	if (!voxel_gi_instances.data[index].blend_ambient) {
 		irr_light.a = 1.0;
@@ -612,6 +643,146 @@ vec4 fetch_normal_and_roughness(ivec2 pos) {
 	return normal_roughness;
 }
 
+#ifdef USE_SCREEN_PROBES
+
+// Weight of a probe for a surface, based on how close the surface is to the plane of the probe and how similar the normals are.
+float screen_probe_surface_weight(ivec2 p_probe, vec3 p_position, vec3 p_normal, float p_surface_scale) {
+	ivec2 probe_pixel = screen_probe_get_pixel(p_probe, screen_probes.probe_spacing, screen_probes.frame, scene_data.screen_size);
+
+	vec4 probe_normal_roughness = texelFetch(sampler2D(normal_roughness_buffer, linear_sampler), probe_pixel, 0);
+	if (dot(probe_normal_roughness.xyz, probe_normal_roughness.xyz) < 0.01) {
+		return 0.0; // No geometry under the probe.
+	}
+	vec3 probe_normal = normalize(mat3(scene_data.cam_transform) * normalize(probe_normal_roughness.xyz * 2.0 - 1.0));
+	vec3 probe_position = mat3(scene_data.cam_transform) * reconstruct_position(probe_pixel);
+
+	float plane_distance = abs(dot(p_position - probe_position, probe_normal)) / p_surface_scale;
+	float normal_similarity = max(0.0, dot(probe_normal, p_normal));
+	return normal_similarity * normal_similarity / (1.0 + plane_distance * plane_distance);
+}
+
+vec4 screen_probe_get_irradiance(ivec2 p_probe, vec3 p_normal) {
+	vec4 value;
+	value.r = screen_probe_sh_irradiance(texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 0), 0), p_normal);
+	value.g = screen_probe_sh_irradiance(texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 1), 0), p_normal);
+	value.b = screen_probe_sh_irradiance(texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 2), 0), p_normal);
+	value.a = min(1.0, screen_probe_sh_irradiance(texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 3), 0), p_normal));
+	return value;
+}
+
+// Interpolates the 4 closest screen probes, weighted by how well they match the surface of the pixel. When none of them
+// does (edges, small objects), looks further around. Returns false when nothing matches, so the caller traces per pixel.
+bool screen_probes_gather(ivec2 p_pixel, vec3 p_position, vec3 p_normal, out vec4 r_ambient) {
+	vec2 grid_pos = (vec2(p_pixel) + 0.5) / float(screen_probes.probe_spacing) - 0.5;
+	ivec2 base = ivec2(floor(grid_pos));
+	vec2 f = grid_pos - vec2(base);
+
+	float surface_scale = max(0.05, length(p_position) * 0.02);
+
+	vec4 accum = vec4(0.0);
+	float weight_accum = 0.0;
+
+	for (int i = 0; i < 4; i++) {
+		ivec2 probe = clamp(base + ivec2(i & 1, i >> 1), ivec2(0), screen_probes.probe_grid_size - 1);
+		float weight = (i & 1) != 0 ? f.x : 1.0 - f.x;
+		weight *= (i >> 1) != 0 ? f.y : 1.0 - f.y;
+		weight *= screen_probe_surface_weight(probe, p_position, p_normal, surface_scale);
+		if (weight > 0.0) {
+			accum += screen_probe_get_irradiance(probe, p_normal) * weight;
+			weight_accum += weight;
+		}
+	}
+
+	if (weight_accum >= 0.05) {
+		r_ambient = accum / weight_accum;
+		return true;
+	}
+
+	// Ring of 12 probes around the closest 4.
+	for (int y = -1; y <= 2; y++) {
+		for (int x = -1; x <= 2; x++) {
+			if (x >= 0 && x <= 1 && y >= 0 && y <= 1) {
+				continue;
+			}
+			ivec2 probe = base + ivec2(x, y);
+			if (any(lessThan(probe, ivec2(0))) || any(greaterThanEqual(probe, screen_probes.probe_grid_size))) {
+				continue;
+			}
+			vec2 offset = vec2(x, y) - f;
+			float weight = screen_probe_surface_weight(probe, p_position, p_normal, surface_scale) / (1.0 + dot(offset, offset));
+			if (weight > 0.0) {
+				accum += screen_probe_get_irradiance(probe, p_normal) * weight;
+				weight_accum += weight;
+			}
+		}
+	}
+
+	if (weight_accum >= 0.01) {
+		r_ambient = accum / weight_accum;
+		return true;
+	}
+
+	r_ambient = vec4(0.0);
+	return false;
+}
+
+// Blends with the reprojected result of the previous frame, and stores the new one for the next frame.
+vec4 screen_probes_temporal(ivec2 p_pixel, vec3 p_position, vec3 p_normal, float p_depth, bool p_dynamic_object, vec4 p_ambient) {
+	ivec2 buffer_pos = sc_half_res ? p_pixel >> 1 : p_pixel;
+	vec4 result = p_ambient;
+
+	if (screen_probes.history_valid != 0) {
+		vec4 prev_clip = screen_probes.reprojection * vec4(p_position, 1.0);
+		vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
+		if (all(greaterThanEqual(prev_uv, vec2(0.0))) && all(lessThan(prev_uv, vec2(1.0)))) {
+			float prev_depth = dot(screen_probes.prev_view_z, vec4(p_position, 1.0));
+
+			// Positions are reconstructed at the corner of their pixel, so texel N of the history holds the value of the
+			// point that projects exactly to pixel N (2 * N at half resolution). Filtering around texel centers instead
+			// would shift the history by half a texel every frame, which makes it drift even with a still camera.
+			vec2 history_pos = prev_uv * vec2(scene_data.screen_size);
+			if (sc_half_res) {
+				history_pos *= 0.5;
+			}
+			ivec2 base = ivec2(floor(history_pos));
+			vec2 f = history_pos - vec2(base);
+
+			// Bilinear filtering that only uses texels of the same surface (similar depth and normal), so history
+			// doesn't leak across edges when the camera moves.
+			vec4 history = vec4(0.0);
+			float weight_accum = 0.0;
+			for (int i = 0; i < 4; i++) {
+				ivec2 offset = ivec2(i & 1, i >> 1);
+				ivec2 texel = base + offset;
+				if (any(lessThan(texel, ivec2(0))) || any(greaterThanEqual(texel, screen_probes.buffer_size))) {
+					continue;
+				}
+				vec4 history_surface = texelFetch(sampler2D(probe_history_surface, linear_sampler), texel, 0);
+				if (abs(history_surface.x - prev_depth) >= prev_depth * 0.05 + 0.02 || dot(history_surface.yzw, p_normal) <= 0.9) {
+					continue;
+				}
+				vec2 weights = mix(1.0 - f, f, vec2(offset));
+				float weight = weights.x * weights.y;
+				history += texelFetch(sampler2D(probe_history, linear_sampler), texel, 0) * weight;
+				weight_accum += weight;
+			}
+
+			if (weight_accum > 0.01) {
+				history /= weight_accum;
+				// Reprojection only follows the camera, so moving objects keep less history.
+				float blend = p_dynamic_object ? max(screen_probes.history_blend, 0.5) : screen_probes.history_blend;
+				result = mix(history, p_ambient, blend);
+			}
+		}
+	}
+
+	imageStore(probe_history_out, buffer_pos, result);
+	imageStore(probe_history_surface_out, buffer_pos, vec4(p_depth, p_normal));
+	return result;
+}
+
+#endif
+
 void process_gi(ivec2 pos, vec3 vertex, inout vec4 ambient_light, inout vec4 reflection_light) {
 	vec4 normal_roughness = fetch_normal_and_roughness(pos);
 
@@ -626,6 +797,7 @@ void process_gi(ivec2 pos, vec3 vertex, inout vec4 ambient_light, inout vec4 ref
 		}
 		roughness /= (127.0 / 255.0);
 		vec3 view = -normalize(mat3(scene_data.cam_transform) * (vertex - scene_data.eye_offset[gl_GlobalInvocationID.z].xyz));
+		float view_depth = -vertex.z;
 		vertex = mat3(scene_data.cam_transform) * vertex;
 		normal = normalize(mat3(scene_data.cam_transform) * normal);
 		vec3 reflection = normalize(reflect(-view, normal));
@@ -652,15 +824,34 @@ void process_gi(ivec2 pos, vec3 vertex, inout vec4 ambient_light, inout vec4 ref
 			vec4 spec_accum = vec4(0.0);
 			float blend_accum = 0.0;
 
+			bool diffuse = true;
+#ifdef USE_SCREEN_PROBES
+			vec4 probe_ambient;
+			bool use_probes = screen_probes_gather(pos, vertex, normal, probe_ambient);
+			diffuse = !use_probes;
+#endif
+
 			for (uint i = 0; i < params.max_voxel_gi_instances; i++) {
 				if (any(equal(uvec2(i), voxel_gi_tex))) {
-					voxel_gi_compute(i, vertex, normal, reflection, normal_mat, roughness, spec_accum, amb_accum, blend_accum);
+					voxel_gi_compute(i, vertex, normal, reflection, normal_mat, roughness, diffuse, spec_accum, amb_accum, blend_accum);
 				}
 			}
 			if (blend_accum > 0.0) {
 				amb_accum /= blend_accum;
 				spec_accum /= blend_accum;
 			}
+
+#ifdef USE_SCREEN_PROBES
+			if (blend_accum > 0.0) {
+				// Only inside VoxelGI volumes, so the result matches regular VoxelGI everywhere else.
+				if (use_probes) {
+					amb_accum = probe_ambient;
+				}
+				amb_accum = screen_probes_temporal(pos, vertex, normal, view_depth, dynamic_object, amb_accum);
+			} else {
+				screen_probes_temporal(pos, vertex, normal, view_depth, dynamic_object, amb_accum);
+			}
+#endif
 
 #ifdef USE_SDFGI
 			reflection_light = blend_color(spec_accum, reflection_light);

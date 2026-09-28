@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/math/geometry_3d.h"
+#include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -81,6 +82,7 @@ void GI::voxel_gi_allocate_data(RID p_voxel_gi, const Transform3D &p_to_cell_xfo
 		voxel_gi->octree_buffer_size = 0;
 		voxel_gi->data_buffer_size = 0;
 		voxel_gi->cell_count = 0;
+		voxel_gi->leaf_x_offsets.clear();
 	}
 
 	voxel_gi->to_cell_xform = p_to_cell_xform;
@@ -96,6 +98,28 @@ void GI::voxel_gi_allocate_data(RID p_voxel_gi, const Transform3D &p_to_cell_xfo
 		ERR_FAIL_COND(p_data_cells.size() != (int)cell_count * 16); //see that data size matches
 
 		voxel_gi->cell_count = cell_count;
+
+		if (p_level_counts.size()) {
+			// Cells are sorted by level, then X, Y and Z. Index the leaf cells by X so regions can be rewritten
+			// without going through every cell.
+			uint32_t leaf_offset = 0;
+			for (int i = 0; i < p_level_counts.size() - 1; i++) {
+				leaf_offset += p_level_counts[i];
+			}
+			uint32_t leaf_count = p_level_counts[p_level_counts.size() - 1];
+			ERR_FAIL_COND(leaf_offset + leaf_count > cell_count);
+
+			const uint32_t *data = (const uint32_t *)p_data_cells.ptr();
+			voxel_gi->leaf_x_offsets.resize(p_octree_size.x + 1);
+			uint32_t cell = leaf_offset;
+			for (int x = 0; x <= p_octree_size.x; x++) {
+				while (cell < leaf_offset + leaf_count && int(data[cell * 4] & 0x7FF) < x) {
+					cell++;
+				}
+				voxel_gi->leaf_x_offsets[x] = cell;
+			}
+		}
+
 		voxel_gi->octree_buffer = RD::get_singleton()->storage_buffer_create(p_octree_cells.size(), p_octree_cells);
 		voxel_gi->octree_buffer_size = p_octree_cells.size();
 		voxel_gi->data_buffer = RD::get_singleton()->storage_buffer_create(p_data_cells.size(), p_data_cells);
@@ -366,6 +390,13 @@ uint32_t GI::voxel_gi_get_data_version(RID p_voxel_gi) {
 	VoxelGI *voxel_gi = voxel_gi_owner.get_or_null(p_voxel_gi);
 	ERR_FAIL_NULL_V(voxel_gi, 0);
 	return voxel_gi->data_version;
+}
+
+const LocalVector<uint32_t> &GI::voxel_gi_get_leaf_x_offsets(RID p_voxel_gi) const {
+	static const LocalVector<uint32_t> empty;
+	VoxelGI *voxel_gi = voxel_gi_owner.get_or_null(p_voxel_gi);
+	ERR_FAIL_NULL_V(voxel_gi, empty);
+	return voxel_gi->leaf_x_offsets;
 }
 
 RID GI::voxel_gi_get_octree_buffer(RID p_voxel_gi) const {
@@ -2614,6 +2645,26 @@ void GI::SDFGI::render_static_lights(RenderDataRD *p_render_data, Ref<RenderScen
 ////////////////////////////////////////////////////////////////////////////////
 // VoxelGIInstance
 
+// Texture mipmaps map 1:1 to octree levels (finest first). That only holds while every axis halves exactly,
+// which power of two axes always do and other axes do while they stay divisible (see Voxelizer::snap_subdiv()).
+static int _get_voxel_gi_mipmap_count(const Vector3i &p_octree_size, int p_level_count) {
+	int mipmap_count = 1;
+	while (mipmap_count < p_level_count) {
+		bool exact = true;
+		for (int i = 0; i < 3; i++) {
+			if (!Math::is_power_of_2(p_octree_size[i]) && (p_octree_size[i] % (1 << mipmap_count)) != 0) {
+				exact = false;
+				break;
+			}
+		}
+		if (!exact) {
+			break;
+		}
+		mipmap_count++;
+	}
+	return mipmap_count;
+}
+
 void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID> &p_light_instances, const PagedArray<RenderGeometryInstance *> &p_dynamic_objects) {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
@@ -2631,6 +2682,10 @@ void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID
 		if (octree_size != Vector3i()) {
 			//can create a 3D texture
 			Vector<int> levels = gi->voxel_gi_get_level_counts(probe);
+			// Mipmaps that match octree levels get written from the octree, the rest (only for sizes that are not
+			// a power of two) are downsampled from the last of those.
+			octree_mipmap_count = _get_voxel_gi_mipmap_count(octree_size, levels.size());
+			int mipmap_count = MAX(octree_mipmap_count, (int)Math::floor(Math::log2((double)MAX(MAX(octree_size.x, octree_size.y), octree_size.z))) + 1);
 
 			RD::TextureFormat tf;
 			tf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
@@ -2638,14 +2693,24 @@ void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID
 			tf.height = octree_size.y;
 			tf.depth = octree_size.z;
 			tf.texture_type = RD::TEXTURE_TYPE_3D;
-			tf.mipmaps = levels.size();
+			tf.mipmaps = mipmap_count;
 
 			tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 
 			texture = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		}
+
+		if (texture.is_null()) {
+			if (octree_size != Vector3i()) {
+				ERR_PRINT(vformat("Could not allocate the VoxelGI texture (%d x %d x %d voxels). Use fewer subdivisions or a smaller VoxelGI.", octree_size.x, octree_size.y, octree_size.z));
+			}
+		} else {
+			Vector<int> levels = gi->voxel_gi_get_level_counts(probe);
+			int mipmap_count = RD::get_singleton()->texture_get_format(texture).mipmaps;
+
 			RD::get_singleton()->set_resource_name(texture, "VoxelGI Instance Texture");
 
-			RD::get_singleton()->texture_clear(texture, Color(0, 0, 0, 0), 0, levels.size(), 0, 1);
+			RD::get_singleton()->texture_clear(texture, Color(0, 0, 0, 0), 0, mipmap_count, 0, 1);
 
 			{
 				int total_elements = 0;
@@ -2656,7 +2721,7 @@ void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID
 				write_buffer = RD::get_singleton()->storage_buffer_create(total_elements * 16);
 			}
 
-			for (int i = 0; i < levels.size(); i++) {
+			for (int i = 0; i < mipmap_count; i++) {
 				VoxelGIInstance::Mipmap mipmap;
 				mipmap.texture = RD::get_singleton()->texture_create_shared_from_slice(RD::TextureView(), texture, 0, i, 1, RD::TEXTURE_SLICE_3D);
 				mipmap.level = levels.size() - i - 1;
@@ -2742,215 +2807,28 @@ void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID
 
 				mipmap.write_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_WRITE_TEXTURE], 0);
 
-				mipmaps.push_back(mipmap);
-			}
-
-			{
-				uint32_t dynamic_map_size = MAX(MAX(octree_size.x, octree_size.y), octree_size.z);
-				uint32_t oversample = Math::nearest_power_of_2_templated(4);
-				int mipmap_index = 0;
-
-				while (mipmap_index < mipmaps.size()) {
-					VoxelGIInstance::DynamicMap dmap;
-
-					if (oversample > 0) {
-						dmap.size = dynamic_map_size * (1 << oversample);
-						dmap.mipmap = -1;
-						oversample--;
-					} else {
-						dmap.size = dynamic_map_size >> mipmap_index;
-						dmap.mipmap = mipmap_index;
-						mipmap_index++;
+				{
+					Vector<RD::Uniform> region_uniforms;
+					{
+						RD::Uniform u;
+						u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+						u.binding = 0;
+						u.append_id(mipmap.texture);
+						region_uniforms.push_back(u);
 					}
+					mipmap.clear_uniform_set = RD::get_singleton()->uniform_set_create(region_uniforms, gi->voxel_gi_mipmap_shader_version_shaders[VOXEL_GI_MIPMAP_CLEAR], 0);
 
-					RD::TextureFormat dtf;
-					dtf.width = dmap.size;
-					dtf.height = dmap.size;
-					dtf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
-					dtf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT;
-
-					if (dynamic_maps.is_empty()) {
-						dtf.usage_bits |= RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
+					if (i > 0) {
+						RD::Uniform u;
+						u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+						u.binding = 1;
+						u.append_id(mipmaps[i - 1].texture);
+						region_uniforms.push_back(u);
+						mipmap.downsample_uniform_set = RD::get_singleton()->uniform_set_create(region_uniforms, gi->voxel_gi_mipmap_shader_version_shaders[VOXEL_GI_MIPMAP_DOWNSAMPLE], 0);
 					}
-					dmap.texture = RD::get_singleton()->texture_create(dtf, RD::TextureView());
-					RD::get_singleton()->set_resource_name(dmap.texture, "VoxelGI Instance DMap Texture");
-
-					if (dynamic_maps.is_empty()) {
-						// Render depth for first one.
-						// Use 16-bit depth when supported to improve performance.
-						dtf.format = RD::get_singleton()->texture_is_format_supported_for_usage(RD::DATA_FORMAT_D16_UNORM, RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ? RD::DATA_FORMAT_D16_UNORM : RD::DATA_FORMAT_X8_D24_UNORM_PACK32;
-						dtf.usage_bits = RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-						dmap.fb_depth = RD::get_singleton()->texture_create(dtf, RD::TextureView());
-						RD::get_singleton()->set_resource_name(dmap.fb_depth, "VoxelGI Instance DMap FB Depth");
-					}
-
-					//just use depth as-is
-					dtf.format = RD::DATA_FORMAT_R32_SFLOAT;
-					dtf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
-
-					dmap.depth = RD::get_singleton()->texture_create(dtf, RD::TextureView());
-					RD::get_singleton()->set_resource_name(dmap.depth, "VoxelGI Instance DMap Depth");
-
-					if (dynamic_maps.is_empty()) {
-						dtf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
-						dtf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
-						dmap.albedo = RD::get_singleton()->texture_create(dtf, RD::TextureView());
-						RD::get_singleton()->set_resource_name(dmap.albedo, "VoxelGI Instance DMap Albedo");
-						dmap.normal = RD::get_singleton()->texture_create(dtf, RD::TextureView());
-						RD::get_singleton()->set_resource_name(dmap.normal, "VoxelGI Instance DMap Normal");
-						dmap.orm = RD::get_singleton()->texture_create(dtf, RD::TextureView());
-						RD::get_singleton()->set_resource_name(dmap.orm, "VoxelGI Instance DMap ORM");
-
-						Vector<RID> fb;
-						fb.push_back(dmap.albedo);
-						fb.push_back(dmap.normal);
-						fb.push_back(dmap.orm);
-						fb.push_back(dmap.texture); //emission
-						fb.push_back(dmap.depth);
-						fb.push_back(dmap.fb_depth);
-
-						dmap.fb = RD::get_singleton()->framebuffer_create(fb);
-
-						{
-							Vector<RD::Uniform> uniforms;
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
-								u.binding = 3;
-								u.append_id(gi->voxel_gi_lights_uniform);
-								uniforms.push_back(u);
-							}
-
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-								u.binding = 5;
-								u.append_id(dmap.albedo);
-								uniforms.push_back(u);
-							}
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-								u.binding = 6;
-								u.append_id(dmap.normal);
-								uniforms.push_back(u);
-							}
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-								u.binding = 7;
-								u.append_id(dmap.orm);
-								uniforms.push_back(u);
-							}
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-								u.binding = 8;
-								u.append_id(dmap.fb_depth);
-								uniforms.push_back(u);
-							}
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-								u.binding = 9;
-								u.append_id(gi->voxel_gi_get_sdf_texture(probe));
-								uniforms.push_back(u);
-							}
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_SAMPLER;
-								u.binding = 10;
-								u.append_id(material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
-								uniforms.push_back(u);
-							}
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-								u.binding = 11;
-								u.append_id(dmap.texture);
-								uniforms.push_back(u);
-							}
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-								u.binding = 12;
-								u.append_id(dmap.depth);
-								uniforms.push_back(u);
-							}
-
-							dmap.uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_DYNAMIC_OBJECT_LIGHTING], 0);
-						}
-					} else {
-						bool plot = dmap.mipmap >= 0;
-						bool write = dmap.mipmap < (mipmaps.size() - 1);
-
-						Vector<RD::Uniform> uniforms;
-
-						{
-							RD::Uniform u;
-							u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-							u.binding = 5;
-							u.append_id(dynamic_maps[dynamic_maps.size() - 1].texture);
-							uniforms.push_back(u);
-						}
-						{
-							RD::Uniform u;
-							u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-							u.binding = 6;
-							u.append_id(dynamic_maps[dynamic_maps.size() - 1].depth);
-							uniforms.push_back(u);
-						}
-
-						if (write) {
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-								u.binding = 7;
-								u.append_id(dmap.texture);
-								uniforms.push_back(u);
-							}
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-								u.binding = 8;
-								u.append_id(dmap.depth);
-								uniforms.push_back(u);
-							}
-						}
-
-						{
-							RD::Uniform u;
-							u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-							u.binding = 9;
-							u.append_id(gi->voxel_gi_get_sdf_texture(probe));
-							uniforms.push_back(u);
-						}
-						{
-							RD::Uniform u;
-							u.uniform_type = RD::UNIFORM_TYPE_SAMPLER;
-							u.binding = 10;
-							u.append_id(material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
-							uniforms.push_back(u);
-						}
-
-						if (plot) {
-							{
-								RD::Uniform u;
-								u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-								u.binding = 11;
-								u.append_id(mipmaps[dmap.mipmap].texture);
-								uniforms.push_back(u);
-							}
-						}
-
-						dmap.uniform_set = RD::get_singleton()->uniform_set_create(
-								uniforms,
-								gi->voxel_gi_lighting_shader_version_shaders[(write && plot) ? VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_WRITE_PLOT : (write ? VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_WRITE : VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_PLOT)],
-								0);
-					}
-
-					dynamic_maps.push_back(dmap);
 				}
+
+				mipmaps.push_back(mipmap);
 			}
 		}
 
@@ -2960,16 +2838,157 @@ void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID
 		RendererSceneRenderRD::get_singleton()->base_uniforms_changed();
 	}
 
-	// UDPDATE TIME
+	// UPDATE TIME
 
-	if (has_dynamic_object_data) {
-		//if it has dynamic object data, it needs to be cleared
-		RD::get_singleton()->texture_clear(texture, Color(0, 0, 0, 0), 0, mipmaps.size(), 0, 1);
+	if (mipmaps.is_empty()) {
+		// Nothing baked.
+		last_probe_version = gi->voxel_gi_get_version(probe);
+		return;
+	}
+
+	update_frame++;
+
+	Vector3i octree_size = gi->voxel_gi_get_octree_size(probe);
+	Transform3D to_cell_xform = gi->voxel_gi_get_to_cell_xform(probe) * transform.affine_inverse();
+
+	bool rebuild_aniso = false;
+	bool use_aniso = GLOBAL_GET_CACHED(bool, "rendering/global_illumination/voxel_gi/anisotropic_mipmaps") && octree_mipmap_count > 1;
+	if (use_aniso != aniso_texture.is_valid()) {
+		if (use_aniso) {
+			_create_aniso();
+			rebuild_aniso = true;
+		} else {
+			_free_aniso();
+		}
+	}
+
+	// Light changes can be spread over frames, and bounces can be gathered again and again (feedback).
+	uint32_t light_update_frames = CLAMP(GLOBAL_GET_CACHED(int, "rendering/global_illumination/voxel_gi/light_update_frames"), 1, 16);
+	float feedback = CLAMP(GLOBAL_GET_CACHED(float, "rendering/global_illumination/voxel_gi/bounce_feedback"), 0.0f, 1.0f);
+	if (feedback == 0.0 && light_update_frames > 1 && gi->voxel_gi_is_using_two_bounces(probe)) {
+		// When spread over frames, the second bounce is gathered from voxels that already hold bounced light,
+		// so it turns into feedback anyway. Half of it stays close to two bounces without running away.
+		feedback = 0.5;
+	}
+	if ((feedback > 0.0) != direct_light_buffer.is_valid()) {
+		if (feedback > 0.0) {
+			_create_feedback();
+		} else {
+			_free_feedback();
+		}
+		// Start over with the new setup.
+		static_data_written = false;
+		p_update_light_instances = true;
+	}
+	bounce_feedback = feedback;
+
+	// A full update writes all static voxels again and plots every dynamic object. Otherwise only the regions
+	// of dynamic objects that moved, appeared, went away or are due for a refresh are updated.
+	bool full_update = !static_data_written || transform != last_update_transform || (p_update_light_instances && light_update_frames == 1);
+	bool compute_static_light = p_update_light_instances;
+	if (p_update_light_instances && !full_update) {
+		light_frames_left = light_update_frames;
+	}
+	if (p_update_light_instances && direct_light_buffer.is_valid() && !full_update) {
+		bounce_frames_left = FEEDBACK_BOUNCE_ITERATIONS * light_update_frames;
+	}
+	// Static voxels get partially rewritten this frame, which erases dynamic objects plotted over them.
+	bool static_slice = !full_update && (light_frames_left > 0 || bounce_frames_left > 0);
+
+	struct PlotCandidate {
+		RenderGeometryInstance *instance = nullptr;
+		CellBox box;
+		bool plot = false;
+	};
+
+	LocalVector<PlotCandidate> candidates;
+	LocalVector<CellBox> dirty_boxes;
+	uint32_t refresh_frames = MAX(1u, gi->voxel_gi_dynamic_object_refresh_frames);
+
+	for (uint32_t i = 0; i < p_dynamic_objects.size(); i++) {
+		RenderGeometryInstance *instance = p_dynamic_objects[i];
+		Transform3D instance_xform = instance->get_transform();
+		AABB instance_aabb = instance->get_aabb();
+
+		PlotCandidate candidate;
+		candidate.instance = instance;
+		candidate.box = _get_dynamic_object_box(to_cell_xform * instance_xform, instance_aabb, octree_size);
+
+		DynamicObject *object = dynamic_objects.getptr(instance);
+		if (object) {
+			object->last_seen_frame = update_frame;
+		}
+
+		if (full_update || !object) {
+			candidate.plot = true;
+		} else if (static_slice || object->transform != instance_xform || object->aabb != instance_aabb || ((update_frame + object->refresh_phase) % refresh_frames) == 0) {
+			// Moved, stationary and due for a refresh (it may still animate or change material), or static voxels
+			// are being rewritten over it.
+			candidate.plot = true;
+			if (!object->box.is_empty()) {
+				dirty_boxes.push_back(object->box);
+			}
+		}
+
+		if (!full_update && candidate.plot && !candidate.box.is_empty()) {
+			dirty_boxes.push_back(candidate.box);
+		}
+		candidates.push_back(candidate);
+	}
+
+	{
+		// Objects that went away leave their region behind.
+		LocalVector<RenderGeometryInstance *> removed;
+		for (const KeyValue<RenderGeometryInstance *, DynamicObject> &E : dynamic_objects) {
+			if (E.value.last_seen_frame != update_frame) {
+				if (!E.value.box.is_empty()) {
+					dirty_boxes.push_back(E.value.box);
+				}
+				removed.push_back(E.key);
+			}
+		}
+		for (RenderGeometryInstance *instance : removed) {
+			dynamic_objects.erase(instance);
+		}
+	}
+
+	if (!full_update) {
+		// Restoring a region erases every object plotted into it, so those have to be plotted again,
+		// which in turn restores their whole region. Repeat until no other object is affected.
+		bool changed = true;
+		while (changed) {
+			changed = false;
+			for (PlotCandidate &candidate : candidates) {
+				if (candidate.plot) {
+					continue;
+				}
+				const CellBox &object_box = dynamic_objects[candidate.instance].box;
+				if (object_box.is_empty()) {
+					continue;
+				}
+				for (uint32_t j = 0; j < dirty_boxes.size(); j++) {
+					if (dirty_boxes[j].intersects(object_box)) {
+						candidate.plot = true;
+						dirty_boxes.push_back(object_box);
+						changed = true;
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	bool plot_any = false;
+	for (const PlotCandidate &candidate : candidates) {
+		if (candidate.plot && !candidate.box.is_empty()) {
+			plot_any = true;
+			break;
+		}
 	}
 
 	uint32_t light_count = 0;
 
-	if (p_update_light_instances || p_dynamic_objects.size() > 0) {
+	if (p_update_light_instances || plot_any || (static_slice && light_frames_left > 0)) {
 		light_count = MIN(gi->voxel_gi_max_lights, (uint32_t)p_light_instances.size());
 
 		{
@@ -3066,349 +3085,971 @@ void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID
 		}
 	}
 
-	if (has_dynamic_object_data || p_update_light_instances || p_dynamic_objects.size()) {
-		// PROCESS MIPMAPS
-		if (mipmaps.size()) {
-			//can update mipmaps
+	if (full_update) {
+		if (has_dynamic_object_data) {
+			// Dynamic objects may have been plotted into empty space, which static data does not overwrite.
+			RD::get_singleton()->texture_clear(texture, Color(0, 0, 0, 0), 0, mipmaps.size(), 0, 1);
+		}
 
-			Vector3i probe_size = gi->voxel_gi_get_octree_size(probe);
-
-			Vector3 ps = probe_size / gi->voxel_gi_get_bounds(probe).size;
-			float cell_size = (1.0 / MAX(MAX(ps.x, ps.y), ps.z)); // probe size relative to 1 unit in world space
-
-			VoxelGIPushConstant push_constant;
-
-			push_constant.limits[0] = probe_size.x;
-			push_constant.limits[1] = probe_size.y;
-			push_constant.limits[2] = probe_size.z;
-			push_constant.stack_size = mipmaps.size();
-			push_constant.emission_scale = 1.0;
-			push_constant.propagation = gi->voxel_gi_get_propagation(probe);
-			push_constant.dynamic_range = gi->voxel_gi_get_dynamic_range(probe);
-			push_constant.light_count = light_count;
-			push_constant.aniso_strength = 0;
-			push_constant.cell_size = cell_size;
-
-			/*		print_line("probe update to version " + itos(last_probe_version));
-			print_line("propagation " + rtos(push_constant.propagation));
-			print_line("dynrange " + rtos(push_constant.dynamic_range));
-	*/
-			RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
-
-			int passes;
-			if (p_update_light_instances) {
-				passes = gi->voxel_gi_is_using_two_bounces(probe) ? 2 : 1;
-			} else {
-				passes = 1; //only re-blitting is necessary
+		if (!compute_static_light) {
+			// Only re-blitting is necessary.
+			_update_static_light(light_count, false, STATIC_BOUNCE_NONE, 0.0, 1, 0);
+		} else if (direct_light_buffer.is_valid()) {
+			// Direct light first, then one bounce. The following frames keep adding bounces.
+			_update_static_light(light_count, true, STATIC_BOUNCE_FEEDBACK, 0.0, 1, 0);
+			_update_static_light(light_count, false, STATIC_BOUNCE_FEEDBACK, bounce_feedback, 1, 0);
+			bounce_frames_left = (FEEDBACK_BOUNCE_ITERATIONS - 1) * light_update_frames;
+		} else {
+			_update_static_light(light_count, true, STATIC_BOUNCE_NONE, 0.0, 1, 0);
+			if (gi->voxel_gi_is_using_two_bounces(probe)) {
+				_update_static_light(light_count, false, STATIC_BOUNCE_SECOND, 0.0, 1, 0);
 			}
-			int wg_size = 64;
-			int64_t wg_limit_x = (int64_t)RD::get_singleton()->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X);
+		}
+		light_frames_left = 0;
 
-			RID compute_light_area_light_atlas_uniform_set;
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-				u.binding = 0;
-				u.append_id(RendererRD::TextureStorage::get_singleton()->area_light_atlas_get_texture());
+		static_data_written = true;
+		last_update_transform = transform;
+	} else {
+		if (static_slice) {
+			// Recompute every Nth cell only, spreading light changes and bounces over several frames.
+			uint32_t phase = update_frame % light_update_frames;
+			StaticBounce bounce = direct_light_buffer.is_valid() ? STATIC_BOUNCE_FEEDBACK : STATIC_BOUNCE_NONE;
+			_update_static_light(light_count, light_frames_left > 0, bounce, bounce_frames_left > 0 ? bounce_feedback : 0.0, light_update_frames, phase);
 
-				compute_light_area_light_atlas_uniform_set = UniformSetCacheRD::get_singleton()->get_cache(gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_COMPUTE_LIGHT], 1, u);
-			}
-
-			for (int pass = 0; pass < passes; pass++) {
-				if (p_update_light_instances) {
-					for (int i = 0; i < mipmaps.size(); i++) {
-						if (i == 0) {
-							RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[pass == 0 ? VOXEL_GI_SHADER_VERSION_COMPUTE_LIGHT : VOXEL_GI_SHADER_VERSION_COMPUTE_SECOND_BOUNCE].get_rid());
-						} else if (i == 1) {
-							RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_COMPUTE_MIPMAP].get_rid());
-						}
-
-						if (pass == 1 || i > 0) {
-							RD::get_singleton()->compute_list_add_barrier(compute_list); //wait til previous step is done
-						}
-						if (pass == 0 || i > 0) {
-							RD::get_singleton()->compute_list_bind_uniform_set(compute_list, mipmaps[i].uniform_set, 0);
-							if (i == 0) {
-								RD::get_singleton()->compute_list_bind_uniform_set(compute_list, compute_light_area_light_atlas_uniform_set, 1);
-							}
-						} else {
-							RD::get_singleton()->compute_list_bind_uniform_set(compute_list, mipmaps[i].second_bounce_uniform_set, 0);
-						}
-
-						push_constant.cell_offset = mipmaps[i].cell_offset;
-						push_constant.cell_count = mipmaps[i].cell_count;
-
-						int64_t wg_todo = (mipmaps[i].cell_count + wg_size - 1) / wg_size;
-						while (wg_todo) {
-							int64_t wg_count = MIN(wg_todo, wg_limit_x);
-							RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VoxelGIPushConstant));
-							RD::get_singleton()->compute_list_dispatch(compute_list, wg_count, 1, 1);
-							wg_todo -= wg_count;
-							push_constant.cell_offset += wg_count * wg_size;
-						}
-					}
-
-					RD::get_singleton()->compute_list_add_barrier(compute_list); //wait til previous step is done
-				}
-
-				RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_WRITE_TEXTURE].get_rid());
-
-				for (int i = 0; i < mipmaps.size(); i++) {
-					RD::get_singleton()->compute_list_bind_uniform_set(compute_list, mipmaps[i].write_uniform_set, 0);
-
-					push_constant.cell_offset = mipmaps[i].cell_offset;
-					push_constant.cell_count = mipmaps[i].cell_count;
-
-					int64_t wg_todo = (mipmaps[i].cell_count + wg_size - 1) / wg_size;
-					while (wg_todo) {
-						int64_t wg_count = MIN(wg_todo, wg_limit_x);
-						RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VoxelGIPushConstant));
-						RD::get_singleton()->compute_list_dispatch(compute_list, wg_count, 1, 1);
-						wg_todo -= wg_count;
-						push_constant.cell_offset += wg_count * wg_size;
-					}
-				}
-			}
-
-			RD::get_singleton()->compute_list_end();
+			light_frames_left = light_frames_left > 0 ? light_frames_left - 1 : 0;
+			bounce_frames_left = bounce_frames_left > 0 ? bounce_frames_left - 1 : 0;
+			// Refresh the anisotropic mipmaps after every full pass over the cells.
+			rebuild_aniso = rebuild_aniso || phase == light_update_frames - 1 || (light_frames_left == 0 && bounce_frames_left == 0);
 		}
 	}
 
-	has_dynamic_object_data = false; //clear until dynamic object data is used again
+	if (!full_update && dirty_boxes.size()) {
+		// Put back the static voxels of every dirty region before plotting into it again.
+		RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_mipmap_pipelines[VOXEL_GI_MIPMAP_CLEAR].get_rid());
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, mipmaps[0].clear_uniform_set, 0);
+		for (const CellBox &box : dirty_boxes) {
+			VoxelGIMipmapPushConstant push_constant;
+			memset(&push_constant, 0, sizeof(VoxelGIMipmapPushConstant));
+			for (int i = 0; i < 3; i++) {
+				push_constant.offset[i] = box.begin[i];
+				push_constant.size[i] = box.end[i] - box.begin[i];
+			}
+			RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VoxelGIMipmapPushConstant));
+			RD::get_singleton()->compute_list_dispatch_threads(compute_list, push_constant.size[0], push_constant.size[1], push_constant.size[2]);
+		}
+		RD::get_singleton()->compute_list_add_barrier(compute_list);
+		for (const CellBox &box : dirty_boxes) {
+			_restore_static_region(compute_list, box);
+		}
+		RD::get_singleton()->compute_list_end();
+	}
 
-	if (p_dynamic_objects.size() && dynamic_maps.size()) {
-		Vector3i octree_size = gi->voxel_gi_get_octree_size(probe);
-		int multiplier = dynamic_maps[0].size / MAX(MAX(octree_size.x, octree_size.y), octree_size.z);
+	// PLOT DYNAMIC OBJECTS
 
-		Transform3D oversample_scale;
-		oversample_scale.basis.scale(Vector3(multiplier, multiplier, multiplier));
+	LocalVector<CellBox> plotted_boxes;
 
-		Transform3D to_cell = oversample_scale * gi->voxel_gi_get_to_cell_xform(probe);
-		Transform3D to_world_xform = transform * to_cell.affine_inverse();
-		Transform3D to_probe_xform = to_world_xform.affine_inverse();
+	if (plot_any) {
+		// Oversample as much as the map size limit allows, and size the maps for the largest object.
+		LocalVector<uint32_t> oversample_shifts;
+		uint32_t needed_map_size = 0;
+		for (const PlotCandidate &candidate : candidates) {
+			uint32_t shift = 0;
+			if (candidate.plot && !candidate.box.is_empty()) {
+				Vector3i extent = candidate.box.end - candidate.box.begin;
+				uint32_t max_extent = MAX(MAX(extent.x, extent.y), extent.z);
+				shift = MAX_DYNAMIC_OVERSAMPLE_SHIFT;
+				while (shift > 1 && (max_extent << shift) > MAX_DYNAMIC_MAP_SIZE) {
+					shift--;
+				}
+				needed_map_size = MAX(needed_map_size, max_extent << shift);
+			}
+			oversample_shifts.push_back(shift);
+		}
 
-		AABB probe_aabb(Vector3(), octree_size);
+		needed_map_size = MAX(Math::next_power_of_2(needed_map_size), (uint32_t)MIN_DYNAMIC_MAP_SIZE);
+		if (needed_map_size > dynamic_map_size) {
+			_create_dynamic_maps(needed_map_size);
+		}
 
-		RID dynamic_object_lighting_area_light_atlas_uniform_set;
+		RID area_light_atlas_uniform_set;
 		{
 			RD::Uniform u;
 			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 			u.binding = 0;
 			u.append_id(RendererRD::TextureStorage::get_singleton()->area_light_atlas_get_texture());
 
-			dynamic_object_lighting_area_light_atlas_uniform_set = UniformSetCacheRD::get_singleton()->get_cache(gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_DYNAMIC_OBJECT_LIGHTING], 1, u);
+			area_light_atlas_uniform_set = UniformSetCacheRD::get_singleton()->get_cache(gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_DYNAMIC_OBJECT_LIGHTING], 1, u);
 		}
 
-		//this could probably be better parallelized in compute..
-		for (int i = 0; i < (int)p_dynamic_objects.size(); i++) {
-			RenderGeometryInstance *instance = p_dynamic_objects[i];
-
-			//transform aabb to voxel_gi
-			AABB aabb = (to_probe_xform * instance->get_transform()).xform(instance->get_aabb());
-
-			//this needs to wrap to grid resolution to avoid jitter
-			//also extend margin a bit just in case
-			Vector3i begin = aabb.position - Vector3i(1, 1, 1);
-			Vector3i end = aabb.position + aabb.size + Vector3i(1, 1, 1);
-
-			for (int j = 0; j < 3; j++) {
-				if ((end[j] - begin[j]) & 1) {
-					end[j]++; //for half extents split, it needs to be even
-				}
-				begin[j] = MAX(begin[j], 0);
-				end[j] = MIN(end[j], octree_size[j] * multiplier);
+		for (uint32_t i = 0; i < candidates.size(); i++) {
+			const PlotCandidate &candidate = candidates[i];
+			if (!candidate.plot) {
+				continue;
 			}
 
-			//aabb = aabb.intersection(probe_aabb); //intersect
-			aabb.position = begin;
-			aabb.size = end - begin;
+			if (!candidate.box.is_empty()) {
+				_plot_dynamic_object(candidate.instance, oversample_shifts[i], light_count, area_light_atlas_uniform_set);
+				plotted_boxes.push_back(candidate.box);
+			}
 
-			//print_line("aabb: " + aabb);
-
-			for (int j = 0; j < 6; j++) {
-				//if (j != 0 && j != 3) {
-				//	continue;
-				//}
-				static const Vector3 render_z[6] = {
-					Vector3(1, 0, 0),
-					Vector3(0, 1, 0),
-					Vector3(0, 0, 1),
-					Vector3(-1, 0, 0),
-					Vector3(0, -1, 0),
-					Vector3(0, 0, -1),
-				};
-				static const Vector3 render_up[6] = {
-					Vector3(0, 1, 0),
-					Vector3(0, 0, 1),
-					Vector3(0, 1, 0),
-					Vector3(0, 1, 0),
-					Vector3(0, 0, 1),
-					Vector3(0, 1, 0),
-				};
-
-				Vector3 render_dir = render_z[j];
-				Vector3 up_dir = render_up[j];
-
-				Vector3 center = aabb.get_center();
-				Transform3D xform;
-				xform.set_look_at(center - aabb.size * 0.5 * render_dir, center, up_dir);
-
-				Vector3 x_dir = xform.basis.get_column(0).abs();
-				int x_axis = int(Vector3(0, 1, 2).dot(x_dir));
-				Vector3 y_dir = xform.basis.get_column(1).abs();
-				int y_axis = int(Vector3(0, 1, 2).dot(y_dir));
-				Vector3 z_dir = -xform.basis.get_column(2);
-				int z_axis = int(Vector3(0, 1, 2).dot(z_dir.abs()));
-
-				Rect2i rect(aabb.position[x_axis], aabb.position[y_axis], aabb.size[x_axis], aabb.size[y_axis]);
-				bool x_flip = bool(Vector3(1, 1, 1).dot(xform.basis.get_column(0)) < 0);
-				bool y_flip = bool(Vector3(1, 1, 1).dot(xform.basis.get_column(1)) < 0);
-				bool z_flip = bool(Vector3(1, 1, 1).dot(xform.basis.get_column(2)) > 0);
-
-				Projection cm;
-				cm.set_orthogonal(-rect.size.width / 2, rect.size.width / 2, -rect.size.height / 2, rect.size.height / 2, 0.0001, aabb.size[z_axis]);
-
-				if (RendererSceneRenderRD::get_singleton()->cull_argument.size() == 0) {
-					RendererSceneRenderRD::get_singleton()->cull_argument.push_back(nullptr);
-				}
-				RendererSceneRenderRD::get_singleton()->cull_argument[0] = instance;
-
-				float exposure_normalization = 1.0;
-				if (RendererSceneRenderRD::get_singleton()->is_using_physical_light_units()) {
-					exposure_normalization = gi->voxel_gi_get_baked_exposure_normalization(probe);
-				}
-
-				RendererSceneRenderRD::get_singleton()->_render_material(to_world_xform * xform, cm, true, RendererSceneRenderRD::get_singleton()->cull_argument, dynamic_maps[0].fb, Rect2i(Vector2i(), rect.size), exposure_normalization);
-
-				Vector3 ps = octree_size / gi->voxel_gi_get_bounds(probe).size;
-				float cell_size = (1.0 / MAX(MAX(ps.x, ps.y), ps.z)); // probe size relative to 1 unit in world space
-
-				VoxelGIDynamicPushConstant push_constant;
-				memset(&push_constant, 0, sizeof(VoxelGIDynamicPushConstant));
-				push_constant.limits[0] = octree_size.x;
-				push_constant.limits[1] = octree_size.y;
-				push_constant.limits[2] = octree_size.z;
-				push_constant.light_count = p_light_instances.size();
-				push_constant.x_dir[0] = x_dir[0];
-				push_constant.x_dir[1] = x_dir[1];
-				push_constant.x_dir[2] = x_dir[2];
-				push_constant.y_dir[0] = y_dir[0];
-				push_constant.y_dir[1] = y_dir[1];
-				push_constant.y_dir[2] = y_dir[2];
-				push_constant.z_dir[0] = z_dir[0];
-				push_constant.z_dir[1] = z_dir[1];
-				push_constant.z_dir[2] = z_dir[2];
-				push_constant.z_base = xform.origin[z_axis];
-				push_constant.z_sign = (z_flip ? -1.0 : 1.0);
-				push_constant.pos_multiplier = float(1.0) / multiplier;
-				push_constant.dynamic_range = gi->voxel_gi_get_dynamic_range(probe);
-				push_constant.flip_x = x_flip;
-				push_constant.flip_y = y_flip;
-				push_constant.rect_pos[0] = rect.position[0];
-				push_constant.rect_pos[1] = rect.position[1];
-				push_constant.rect_size[0] = rect.size[0];
-				push_constant.rect_size[1] = rect.size[1];
-				push_constant.prev_rect_ofs[0] = 0;
-				push_constant.prev_rect_ofs[1] = 0;
-				push_constant.prev_rect_size[0] = 0;
-				push_constant.prev_rect_size[1] = 0;
-				push_constant.on_mipmap = false;
-				push_constant.propagation = gi->voxel_gi_get_propagation(probe);
-				push_constant.cell_size = cell_size;
-				push_constant.pad[0] = 0;
-				push_constant.pad[1] = 0;
-
-				//process lighting
-				RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
-				RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_DYNAMIC_OBJECT_LIGHTING].get_rid());
-				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, dynamic_maps[0].uniform_set, 0);
-				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, dynamic_object_lighting_area_light_atlas_uniform_set, 1);
-				RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VoxelGIDynamicPushConstant));
-				RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(rect.size.x, 8), Math::division_round_up(rect.size.y, 8), 1);
-				//print_line("rect: " + itos(i) + ": " + rect);
-
-				for (int k = 1; k < dynamic_maps.size(); k++) {
-					// enlarge the rect if needed so all pixels fit when downscaled,
-					// this ensures downsampling is smooth and optimal because no pixels are left behind
-
-					//x
-					if (rect.position.x & 1) {
-						rect.size.x++;
-						push_constant.prev_rect_ofs[0] = 1; //this is used to ensure reading is also optimal
-					} else {
-						push_constant.prev_rect_ofs[0] = 0;
-					}
-					if (rect.size.x & 1) {
-						rect.size.x++;
-					}
-
-					rect.position.x >>= 1;
-					rect.size.x = MAX(1, rect.size.x >> 1);
-
-					//y
-					if (rect.position.y & 1) {
-						rect.size.y++;
-						push_constant.prev_rect_ofs[1] = 1;
-					} else {
-						push_constant.prev_rect_ofs[1] = 0;
-					}
-					if (rect.size.y & 1) {
-						rect.size.y++;
-					}
-
-					rect.position.y >>= 1;
-					rect.size.y = MAX(1, rect.size.y >> 1);
-
-					//shrink limits to ensure plot does not go outside map
-					if (dynamic_maps[k].mipmap > 0) {
-						for (int l = 0; l < 3; l++) {
-							push_constant.limits[l] = MAX(1, push_constant.limits[l] >> 1);
-						}
-					}
-
-					//print_line("rect: " + itos(i) + ": " + rect);
-					push_constant.rect_pos[0] = rect.position[0];
-					push_constant.rect_pos[1] = rect.position[1];
-					push_constant.prev_rect_size[0] = push_constant.rect_size[0];
-					push_constant.prev_rect_size[1] = push_constant.rect_size[1];
-					push_constant.rect_size[0] = rect.size[0];
-					push_constant.rect_size[1] = rect.size[1];
-					push_constant.on_mipmap = dynamic_maps[k].mipmap > 0;
-
-					RD::get_singleton()->compute_list_add_barrier(compute_list);
-
-					if (dynamic_maps[k].mipmap < 0) {
-						RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_WRITE].get_rid());
-					} else if (k < dynamic_maps.size() - 1) {
-						RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_WRITE_PLOT].get_rid());
-					} else {
-						RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_PLOT].get_rid());
-					}
-					RD::get_singleton()->compute_list_bind_uniform_set(compute_list, dynamic_maps[k].uniform_set, 0);
-					RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VoxelGIDynamicPushConstant));
-					RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(rect.size.x, 8), Math::division_round_up(rect.size.y, 8), 1);
-				}
-
-				RD::get_singleton()->compute_list_end();
+			DynamicObject &object = dynamic_objects[candidate.instance];
+			if (object.last_seen_frame == 0) {
+				// Spread the refreshes of stationary objects over frames.
+				object.refresh_phase = uint32_t(uint64_t(candidate.instance) >> 4) % refresh_frames;
+			}
+			object.transform = candidate.instance->get_transform();
+			object.aabb = candidate.instance->get_aabb();
+			object.box = candidate.box;
+			object.last_seen_frame = update_frame;
+		}
+	} else {
+		for (const PlotCandidate &candidate : candidates) {
+			if (candidate.plot) {
+				// Nothing to plot (outside the volume), but remember where it is.
+				DynamicObject &object = dynamic_objects[candidate.instance];
+				object.transform = candidate.instance->get_transform();
+				object.aabb = candidate.instance->get_aabb();
+				object.box = candidate.box;
+				object.last_seen_frame = update_frame;
 			}
 		}
-
-		has_dynamic_object_data = true; //clear until dynamic object data is used again
 	}
+
+	// REBUILD MIPMAPS WHERE NEEDED
+
+	const LocalVector<CellBox> &downsample_boxes = full_update ? plotted_boxes : dirty_boxes;
+	if (downsample_boxes.size() && mipmaps.size() > 1) {
+		RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+		for (const CellBox &box : downsample_boxes) {
+			_downsample_region(compute_list, box);
+		}
+		RD::get_singleton()->compute_list_end();
+	}
+
+	if (aniso_texture.is_valid() && (full_update || rebuild_aniso || dirty_boxes.size())) {
+		RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+		if (full_update || rebuild_aniso) {
+			CellBox box;
+			box.end = octree_size;
+			_build_aniso_region(compute_list, box);
+		} else {
+			for (const CellBox &box : dirty_boxes) {
+				_build_aniso_region(compute_list, box);
+			}
+		}
+		RD::get_singleton()->compute_list_end();
+	}
+
+	has_dynamic_object_data = !dynamic_objects.is_empty();
 
 	last_probe_version = gi->voxel_gi_get_version(probe);
 }
 
-void GI::VoxelGIInstance::free_resources() {
-	if (texture.is_valid()) {
-		RD::get_singleton()->free_rid(texture);
-		RD::get_singleton()->free_rid(write_buffer);
+void GI::VoxelGIInstance::_create_aniso() {
+	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 
-		texture = RID();
-		write_buffer = RID();
-		mipmaps.clear();
+	_free_aniso();
+
+	if (octree_mipmap_count < 2) {
+		return;
 	}
 
+	Vector3i octree_size = gi->voxel_gi_get_octree_size(probe);
+
+	// The longest axis always halves exactly down to the last octree mipmap, so the 6 directions can sit side by side on it.
+	aniso_slab_axis = 0;
+	for (int i = 1; i < 3; i++) {
+		if (octree_size[i] > octree_size[aniso_slab_axis]) {
+			aniso_slab_axis = i;
+		}
+	}
+
+	RD::TextureFormat tf;
+	tf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+	tf.texture_type = RD::TEXTURE_TYPE_3D;
+	tf.width = MAX(1, octree_size.x >> 1);
+	tf.height = MAX(1, octree_size.y >> 1);
+	tf.depth = MAX(1, octree_size.z >> 1);
+	if (aniso_slab_axis == 0) {
+		tf.width *= 6;
+	} else if (aniso_slab_axis == 1) {
+		tf.height *= 6;
+	} else {
+		tf.depth *= 6;
+	}
+	tf.mipmaps = octree_mipmap_count - 1;
+	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	aniso_texture = RD::get_singleton()->texture_create(tf, RD::TextureView());
+	if (aniso_texture.is_null()) {
+		return;
+	}
+	RD::get_singleton()->set_resource_name(aniso_texture, "VoxelGI Instance Anisotropic Texture");
+	RD::get_singleton()->texture_clear(aniso_texture, Color(0, 0, 0, 0), 0, tf.mipmaps, 0, 1);
+
+	RD::TextureFormat mask_tf;
+	mask_tf.format = RD::DATA_FORMAT_R8_UINT;
+	mask_tf.texture_type = RD::TEXTURE_TYPE_3D;
+	mask_tf.width = octree_size.x;
+	mask_tf.height = octree_size.y;
+	mask_tf.depth = octree_size.z;
+	mask_tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	aniso_normal_mask = RD::get_singleton()->texture_create(mask_tf, RD::TextureView());
+	RD::get_singleton()->set_resource_name(aniso_normal_mask, "VoxelGI Instance Normal Mask");
+	RD::get_singleton()->texture_clear(aniso_normal_mask, Color(0, 0, 0, 0), 0, 1, 0, 1);
+
+	for (uint32_t i = 0; i < tf.mipmaps; i++) {
+		AnisoMipmap mipmap;
+		mipmap.texture = RD::get_singleton()->texture_create_shared_from_slice(RD::TextureView(), aniso_texture, 0, i, 1, RD::TEXTURE_SLICE_3D);
+
+		Vector<RD::Uniform> uniforms;
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 0, mipmap.texture));
+		if (i == 0) {
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, mipmaps[0].texture));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, aniso_normal_mask));
+			mipmap.uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->voxel_gi_mipmap_shader_version_shaders[VOXEL_GI_MIPMAP_ANISO_FIRST], 0);
+		} else {
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, aniso_mipmaps[i - 1].texture));
+			mipmap.uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->voxel_gi_mipmap_shader_version_shaders[VOXEL_GI_MIPMAP_ANISO], 0);
+		}
+		aniso_mipmaps.push_back(mipmap);
+	}
+
+	// The facing of static voxels never changes, so the normal mask is written once.
+	{
+		Vector<RD::Uniform> uniforms;
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, gi->voxel_gi_get_octree_buffer(probe)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, gi->voxel_gi_get_data_buffer(probe)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, write_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, aniso_normal_mask));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, gi->voxel_gi_get_sdf_texture(probe)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 10, material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED)));
+		RID uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_WRITE_NORMAL_MASK], 0);
+
+		VoxelGIPushConstant push_constant;
+		memset(&push_constant, 0, sizeof(VoxelGIPushConstant));
+		push_constant.limits[0] = octree_size.x;
+		push_constant.limits[1] = octree_size.y;
+		push_constant.limits[2] = octree_size.z;
+		push_constant.cell_offset = mipmaps[0].cell_offset;
+		uint32_t cell_count = mipmaps[0].cell_count;
+
+		RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_WRITE_NORMAL_MASK].get_rid());
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+		const uint32_t wg_size = 64;
+		uint32_t wg_limit_x = RD::get_singleton()->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X);
+		uint32_t wg_todo = (cell_count + wg_size - 1) / wg_size;
+		while (wg_todo) {
+			uint32_t wg_count = MIN(wg_todo, wg_limit_x);
+			push_constant.cell_count = MIN(cell_count, wg_count * wg_size);
+			RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VoxelGIPushConstant));
+			RD::get_singleton()->compute_list_dispatch(compute_list, wg_count, 1, 1);
+			wg_todo -= wg_count;
+			cell_count -= push_constant.cell_count;
+			push_constant.cell_offset += wg_count * wg_size;
+		}
+		RD::get_singleton()->compute_list_end();
+		RD::get_singleton()->free_rid(uniform_set);
+	}
+}
+
+void GI::VoxelGIInstance::_free_aniso() {
+	if (aniso_texture.is_valid()) {
+		RD::get_singleton()->free_rid(aniso_texture);
+		aniso_texture = RID();
+	}
+	if (aniso_normal_mask.is_valid()) {
+		RD::get_singleton()->free_rid(aniso_normal_mask);
+		aniso_normal_mask = RID();
+	}
+	aniso_mipmaps.clear();
+}
+
+void GI::VoxelGIInstance::_build_aniso_region(RD::ComputeListID p_compute_list, const CellBox &p_box) {
+	Vector3i octree_size = gi->voxel_gi_get_octree_size(probe);
+	float propagation = gi->voxel_gi_get_propagation(probe);
+
+	for (int i = 0; i < aniso_mipmaps.size(); i++) {
+		int level = i + 1; // Level in the regular mipmap chain.
+
+		VoxelGIMipmapPushConstant push_constant;
+		memset(&push_constant, 0, sizeof(VoxelGIMipmapPushConstant));
+		push_constant.propagation = propagation;
+		push_constant.slab_axis = aniso_slab_axis;
+		push_constant.dst_slab_size = MAX(1, octree_size[aniso_slab_axis] >> level);
+		push_constant.src_slab_size = MAX(1, octree_size[aniso_slab_axis] >> (level - 1));
+		bool empty = false;
+		for (int j = 0; j < 3; j++) {
+			int mip_size = MAX(1, octree_size[j] >> level);
+			int begin = p_box.begin[j] >> level;
+			int end = MIN(((p_box.end[j] - 1) >> level) + 1, mip_size);
+			push_constant.offset[j] = begin;
+			push_constant.size[j] = end - begin;
+			push_constant.src_size[j] = MAX(1, octree_size[j] >> (level - 1));
+			empty = empty || end <= begin;
+		}
+		if (empty) {
+			continue;
+		}
+
+		RD::get_singleton()->compute_list_add_barrier(p_compute_list);
+		RD::get_singleton()->compute_list_bind_compute_pipeline(p_compute_list, gi->voxel_gi_mipmap_pipelines[i == 0 ? VOXEL_GI_MIPMAP_ANISO_FIRST : VOXEL_GI_MIPMAP_ANISO].get_rid());
+		RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, aniso_mipmaps[i].uniform_set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(p_compute_list, &push_constant, sizeof(VoxelGIMipmapPushConstant));
+		RD::get_singleton()->compute_list_dispatch_threads(p_compute_list, push_constant.size[0], push_constant.size[1], push_constant.size[2]);
+	}
+}
+
+void GI::VoxelGIInstance::_dispatch_cells(RD::ComputeListID p_compute_list, VoxelGIPushConstant &p_push_constant, uint32_t p_cell_offset, uint32_t p_cell_count, uint32_t p_stride, uint32_t p_phase) {
+	p_stride = MAX(1u, p_stride);
+	if (p_phase >= p_cell_count) {
+		return;
+	}
+	uint32_t count = (p_cell_count - p_phase + p_stride - 1) / p_stride;
+
+	const uint32_t wg_size = 64;
+	uint32_t wg_limit_x = RD::get_singleton()->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X);
+
+	p_push_constant.cell_stride = p_stride;
+	p_push_constant.cell_phase = p_phase;
+	uint32_t offset = p_cell_offset;
+	while (count) {
+		uint32_t dispatch_count = MIN(count, wg_limit_x * wg_size);
+		p_push_constant.cell_offset = offset;
+		p_push_constant.cell_count = dispatch_count;
+		RD::get_singleton()->compute_list_set_push_constant(p_compute_list, &p_push_constant, sizeof(VoxelGIPushConstant));
+		RD::get_singleton()->compute_list_dispatch(p_compute_list, Math::division_round_up(dispatch_count, wg_size), 1, 1);
+		count -= dispatch_count;
+		offset += dispatch_count * p_stride;
+	}
+}
+
+void GI::VoxelGIInstance::_update_static_light(uint32_t p_light_count, bool p_compute_light, StaticBounce p_bounce, float p_bounce_feedback, uint32_t p_stride, uint32_t p_phase) {
+	Vector3i octree_size = gi->voxel_gi_get_octree_size(probe);
+
+	Vector3 ps = octree_size / gi->voxel_gi_get_bounds(probe).size;
+	float cell_size = (1.0 / MAX(MAX(ps.x, ps.y), ps.z)); // probe size relative to 1 unit in world space
+
+	VoxelGIPushConstant push_constant;
+	memset(&push_constant, 0, sizeof(VoxelGIPushConstant));
+	push_constant.limits[0] = octree_size.x;
+	push_constant.limits[1] = octree_size.y;
+	push_constant.limits[2] = octree_size.z;
+	push_constant.stack_size = mipmaps.size();
+	push_constant.emission_scale = 1.0;
+	push_constant.propagation = gi->voxel_gi_get_propagation(probe);
+	push_constant.dynamic_range = gi->voxel_gi_get_dynamic_range(probe);
+	push_constant.light_count = p_light_count;
+	push_constant.bounce_feedback = p_bounce_feedback;
+	push_constant.cell_size = cell_size;
+
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+
+	// Leaf cells.
+
+	if (p_compute_light) {
+		RID area_light_atlas_uniform_set;
+		{
+			RD::Uniform u;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			u.binding = 0;
+			u.append_id(RendererRD::TextureStorage::get_singleton()->area_light_atlas_get_texture());
+			area_light_atlas_uniform_set = UniformSetCacheRD::get_singleton()->get_cache(gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_COMPUTE_LIGHT], 1, u);
+		}
+
+		// With bounce feedback, direct light goes to its own buffer and the bounce pass combines them.
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_COMPUTE_LIGHT].get_rid());
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, direct_light_buffer.is_valid() ? direct_light_uniform_set : mipmaps[0].uniform_set, 0);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, area_light_atlas_uniform_set, 1);
+		_dispatch_cells(compute_list, push_constant, mipmaps[0].cell_offset, mipmaps[0].cell_count, p_stride, p_phase);
+		RD::get_singleton()->compute_list_add_barrier(compute_list);
+	}
+
+	if (p_bounce == STATIC_BOUNCE_SECOND) {
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_COMPUTE_SECOND_BOUNCE].get_rid());
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, mipmaps[0].second_bounce_uniform_set, 0);
+		_dispatch_cells(compute_list, push_constant, mipmaps[0].cell_offset, mipmaps[0].cell_count, p_stride, p_phase);
+		RD::get_singleton()->compute_list_add_barrier(compute_list);
+	} else if (p_bounce == STATIC_BOUNCE_FEEDBACK) {
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_FEEDBACK_BOUNCE].get_rid());
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, feedback_uniform_set, 0);
+		_dispatch_cells(compute_list, push_constant, mipmaps[0].cell_offset, mipmaps[0].cell_count, p_stride, p_phase);
+		RD::get_singleton()->compute_list_add_barrier(compute_list);
+	}
+
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_WRITE_TEXTURE].get_rid());
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, mipmaps[0].write_uniform_set, 0);
+	_dispatch_cells(compute_list, push_constant, mipmaps[0].cell_offset, mipmaps[0].cell_count, p_stride, p_phase);
+
+	// Upper levels depend on all their children, so they are always updated whole.
+
+	if (octree_mipmap_count > 1) {
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_COMPUTE_MIPMAP].get_rid());
+		for (int i = 1; i < octree_mipmap_count; i++) {
+			RD::get_singleton()->compute_list_add_barrier(compute_list);
+			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, mipmaps[i].uniform_set, 0);
+			_dispatch_cells(compute_list, push_constant, mipmaps[i].cell_offset, mipmaps[i].cell_count, 1, 0);
+		}
+
+		RD::get_singleton()->compute_list_add_barrier(compute_list);
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_WRITE_TEXTURE].get_rid());
+		for (int i = 1; i < octree_mipmap_count; i++) {
+			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, mipmaps[i].write_uniform_set, 0);
+			_dispatch_cells(compute_list, push_constant, mipmaps[i].cell_offset, mipmaps[i].cell_count, 1, 0);
+		}
+	}
+
+	if (octree_mipmap_count < mipmaps.size()) {
+		// The upper mipmaps that don't match octree levels are downsampled.
+		CellBox box;
+		box.end = octree_size;
+		_downsample_region(compute_list, box, octree_mipmap_count);
+	}
+
+	RD::get_singleton()->compute_list_end();
+}
+
+void GI::VoxelGIInstance::_create_feedback() {
+	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+
+	_free_feedback();
+
+	if (mipmaps.is_empty()) {
+		return;
+	}
+
+	Vector<int> levels = gi->voxel_gi_get_level_counts(probe);
+	int total_elements = 0;
+	for (int i = 0; i < levels.size(); i++) {
+		total_elements += levels[i];
+	}
+	direct_light_buffer = RD::get_singleton()->storage_buffer_create(total_elements * 16);
+
+	RID sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	{
+		Vector<RD::Uniform> uniforms;
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, gi->voxel_gi_get_octree_buffer(probe)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, gi->voxel_gi_get_data_buffer(probe)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 3, gi->voxel_gi_lights_uniform));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, direct_light_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, gi->voxel_gi_get_sdf_texture(probe)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 10, sampler));
+		direct_light_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_COMPUTE_LIGHT], 0);
+	}
+	{
+		Vector<RD::Uniform> uniforms;
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, gi->voxel_gi_get_octree_buffer(probe)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, gi->voxel_gi_get_data_buffer(probe)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, write_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 5, texture));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, direct_light_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, gi->voxel_gi_get_sdf_texture(probe)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 10, sampler));
+		feedback_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_FEEDBACK_BOUNCE], 0);
+	}
+}
+
+void GI::VoxelGIInstance::_free_feedback() {
+	if (direct_light_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(direct_light_buffer);
+		direct_light_buffer = RID();
+	}
+	direct_light_uniform_set = RID();
+	feedback_uniform_set = RID();
+	bounce_frames_left = 0;
+}
+
+GI::VoxelGIInstance::CellBox GI::VoxelGIInstance::_get_dynamic_object_box(const Transform3D &p_to_cell, const AABB &p_aabb, const Vector3i &p_octree_size) {
+	AABB aabb = p_to_cell.xform(p_aabb);
+	CellBox box;
+	for (int i = 0; i < 3; i++) {
+		// Plotting can land up to two cells outside the AABB (render margin and depth rounding).
+		box.begin[i] = int(CLAMP(Math::floor(aabb.position[i]) - 2.0, 0.0, (real_t)p_octree_size[i]));
+		box.end[i] = int(CLAMP(Math::ceil(aabb.position[i] + aabb.size[i]) + 2.0, 0.0, (real_t)p_octree_size[i]));
+	}
+	return box;
+}
+
+void GI::VoxelGIInstance::_restore_static_region(RD::ComputeListID p_compute_list, const CellBox &p_box) {
+	const LocalVector<uint32_t> &x_offsets = gi->voxel_gi_get_leaf_x_offsets(probe);
+	ERR_FAIL_COND(x_offsets.size() < uint32_t(p_box.end.x + 1));
+
+	Vector3i octree_size = gi->voxel_gi_get_octree_size(probe);
+
+	VoxelGIPushConstant push_constant;
+	memset(&push_constant, 0, sizeof(VoxelGIPushConstant));
+	push_constant.limits[0] = octree_size.x;
+	push_constant.limits[1] = octree_size.y;
+	push_constant.limits[2] = octree_size.z;
+	push_constant.stack_size = mipmaps.size();
+	push_constant.emission_scale = 1.0;
+	push_constant.propagation = gi->voxel_gi_get_propagation(probe);
+	push_constant.dynamic_range = gi->voxel_gi_get_dynamic_range(probe);
+	for (int i = 0; i < 3; i++) {
+		push_constant.region_begin[i] = p_box.begin[i];
+		push_constant.region_end[i] = p_box.end[i];
+	}
+
+	// Leaf cells are sorted by X, so the cells of the region are within one contiguous range.
+	push_constant.cell_offset = x_offsets[p_box.begin.x];
+	uint32_t cell_count = x_offsets[p_box.end.x] - x_offsets[p_box.begin.x];
+	if (cell_count == 0) {
+		return;
+	}
+
+	RD::get_singleton()->compute_list_bind_compute_pipeline(p_compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_WRITE_TEXTURE_REGION].get_rid());
+	RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, mipmaps[0].write_uniform_set, 0);
+
+	const uint32_t wg_size = 64;
+	uint32_t wg_limit_x = RD::get_singleton()->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X);
+	uint32_t wg_todo = (cell_count + wg_size - 1) / wg_size;
+	while (wg_todo) {
+		uint32_t wg_count = MIN(wg_todo, wg_limit_x);
+		push_constant.cell_count = MIN(cell_count, wg_count * wg_size);
+		RD::get_singleton()->compute_list_set_push_constant(p_compute_list, &push_constant, sizeof(VoxelGIPushConstant));
+		RD::get_singleton()->compute_list_dispatch(p_compute_list, wg_count, 1, 1);
+		wg_todo -= wg_count;
+		cell_count -= push_constant.cell_count;
+		push_constant.cell_offset += wg_count * wg_size;
+	}
+}
+
+void GI::VoxelGIInstance::_downsample_region(RD::ComputeListID p_compute_list, const CellBox &p_box, int p_from_level) {
+	Vector3i octree_size = gi->voxel_gi_get_octree_size(probe);
+	float propagation = gi->voxel_gi_get_propagation(probe);
+
+	for (int i = MAX(1, p_from_level); i < mipmaps.size(); i++) {
+		VoxelGIMipmapPushConstant push_constant;
+		memset(&push_constant, 0, sizeof(VoxelGIMipmapPushConstant));
+		push_constant.propagation = propagation;
+		bool empty = false;
+		for (int j = 0; j < 3; j++) {
+			int mip_size = MAX(1, octree_size[j] >> i);
+			int begin = p_box.begin[j] >> i;
+			int end = MIN(((p_box.end[j] - 1) >> i) + 1, mip_size);
+			push_constant.offset[j] = begin;
+			push_constant.size[j] = end - begin;
+			push_constant.src_size[j] = MAX(1, octree_size[j] >> (i - 1));
+			// Upper mipmaps of sizes that are not a power of two drop the last partial voxel.
+			empty = empty || end <= begin;
+		}
+		if (empty) {
+			continue;
+		}
+
+		// Each level reads the previous one. A barrier restarts the compute list with the previous push constant,
+		// so the pipeline is bound after it.
+		RD::get_singleton()->compute_list_add_barrier(p_compute_list);
+		RD::get_singleton()->compute_list_bind_compute_pipeline(p_compute_list, gi->voxel_gi_mipmap_pipelines[VOXEL_GI_MIPMAP_DOWNSAMPLE].get_rid());
+		RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, mipmaps[i].downsample_uniform_set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(p_compute_list, &push_constant, sizeof(VoxelGIMipmapPushConstant));
+		RD::get_singleton()->compute_list_dispatch_threads(p_compute_list, push_constant.size[0], push_constant.size[1], push_constant.size[2]);
+	}
+}
+
+void GI::VoxelGIInstance::_plot_dynamic_object(RenderGeometryInstance *p_instance, uint32_t p_oversample_shift, uint32_t p_light_count, RID p_area_light_atlas_uniform_set) {
+	Vector3i octree_size = gi->voxel_gi_get_octree_size(probe);
+	int multiplier = 1 << p_oversample_shift;
+
+	Transform3D oversample_scale;
+	oversample_scale.basis.scale(Vector3(multiplier, multiplier, multiplier));
+
+	Transform3D to_cell = oversample_scale * gi->voxel_gi_get_to_cell_xform(probe);
+	Transform3D to_world_xform = transform * to_cell.affine_inverse();
+	Transform3D to_probe_xform = to_world_xform.affine_inverse();
+
+	//transform aabb to voxel_gi
+	AABB aabb = (to_probe_xform * p_instance->get_transform()).xform(p_instance->get_aabb());
+
+	//this needs to wrap to grid resolution to avoid jitter
+	//also extend margin a bit just in case
+	Vector3i begin = aabb.position - Vector3i(1, 1, 1);
+	Vector3i end = aabb.position + aabb.size + Vector3i(1, 1, 1);
+
+	for (int j = 0; j < 3; j++) {
+		if ((end[j] - begin[j]) & 1) {
+			end[j]++; //for half extents split, it needs to be even
+		}
+		begin[j] = MAX(begin[j], 0);
+		end[j] = MIN(end[j], octree_size[j] * multiplier);
+	}
+
+	aabb.position = begin;
+	aabb.size = end - begin;
+
+	if (aabb.size.x <= 0 || aabb.size.y <= 0 || aabb.size.z <= 0) {
+		return;
+	}
+
+	Vector3 ps = octree_size / gi->voxel_gi_get_bounds(probe).size;
+	float cell_size = (1.0 / MAX(MAX(ps.x, ps.y), ps.z)); // probe size relative to 1 unit in world space
+
+	float exposure_normalization = 1.0;
+	if (RendererSceneRenderRD::get_singleton()->is_using_physical_light_units()) {
+		exposure_normalization = gi->voxel_gi_get_baked_exposure_normalization(probe);
+	}
+
+	for (int j = 0; j < 6; j++) {
+		static const Vector3 render_z[6] = {
+			Vector3(1, 0, 0),
+			Vector3(0, 1, 0),
+			Vector3(0, 0, 1),
+			Vector3(-1, 0, 0),
+			Vector3(0, -1, 0),
+			Vector3(0, 0, -1),
+		};
+		static const Vector3 render_up[6] = {
+			Vector3(0, 1, 0),
+			Vector3(0, 0, 1),
+			Vector3(0, 1, 0),
+			Vector3(0, 1, 0),
+			Vector3(0, 0, 1),
+			Vector3(0, 1, 0),
+		};
+
+		Vector3 render_dir = render_z[j];
+		Vector3 up_dir = render_up[j];
+
+		Vector3 center = aabb.get_center();
+		Transform3D xform;
+		xform.set_look_at(center - aabb.size * 0.5 * render_dir, center, up_dir);
+
+		Vector3 x_dir = xform.basis.get_column(0).abs();
+		int x_axis = int(Vector3(0, 1, 2).dot(x_dir));
+		Vector3 y_dir = xform.basis.get_column(1).abs();
+		int y_axis = int(Vector3(0, 1, 2).dot(y_dir));
+		Vector3 z_dir = -xform.basis.get_column(2);
+		int z_axis = int(Vector3(0, 1, 2).dot(z_dir.abs()));
+
+		Rect2i rect(aabb.position[x_axis], aabb.position[y_axis], aabb.size[x_axis], aabb.size[y_axis]);
+		bool x_flip = bool(Vector3(1, 1, 1).dot(xform.basis.get_column(0)) < 0);
+		bool y_flip = bool(Vector3(1, 1, 1).dot(xform.basis.get_column(1)) < 0);
+		bool z_flip = bool(Vector3(1, 1, 1).dot(xform.basis.get_column(2)) > 0);
+
+		Projection cm;
+		cm.set_orthogonal(-rect.size.width / 2, rect.size.width / 2, -rect.size.height / 2, rect.size.height / 2, 0.0001, aabb.size[z_axis]);
+
+		if (RendererSceneRenderRD::get_singleton()->cull_argument.size() == 0) {
+			RendererSceneRenderRD::get_singleton()->cull_argument.push_back(nullptr);
+		}
+		RendererSceneRenderRD::get_singleton()->cull_argument[0] = p_instance;
+
+		RendererSceneRenderRD::get_singleton()->_render_material(to_world_xform * xform, cm, true, RendererSceneRenderRD::get_singleton()->cull_argument, dynamic_maps[0].fb, Rect2i(Vector2i(), rect.size), exposure_normalization);
+
+		VoxelGIDynamicPushConstant push_constant;
+		memset(&push_constant, 0, sizeof(VoxelGIDynamicPushConstant));
+		push_constant.limits[0] = octree_size.x;
+		push_constant.limits[1] = octree_size.y;
+		push_constant.limits[2] = octree_size.z;
+		push_constant.light_count = p_light_count;
+		push_constant.x_dir[0] = x_dir[0];
+		push_constant.x_dir[1] = x_dir[1];
+		push_constant.x_dir[2] = x_dir[2];
+		push_constant.y_dir[0] = y_dir[0];
+		push_constant.y_dir[1] = y_dir[1];
+		push_constant.y_dir[2] = y_dir[2];
+		push_constant.z_dir[0] = z_dir[0];
+		push_constant.z_dir[1] = z_dir[1];
+		push_constant.z_dir[2] = z_dir[2];
+		push_constant.z_base = xform.origin[z_axis];
+		push_constant.z_sign = (z_flip ? -1.0 : 1.0);
+		push_constant.pos_multiplier = float(1.0) / multiplier;
+		push_constant.dynamic_range = gi->voxel_gi_get_dynamic_range(probe);
+		push_constant.flip_x = x_flip;
+		push_constant.flip_y = y_flip;
+		push_constant.rect_pos[0] = rect.position[0];
+		push_constant.rect_pos[1] = rect.position[1];
+		push_constant.rect_size[0] = rect.size[0];
+		push_constant.rect_size[1] = rect.size[1];
+		push_constant.on_mipmap = false;
+		push_constant.propagation = gi->voxel_gi_get_propagation(probe);
+		push_constant.cell_size = cell_size;
+
+		//process lighting
+		RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_DYNAMIC_OBJECT_LIGHTING].get_rid());
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, dynamic_maps[0].uniform_set, 0);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, p_area_light_atlas_uniform_set, 1);
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VoxelGIDynamicPushConstant));
+		RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(rect.size.x, 8), Math::division_round_up(rect.size.y, 8), 1);
+
+		// Shrink down to the voxel size, then plot into mipmap 0. Upper mipmaps are downsampled afterwards.
+		for (uint32_t k = 1; k <= p_oversample_shift; k++) {
+			// enlarge the rect if needed so all pixels fit when downscaled,
+			// this ensures downsampling is smooth and optimal because no pixels are left behind
+
+			//x
+			if (rect.position.x & 1) {
+				rect.size.x++;
+				push_constant.prev_rect_ofs[0] = 1; //this is used to ensure reading is also optimal
+			} else {
+				push_constant.prev_rect_ofs[0] = 0;
+			}
+			if (rect.size.x & 1) {
+				rect.size.x++;
+			}
+
+			rect.position.x >>= 1;
+			rect.size.x = MAX(1, rect.size.x >> 1);
+
+			//y
+			if (rect.position.y & 1) {
+				rect.size.y++;
+				push_constant.prev_rect_ofs[1] = 1;
+			} else {
+				push_constant.prev_rect_ofs[1] = 0;
+			}
+			if (rect.size.y & 1) {
+				rect.size.y++;
+			}
+
+			rect.position.y >>= 1;
+			rect.size.y = MAX(1, rect.size.y >> 1);
+
+			push_constant.rect_pos[0] = rect.position[0];
+			push_constant.rect_pos[1] = rect.position[1];
+			push_constant.prev_rect_size[0] = push_constant.rect_size[0];
+			push_constant.prev_rect_size[1] = push_constant.rect_size[1];
+			push_constant.rect_size[0] = rect.size[0];
+			push_constant.rect_size[1] = rect.size[1];
+
+			RD::get_singleton()->compute_list_add_barrier(compute_list);
+
+			if (k < p_oversample_shift) {
+				RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_WRITE].get_rid());
+				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, dynamic_maps[k].uniform_set, 0);
+			} else {
+				RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->voxel_gi_lighting_shader_version_pipelines[VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_PLOT].get_rid());
+				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, dynamic_maps[k - 1].plot_uniform_set, 0);
+			}
+			RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VoxelGIDynamicPushConstant));
+			RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(rect.size.x, 8), Math::division_round_up(rect.size.y, 8), 1);
+		}
+
+		RD::get_singleton()->compute_list_end();
+	}
+}
+
+void GI::VoxelGIInstance::_create_dynamic_maps(uint32_t p_size) {
+	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+
+	_free_dynamic_maps();
+	dynamic_map_size = p_size;
+
+	for (uint32_t i = 0; i < MAX_DYNAMIC_OVERSAMPLE_SHIFT; i++) {
+		VoxelGIInstance::DynamicMap dmap;
+		dmap.size = p_size >> i;
+
+		RD::TextureFormat dtf;
+		dtf.width = dmap.size;
+		dtf.height = dmap.size;
+		dtf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		dtf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT;
+
+		if (i == 0) {
+			dtf.usage_bits |= RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
+		}
+		dmap.texture = RD::get_singleton()->texture_create(dtf, RD::TextureView());
+		RD::get_singleton()->set_resource_name(dmap.texture, "VoxelGI Instance DMap Texture");
+
+		if (i == 0) {
+			// Render depth for first one.
+			// Use 16-bit depth when supported to improve performance.
+			dtf.format = RD::get_singleton()->texture_is_format_supported_for_usage(RD::DATA_FORMAT_D16_UNORM, RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ? RD::DATA_FORMAT_D16_UNORM : RD::DATA_FORMAT_X8_D24_UNORM_PACK32;
+			dtf.usage_bits = RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+			dmap.fb_depth = RD::get_singleton()->texture_create(dtf, RD::TextureView());
+			RD::get_singleton()->set_resource_name(dmap.fb_depth, "VoxelGI Instance DMap FB Depth");
+		}
+
+		//just use depth as-is
+		dtf.format = RD::DATA_FORMAT_R32_SFLOAT;
+		dtf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
+
+		dmap.depth = RD::get_singleton()->texture_create(dtf, RD::TextureView());
+		RD::get_singleton()->set_resource_name(dmap.depth, "VoxelGI Instance DMap Depth");
+
+		if (i == 0) {
+			dtf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+			dtf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
+			dmap.albedo = RD::get_singleton()->texture_create(dtf, RD::TextureView());
+			RD::get_singleton()->set_resource_name(dmap.albedo, "VoxelGI Instance DMap Albedo");
+			dmap.normal = RD::get_singleton()->texture_create(dtf, RD::TextureView());
+			RD::get_singleton()->set_resource_name(dmap.normal, "VoxelGI Instance DMap Normal");
+			dmap.orm = RD::get_singleton()->texture_create(dtf, RD::TextureView());
+			RD::get_singleton()->set_resource_name(dmap.orm, "VoxelGI Instance DMap ORM");
+
+			Vector<RID> fb;
+			fb.push_back(dmap.albedo);
+			fb.push_back(dmap.normal);
+			fb.push_back(dmap.orm);
+			fb.push_back(dmap.texture); //emission
+			fb.push_back(dmap.depth);
+			fb.push_back(dmap.fb_depth);
+
+			dmap.fb = RD::get_singleton()->framebuffer_create(fb);
+
+			Vector<RD::Uniform> uniforms;
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
+				u.binding = 3;
+				u.append_id(gi->voxel_gi_lights_uniform);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 5;
+				u.append_id(dmap.albedo);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 6;
+				u.append_id(dmap.normal);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 7;
+				u.append_id(dmap.orm);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+				u.binding = 8;
+				u.append_id(dmap.fb_depth);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+				u.binding = 9;
+				u.append_id(gi->voxel_gi_get_sdf_texture(probe));
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_SAMPLER;
+				u.binding = 10;
+				u.append_id(material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 11;
+				u.append_id(dmap.texture);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 12;
+				u.append_id(dmap.depth);
+				uniforms.push_back(u);
+			}
+
+			dmap.uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_DYNAMIC_OBJECT_LIGHTING], 0);
+		} else {
+			const DynamicMap &prev = dynamic_maps[i - 1];
+			Vector<RD::Uniform> uniforms;
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 5;
+				u.append_id(prev.texture);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 6;
+				u.append_id(prev.depth);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 7;
+				u.append_id(dmap.texture);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 8;
+				u.append_id(dmap.depth);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+				u.binding = 9;
+				u.append_id(gi->voxel_gi_get_sdf_texture(probe));
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_SAMPLER;
+				u.binding = 10;
+				u.append_id(material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
+				uniforms.push_back(u);
+			}
+			dmap.uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_WRITE], 0);
+		}
+
+		{
+			// Shrinking this map one more time lands on the voxel size, plot that into mipmap 0.
+			Vector<RD::Uniform> uniforms;
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 5;
+				u.append_id(dmap.texture);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 6;
+				u.append_id(dmap.depth);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+				u.binding = 9;
+				u.append_id(gi->voxel_gi_get_sdf_texture(probe));
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_SAMPLER;
+				u.binding = 10;
+				u.append_id(material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 11;
+				u.append_id(mipmaps[0].texture);
+				uniforms.push_back(u);
+			}
+			dmap.plot_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->voxel_gi_lighting_shader_version_shaders[VOXEL_GI_SHADER_VERSION_DYNAMIC_SHRINK_PLOT], 0);
+		}
+
+		dynamic_maps.push_back(dmap);
+	}
+}
+
+void GI::VoxelGIInstance::_free_dynamic_maps() {
 	for (int i = 0; i < dynamic_maps.size(); i++) {
 		RD::get_singleton()->free_rid(dynamic_maps[i].texture);
 		RD::get_singleton()->free_rid(dynamic_maps[i].depth);
@@ -3428,6 +4069,27 @@ void GI::VoxelGIInstance::free_resources() {
 		}
 	}
 	dynamic_maps.clear();
+	dynamic_map_size = 0;
+}
+
+void GI::VoxelGIInstance::free_resources() {
+	if (texture.is_valid()) {
+		RD::get_singleton()->free_rid(texture);
+		RD::get_singleton()->free_rid(write_buffer);
+
+		texture = RID();
+		write_buffer = RID();
+		mipmaps.clear();
+	}
+
+	_free_dynamic_maps();
+	_free_aniso();
+	_free_feedback();
+
+	dynamic_objects.clear();
+	light_frames_left = 0;
+	has_dynamic_object_data = false;
+	static_data_written = false;
 }
 
 void GI::VoxelGIInstance::debug(RD::DrawListID p_draw_list, RID p_framebuffer, const Projection &p_camera_with_transform, bool p_lighting, bool p_emission, float p_alpha) {
@@ -3544,6 +4206,20 @@ GI::~GI() {
 		voxel_gi_lighting_shader_version_pipelines[i].free();
 	}
 
+	for (int i = 0; i < VOXEL_GI_MIPMAP_MAX; i++) {
+		voxel_gi_mipmap_pipelines[i].free();
+	}
+
+	for (int i = 0; i < SCREEN_PROBES_MAX; i++) {
+		screen_probes_pipelines[i].free();
+	}
+	if (screen_probes_shader_version.is_valid()) {
+		screen_probes_shader.version_free(screen_probes_shader_version);
+	}
+	if (voxel_gi_mipmap_shader_version.is_valid()) {
+		voxel_gi_mipmap_shader.version_free(voxel_gi_mipmap_shader_version);
+	}
+
 	if (voxel_gi_debug_shader_version.is_valid()) {
 		voxel_gi_debug_shader.version_free(voxel_gi_debug_shader_version);
 	}
@@ -3592,16 +4268,35 @@ void GI::init(SkyRD *p_sky) {
 		versions.push_back("\n#define MODE_SECOND_BOUNCE\n");
 		versions.push_back("\n#define MODE_UPDATE_MIPMAPS\n");
 		versions.push_back("\n#define MODE_WRITE_TEXTURE\n");
+		versions.push_back("\n#define MODE_WRITE_TEXTURE\n#define MODE_WRITE_TEXTURE_REGION\n");
 		versions.push_back("\n#define MODE_DYNAMIC\n#define MODE_DYNAMIC_LIGHTING\n");
 		versions.push_back("\n#define MODE_DYNAMIC\n#define MODE_DYNAMIC_SHRINK\n#define MODE_DYNAMIC_SHRINK_WRITE\n");
 		versions.push_back("\n#define MODE_DYNAMIC\n#define MODE_DYNAMIC_SHRINK\n#define MODE_DYNAMIC_SHRINK_PLOT\n");
-		versions.push_back("\n#define MODE_DYNAMIC\n#define MODE_DYNAMIC_SHRINK\n#define MODE_DYNAMIC_SHRINK_PLOT\n#define MODE_DYNAMIC_SHRINK_WRITE\n");
+		versions.push_back("\n#define MODE_WRITE_NORMAL_MASK\n");
+		versions.push_back("\n#define MODE_FEEDBACK_BOUNCE\n");
 
 		voxel_gi_shader.initialize(versions, defines);
 		voxel_gi_lighting_shader_version = voxel_gi_shader.version_create();
 		for (int i = 0; i < VOXEL_GI_SHADER_VERSION_MAX; i++) {
 			voxel_gi_lighting_shader_version_shaders[i] = voxel_gi_shader.version_get_shader(voxel_gi_lighting_shader_version, i);
 			voxel_gi_lighting_shader_version_pipelines[i].create_compute_pipeline(voxel_gi_lighting_shader_version_shaders[i]);
+		}
+
+		voxel_gi_dynamic_object_refresh_frames = MAX(1, int(GLOBAL_GET("rendering/global_illumination/voxel_gi/dynamic_object_refresh_frames")));
+	}
+
+	{
+		Vector<String> versions;
+		versions.push_back("\n#define MODE_CLEAR\n");
+		versions.push_back("\n#define MODE_DOWNSAMPLE\n");
+		versions.push_back("\n#define MODE_ANISO_FIRST\n");
+		versions.push_back("\n#define MODE_ANISO\n");
+
+		voxel_gi_mipmap_shader.initialize(versions);
+		voxel_gi_mipmap_shader_version = voxel_gi_mipmap_shader.version_create();
+		for (int i = 0; i < VOXEL_GI_MIPMAP_MAX; i++) {
+			voxel_gi_mipmap_shader_version_shaders[i] = voxel_gi_mipmap_shader.version_get_shader(voxel_gi_mipmap_shader_version, i);
+			voxel_gi_mipmap_pipelines[i].create_compute_pipeline(voxel_gi_mipmap_shader_version_shaders[i]);
 		}
 	}
 
@@ -3725,6 +4420,8 @@ void GI::init(SkyRD *p_sky) {
 			variants.push_back(ShaderRD::VariantDefine(group, vrs_base + "\n#define USE_SDFGI\n", default_enabled)); // MODE_SDFGI
 			variants.push_back(ShaderRD::VariantDefine(group, vrs_base + "\n#define USE_SDFGI\n\n#define USE_VOXEL_GI_INSTANCES\n", default_enabled)); // MODE_COMBINED
 			variants.push_back(ShaderRD::VariantDefine(group, vrs_base + "\n#define USE_SDFGI\n\n#define USE_VOXEL_GI_INSTANCES\n#define SAMPLE_VOXEL_GI_NEAREST\n", default_enabled)); // MODE_COMBINED_WITHOUT_SAMPLER
+			variants.push_back(ShaderRD::VariantDefine(group, vrs_base + "\n#define USE_VOXEL_GI_INSTANCES\n#define USE_SCREEN_PROBES\n", default_enabled)); // MODE_VOXEL_GI_SCREEN_PROBES
+			variants.push_back(ShaderRD::VariantDefine(group, vrs_base + "\n#define USE_VOXEL_GI_INSTANCES\n#define SAMPLE_VOXEL_GI_NEAREST\n#define USE_SCREEN_PROBES\n", default_enabled)); // MODE_VOXEL_GI_SCREEN_PROBES_WITHOUT_SAMPLER
 		}
 
 		shader.initialize(variants, defines);
@@ -3768,6 +4465,17 @@ void GI::init(SkyRD *p_sky) {
 		}
 
 		sdfgi_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(SDFGIData));
+	}
+
+	{
+		Vector<String> versions;
+		versions.push_back("\n#define MODE_TRACE\n");
+		versions.push_back("\n#define MODE_FILTER\n");
+		screen_probes_shader.initialize(versions);
+		screen_probes_shader_version = screen_probes_shader.version_create();
+		for (int i = 0; i < SCREEN_PROBES_MAX; i++) {
+			screen_probes_pipelines[i].create_compute_pipeline(screen_probes_shader.version_get_shader(screen_probes_shader_version, i));
+		}
 	}
 	{
 		String defines = "\n#define OCT_SIZE " + itos(SDFGI::LIGHTPROBE_OCT_SIZE) + "\n";
@@ -3858,11 +4566,13 @@ void GI::setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBu
 
 	for (int i = 0; i < MAX_VOXEL_GI_INSTANCES; i++) {
 		RID texture;
+		RID aniso_texture;
 		if (i < (int)p_voxel_gi_instances.size()) {
 			VoxelGIInstance *gipi = voxel_gi_instance_owner.get_or_null(p_voxel_gi_instances[i]);
 
 			if (gipi) {
 				texture = gipi->texture;
+				aniso_texture = gipi->aniso_texture;
 				VoxelGIData &gipd = voxel_gi_data[i];
 
 				RID base_probe = gipi->probe;
@@ -3887,6 +4597,10 @@ void GI::setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBu
 				gipd.xform[15] = 1;
 
 				Vector3 bounds = voxel_gi_get_octree_size(base_probe);
+				if (texture.is_null()) {
+					// Not baked, or the texture could not be allocated. Keep every position out of bounds so nothing is sampled.
+					bounds = Vector3(-1, -1, -1);
+				}
 
 				gipd.bounds[0] = bounds.x;
 				gipd.bounds[1] = bounds.y;
@@ -3897,6 +4611,9 @@ void GI::setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBu
 				gipd.normal_bias = voxel_gi_get_normal_bias(base_probe);
 				gipd.blend_ambient = !voxel_gi_is_interior(base_probe);
 				gipd.mipmaps = gipi->mipmaps.size();
+				gipd.aniso_enabled = gipi->aniso_texture.is_valid() ? 1.0 : 0.0;
+				gipd.aniso_slab_axis = gipi->aniso_slab_axis;
+				gipd.aniso_slab_size = MAX(1, voxel_gi_get_octree_size(base_probe)[gipi->aniso_slab_axis] >> 1);
 				gipd.exposure_normalization = 1.0;
 				if (p_render_data->camera_attributes.is_valid()) {
 					float exposure_normalization = RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->camera_attributes);
@@ -3914,6 +4631,15 @@ void GI::setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBu
 		if (texture != rbgi->voxel_gi_textures[i]) {
 			voxel_gi_instances_changed = true;
 			rbgi->voxel_gi_textures[i] = texture;
+		}
+
+		if (aniso_texture == RID()) {
+			aniso_texture = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_BLACK);
+		}
+
+		if (aniso_texture != rbgi->voxel_gi_aniso_textures[i]) {
+			voxel_gi_instances_changed = true;
+			rbgi->voxel_gi_aniso_textures[i] = aniso_texture;
 		}
 	}
 
@@ -3961,13 +4687,28 @@ void GI::RenderBuffersGI::free_data() {
 		scene_data_ubo = RID();
 	}
 
+	if (screen_probe_trace_ubo.is_valid()) {
+		RD::get_singleton()->free_rid(screen_probe_trace_ubo);
+		screen_probe_trace_ubo = RID();
+	}
+	if (screen_probe_gi_ubo.is_valid()) {
+		RD::get_singleton()->free_rid(screen_probe_gi_ubo);
+		screen_probe_gi_ubo = RID();
+	}
+	screen_probe_history_valid = false;
+	screen_probe_last_frame = RID();
+
 	if (voxel_gi_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(voxel_gi_buffer);
 		voxel_gi_buffer = RID();
 	}
 }
 
-void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances) {
+bool GI::is_using_screen_probes() {
+	return GLOBAL_GET_CACHED(bool, "rendering/global_illumination/voxel_gi/screen_probes/enabled");
+}
+
+void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances, bool p_use_screen_probes) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 
@@ -4031,9 +4772,6 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 		RD::get_singleton()->buffer_update(rbgi->scene_data_ubo, 0, sizeof(SceneData), &scene_data);
 	}
 
-	// Now compute the contents of our buffers.
-	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
-
 	// Render each eye separately.
 	// We need to look into whether we can make our compute shader use Multiview but not sure that works or makes a difference..
 
@@ -4084,6 +4822,24 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 	} else {
 		mode = without_sampler ? MODE_VOXEL_GI_WITHOUT_SAMPLER : MODE_VOXEL_GI;
 	}
+
+	// Screen probes replace the per-pixel diffuse cones of VoxelGI. SDFGI and multiple views keep the regular path.
+	bool use_screen_probes = p_use_screen_probes && use_voxel_gi_instances && !use_sdfgi && p_view_count == 1 && p_render_buffers->has_texture(RB_SCOPE_SSLF, RB_LAST_FRAME);
+
+	RID screen_probe_trace_set;
+	RID screen_probe_filter_set;
+	RID screen_probe_gi_set;
+	Size2i probe_grid_size;
+
+	if (use_screen_probes) {
+		mode = without_sampler ? MODE_VOXEL_GI_SCREEN_PROBES_WITHOUT_SAMPLER : MODE_VOXEL_GI_SCREEN_PROBES;
+		_setup_screen_probes(p_render_buffers, rbgi, p_normal_roughness_slices[0], p_voxel_gi_buffer, p_projections[0], p_cam_transform, push_constant.max_voxel_gi_instances, screen_probe_trace_set, screen_probe_filter_set, screen_probe_gi_set, probe_grid_size);
+	} else {
+		rbgi->screen_probe_history_valid = false;
+	}
+
+	// Now compute the contents of our buffers.
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
 	for (uint32_t v = 0; v < p_view_count; v++) {
 		push_constant.view_index = v;
@@ -4247,6 +5003,15 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 				u.append_id(rbgi->scene_data_ubo);
 				uniforms.push_back(u);
 			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+				u.binding = 20;
+				for (int i = 0; i < MAX_VOXEL_GI_INSTANCES; i++) {
+					u.append_id(rbgi->voxel_gi_aniso_textures[i]);
+				}
+				uniforms.push_back(u);
+			}
 			if (RendererSceneRenderRD::get_singleton()->is_vrs_supported()) {
 				RD::Uniform u;
 				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
@@ -4261,8 +5026,23 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 			rbgi->uniform_set[v] = RD::get_singleton()->uniform_set_create(uniforms, shader.version_get_shader(shader_version, variant_base), 0);
 		}
 
+		if (use_screen_probes) {
+			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, screen_probes_pipelines[SCREEN_PROBES_TRACE].get_rid());
+			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, screen_probe_trace_set, 0);
+			RD::get_singleton()->compute_list_dispatch(compute_list, probe_grid_size.x, probe_grid_size.y, 1);
+			RD::get_singleton()->compute_list_add_barrier(compute_list);
+
+			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, screen_probes_pipelines[SCREEN_PROBES_FILTER].get_rid());
+			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, screen_probe_filter_set, 0);
+			RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_grid_size.x, probe_grid_size.y, 1);
+			RD::get_singleton()->compute_list_add_barrier(compute_list);
+		}
+
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, pipelines[pipeline_specialization][mode].get_rid());
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, rbgi->uniform_set[v], 0);
+		if (use_screen_probes) {
+			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, screen_probe_gi_set, 1);
+		}
 		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
 
 		if (rbgi->using_half_size_gi) {
@@ -4274,6 +5054,186 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 
 	RD::get_singleton()->compute_list_end();
 	RD::get_singleton()->draw_command_end_label();
+
+	if (use_screen_probes) {
+		rbgi->screen_probe_history_index ^= 1;
+		rbgi->screen_probe_history_valid = true;
+		Projection correction;
+		correction.set_depth_correction(true);
+		rbgi->screen_probe_prev_projection = correction * p_projections[0];
+		rbgi->screen_probe_prev_transform = p_cam_transform;
+		rbgi->screen_probe_frame++;
+	}
+}
+
+void GI::_setup_screen_probes(Ref<RenderSceneBuffersRD> p_render_buffers, Ref<RenderBuffersGI> p_rbgi, RID p_normal_roughness, RID p_voxel_gi_buffer, const Projection &p_projection, const Transform3D &p_cam_transform, uint32_t p_max_voxel_gi_instances, RID &r_trace_set, RID &r_filter_set, RID &r_gi_set, Size2i &r_probe_grid_size) {
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+
+	const uint32_t probe_spacing = GLOBAL_GET_CACHED(int, "rendering/global_illumination/voxel_gi/screen_probes/probe_spacing") == 0 ? 8 : 16;
+	const uint32_t trace_steps = CLAMP(GLOBAL_GET_CACHED(int, "rendering/global_illumination/voxel_gi/screen_probes/screen_trace_steps"), 0, 64);
+	const float trace_distance = MAX(0.0f, GLOBAL_GET_CACHED(float, "rendering/global_illumination/voxel_gi/screen_probes/screen_trace_distance"));
+	const uint32_t temporal_frames = MAX(1, GLOBAL_GET_CACHED(int, "rendering/global_illumination/voxel_gi/screen_probes/temporal_frames"));
+
+	Size2i internal_size = p_render_buffers->get_internal_size();
+	Size2i buffer_size = p_rbgi->using_half_size_gi ? Size2i(internal_size.x >> 1, internal_size.y >> 1) : internal_size;
+	Size2i probe_grid_size = Size2i(Math::division_round_up(internal_size.x, (int)probe_spacing), Math::division_round_up(internal_size.y, (int)probe_spacing));
+	r_probe_grid_size = probe_grid_size;
+
+	// (RE)CREATE BUFFERS
+
+	// One set of textures per spacing, so changing it at run-time doesn't need to recreate the others.
+	// Probes are traced into the first one, and filtered into the second one.
+	const StringName probe_sh_name = probe_spacing == 8 ? SNAME("probe_sh_8") : SNAME("probe_sh_16");
+	const StringName probe_sh_filtered_name = probe_spacing == 8 ? SNAME("probe_sh_filtered_8") : SNAME("probe_sh_filtered_16");
+	if (!p_render_buffers->has_texture(RB_SCOPE_GI, probe_sh_name)) {
+		p_render_buffers->create_texture(RB_SCOPE_GI, probe_sh_name, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, probe_grid_size, 4);
+		p_render_buffers->create_texture(RB_SCOPE_GI, probe_sh_filtered_name, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, probe_grid_size, 4);
+	}
+
+	static const StringName history_names[2] = { SNAME("probe_history_0"), SNAME("probe_history_1") };
+	static const StringName history_surface_names[2] = { SNAME("probe_history_surface_0"), SNAME("probe_history_surface_1") };
+	for (int i = 0; i < 2; i++) {
+		if (!p_render_buffers->has_texture(RB_SCOPE_GI, history_names[i])) {
+			p_render_buffers->create_texture(RB_SCOPE_GI, history_names[i], RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, buffer_size, 1);
+			p_render_buffers->create_texture(RB_SCOPE_GI, history_surface_names[i], RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, buffer_size, 1);
+			p_rbgi->screen_probe_history_valid = false;
+		}
+	}
+
+	if (p_rbgi->screen_probe_trace_ubo.is_null()) {
+		p_rbgi->screen_probe_trace_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(ScreenProbeTraceParams));
+		p_rbgi->screen_probe_gi_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(ScreenProbeGIParams));
+		p_rbgi->screen_probe_history_valid = false;
+	}
+
+	// The last frame buffer only holds something once it has been copied into at the end of a frame.
+	uint32_t last_frame_mipmaps = p_render_buffers->get_texture_format(RB_SCOPE_SSLF, RB_LAST_FRAME).mipmaps;
+	RID last_frame = p_render_buffers->get_texture_slice(RB_SCOPE_SSLF, RB_LAST_FRAME, 0, 0, 1, last_frame_mipmaps);
+	RID last_frame_base = p_render_buffers->get_texture(RB_SCOPE_SSLF, RB_LAST_FRAME);
+	bool has_last_frame = p_rbgi->screen_probe_history_valid && p_rbgi->screen_probe_last_frame == last_frame_base;
+	p_rbgi->screen_probe_last_frame = last_frame_base;
+
+	// UPDATE PARAMETERS
+
+	Projection correction;
+	correction.set_depth_correction(true);
+	Projection projection = correction * p_projection;
+
+	// Camera relative world space (what the GI pass works in) to the previous frame.
+	Transform3D cam_translation;
+	cam_translation.origin = p_cam_transform.origin;
+	Transform3D to_prev_view = p_rbgi->screen_probe_prev_transform.affine_inverse() * cam_translation;
+	Projection reprojection = p_rbgi->screen_probe_prev_projection * Projection(to_prev_view);
+
+	Transform3D cam_basis;
+	cam_basis.basis = p_cam_transform.basis;
+
+	{
+		ScreenProbeTraceParams params;
+		memset(&params, 0, sizeof(ScreenProbeTraceParams));
+		RendererRD::MaterialStorage::store_camera(projection.inverse(), params.inv_projection);
+		RendererRD::MaterialStorage::store_camera(projection, params.projection);
+		RendererRD::MaterialStorage::store_camera(reprojection, params.reprojection);
+		RendererRD::MaterialStorage::store_transform(cam_basis, params.cam_basis);
+		params.screen_size[0] = internal_size.x;
+		params.screen_size[1] = internal_size.y;
+		params.probe_grid_size[0] = probe_grid_size.x;
+		params.probe_grid_size[1] = probe_grid_size.y;
+		params.probe_spacing = probe_spacing;
+		params.frame = p_rbgi->screen_probe_frame;
+		params.max_voxel_gi_instances = p_max_voxel_gi_instances;
+		params.screen_trace_steps = trace_steps;
+		params.screen_trace_distance = trace_distance;
+		params.z_near = p_projection.get_z_near();
+		params.pixel_size = 2.0 / (internal_size.y * Math::abs(p_projection.columns[1][1]));
+		params.last_frame_max_lod = float(last_frame_mipmaps - 1);
+		params.orthogonal = p_projection.is_orthogonal();
+		params.has_last_frame = has_last_frame;
+		RD::get_singleton()->buffer_update(p_rbgi->screen_probe_trace_ubo, 0, sizeof(ScreenProbeTraceParams), &params);
+	}
+
+	uint32_t history_read = p_rbgi->screen_probe_history_index;
+	uint32_t history_write = history_read ^ 1;
+
+	{
+		ScreenProbeGIParams params;
+		memset(&params, 0, sizeof(ScreenProbeGIParams));
+		RendererRD::MaterialStorage::store_camera(reprojection, params.reprojection);
+		params.prev_view_z[0] = -to_prev_view.basis.rows[2][0];
+		params.prev_view_z[1] = -to_prev_view.basis.rows[2][1];
+		params.prev_view_z[2] = -to_prev_view.basis.rows[2][2];
+		params.prev_view_z[3] = -to_prev_view.origin.z;
+		params.probe_grid_size[0] = probe_grid_size.x;
+		params.probe_grid_size[1] = probe_grid_size.y;
+		params.probe_spacing = probe_spacing;
+		params.frame = p_rbgi->screen_probe_frame;
+		params.buffer_size[0] = buffer_size.x;
+		params.buffer_size[1] = buffer_size.y;
+		params.history_blend = 1.0 / temporal_frames;
+		params.history_valid = p_rbgi->screen_probe_history_valid;
+		RD::get_singleton()->buffer_update(p_rbgi->screen_probe_gi_ubo, 0, sizeof(ScreenProbeGIParams), &params);
+	}
+
+	// UNIFORM SETS
+
+	RID linear_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RID mipmap_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RID probe_sh = p_render_buffers->get_texture(RB_SCOPE_GI, probe_sh_name);
+	RID probe_sh_filtered = p_render_buffers->get_texture(RB_SCOPE_GI, probe_sh_filtered_name);
+
+	{
+		RD::Uniform u_depth(RD::UNIFORM_TYPE_TEXTURE, 0, p_render_buffers->get_depth_texture(0));
+		RD::Uniform u_normal_roughness(RD::UNIFORM_TYPE_TEXTURE, 1, p_normal_roughness);
+		RD::Uniform u_voxel_gi_buffer(RD::UNIFORM_TYPE_TEXTURE, 2, p_voxel_gi_buffer.is_valid() ? p_voxel_gi_buffer : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK));
+		RD::Uniform u_last_frame(RD::UNIFORM_TYPE_TEXTURE, 3, last_frame);
+		RD::Uniform u_voxel_gis(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 4, p_rbgi->get_voxel_gi_buffer());
+		RD::Uniform u_voxel_gi_textures;
+		u_voxel_gi_textures.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u_voxel_gi_textures.binding = 5;
+		for (int i = 0; i < MAX_VOXEL_GI_INSTANCES; i++) {
+			u_voxel_gi_textures.append_id(p_rbgi->voxel_gi_textures[i]);
+		}
+		RD::Uniform u_linear_sampler(RD::UNIFORM_TYPE_SAMPLER, 6, linear_sampler);
+		RD::Uniform u_mipmap_sampler(RD::UNIFORM_TYPE_SAMPLER, 7, mipmap_sampler);
+		RD::Uniform u_probe_sh(RD::UNIFORM_TYPE_IMAGE, 8, probe_sh);
+		RD::Uniform u_params(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 9, p_rbgi->screen_probe_trace_ubo);
+		RD::Uniform u_voxel_gi_aniso_textures;
+		u_voxel_gi_aniso_textures.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u_voxel_gi_aniso_textures.binding = 10;
+		for (int i = 0; i < MAX_VOXEL_GI_INSTANCES; i++) {
+			u_voxel_gi_aniso_textures.append_id(p_rbgi->voxel_gi_aniso_textures[i]);
+		}
+
+		RID trace_shader = screen_probes_shader.version_get_shader(screen_probes_shader_version, SCREEN_PROBES_TRACE);
+		r_trace_set = UniformSetCacheRD::get_singleton()->get_cache(trace_shader, 0, u_depth, u_normal_roughness, u_voxel_gi_buffer, u_last_frame, u_voxel_gis, u_voxel_gi_textures, u_linear_sampler, u_mipmap_sampler, u_probe_sh, u_params, u_voxel_gi_aniso_textures);
+	}
+
+	{
+		RD::Uniform u_depth(RD::UNIFORM_TYPE_TEXTURE, 0, p_render_buffers->get_depth_texture(0));
+		RD::Uniform u_normal_roughness(RD::UNIFORM_TYPE_TEXTURE, 1, p_normal_roughness);
+		RD::Uniform u_linear_sampler(RD::UNIFORM_TYPE_SAMPLER, 6, linear_sampler);
+		RD::Uniform u_probe_sh_filtered(RD::UNIFORM_TYPE_IMAGE, 8, probe_sh_filtered);
+		RD::Uniform u_params(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 9, p_rbgi->screen_probe_trace_ubo);
+		RD::Uniform u_probe_sh(RD::UNIFORM_TYPE_TEXTURE, 11, probe_sh);
+
+		RID filter_shader = screen_probes_shader.version_get_shader(screen_probes_shader_version, SCREEN_PROBES_FILTER);
+		r_filter_set = UniformSetCacheRD::get_singleton()->get_cache(filter_shader, 0, u_depth, u_normal_roughness, u_linear_sampler, u_probe_sh_filtered, u_params, u_probe_sh);
+	}
+
+	{
+		RD::Uniform u_probe_sh(RD::UNIFORM_TYPE_TEXTURE, 0, probe_sh_filtered);
+		RD::Uniform u_history(RD::UNIFORM_TYPE_TEXTURE, 1, p_render_buffers->get_texture(RB_SCOPE_GI, history_names[history_read]));
+		RD::Uniform u_history_out(RD::UNIFORM_TYPE_IMAGE, 2, p_render_buffers->get_texture(RB_SCOPE_GI, history_names[history_write]));
+		RD::Uniform u_history_surface(RD::UNIFORM_TYPE_TEXTURE, 3, p_render_buffers->get_texture(RB_SCOPE_GI, history_surface_names[history_read]));
+		RD::Uniform u_history_surface_out(RD::UNIFORM_TYPE_IMAGE, 4, p_render_buffers->get_texture(RB_SCOPE_GI, history_surface_names[history_write]));
+		RD::Uniform u_params(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 5, p_rbgi->screen_probe_gi_ubo);
+
+		bool vrs_supported = RendererSceneRenderRD::get_singleton()->is_vrs_supported();
+		int variant_base = vrs_supported ? MODE_MAX : 0;
+		RID gi_shader = shader.version_get_shader(shader_version, variant_base + MODE_VOXEL_GI_SCREEN_PROBES);
+		r_gi_set = UniformSetCacheRD::get_singleton()->get_cache(gi_shader, 1, u_probe_sh, u_history, u_history_out, u_history_surface, u_history_surface_out, u_params);
+	}
 }
 
 RID GI::voxel_gi_instance_create(RID p_base) {

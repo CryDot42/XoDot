@@ -120,6 +120,18 @@ private:
 	void _sort();
 
 public:
+	enum {
+		MIN_SUBDIV = 16,
+		MAX_SUBDIV = 1024,
+	};
+
+	// Rounds a voxel count (along the longest axis) to the closest one that keeps an exact mipmap chain
+	// down to 8-16 cells, which is what cone tracing needs. Powers of two are always kept as-is.
+	static int snap_subdiv(int p_subdiv);
+	// Voxel counts per axis for a volume of the given size, using p_subdiv voxels along the longest axis.
+	static Vector3i get_axis_cell_count(int p_subdiv, const Vector3 &p_size);
+
+	// p_subdiv is the voxel count along the longest axis of p_bounds (see snap_subdiv()).
 	void begin_bake(int p_subdiv, const AABB &p_bounds, float p_exposure_normalization);
 	int get_bake_steps(Ref<Mesh> &p_mesh) const;
 	BakeResult plot_mesh(const Transform3D &p_xform, Ref<Mesh> &p_mesh, const Vector<Ref<Material>> &p_materials, const Ref<Material> &p_override_material, BakeStepFunc p_bake_step_function);

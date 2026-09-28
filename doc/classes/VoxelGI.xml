@@ -36,6 +36,11 @@
 		<member name="camera_attributes" type="CameraAttributes" setter="set_camera_attributes" getter="get_camera_attributes">
 			The [CameraAttributes] resource that specifies exposure levels to bake at. Auto-exposure and non exposure properties will be ignored. Exposure settings should be used to reduce the dynamic range present when baking. If exposure is too high, the [VoxelGI] will have banding artifacts or may have over-exposure artifacts.
 		</member>
+		<member name="custom_subdiv" type="int" setter="set_custom_subdiv" getter="get_custom_subdiv" default="128">
+			The number of voxels along the longest axis of [member size] when [member subdiv] is [constant SUBDIV_CUSTOM]. Can be set between [code]16[/code] and [code]1024[/code]. Values that aren't a power of two are rounded to a multiple of 1/8 of the power of two below them (for example, [code]200[/code] becomes [code]208[/code] and [code]100[/code] becomes [code]104[/code]), so that mipmaps can still be generated for the lower levels of detail.
+			Video memory usage and bake time grow with the cube of this value: doubling it uses about 8 times more memory. A [VoxelGI] with [code]1024[/code] voxels on every axis needs over 4 GB of video memory. A configuration warning is displayed if the estimated video memory usage exceeds 1 GB.
+			[b]Note:[/b] The [VoxelGI] needs to be baked again for changes to take effect.
+		</member>
 		<member name="data" type="VoxelGIData" setter="set_probe_data" getter="get_probe_data">
 			The [VoxelGIData] resource that holds the data for this [VoxelGI].
 		</member>
@@ -44,7 +49,7 @@
 			[b]Note:[/b] If you make the size larger without increasing the number of subdivisions with [member subdiv], the size of each cell will increase and result in less detailed lighting.
 		</member>
 		<member name="subdiv" type="int" setter="set_subdiv" getter="get_subdiv" enum="VoxelGI.Subdiv" default="1">
-			Number of times to subdivide the grid that the [VoxelGI] operates on. A higher number results in finer detail and thus higher visual quality, while lower numbers result in better performance.
+			Number of times to subdivide the grid that the [VoxelGI] operates on. A higher number results in finer detail and thus higher visual quality, while lower numbers result in better performance. Use [constant SUBDIV_CUSTOM] to set the number of subdivisions with [member custom_subdiv] instead.
 		</member>
 	</members>
 	<constants>
@@ -60,7 +65,10 @@
 		<constant name="SUBDIV_512" value="3" enum="Subdiv">
 			Use 512 subdivisions. This is the highest quality setting, but the slowest. On lower-end hardware, this could cause the GPU to stall.
 		</constant>
-		<constant name="SUBDIV_MAX" value="4" enum="Subdiv">
+		<constant name="SUBDIV_CUSTOM" value="4" enum="Subdiv">
+			Use the number of subdivisions set in [member custom_subdiv].
+		</constant>
+		<constant name="SUBDIV_MAX" value="5" enum="Subdiv">
 			Represents the size of the [enum Subdiv] enum.
 		</constant>
 	</constants>

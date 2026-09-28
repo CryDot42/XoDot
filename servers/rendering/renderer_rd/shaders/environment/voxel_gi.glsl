@@ -75,11 +75,21 @@ layout(set = 1, binding = 0) uniform texture2D area_light_atlas;
 
 #endif // MODE COMPUTE LIGHT
 
-#ifdef MODE_SECOND_BOUNCE
+#if defined(MODE_SECOND_BOUNCE) || defined(MODE_FEEDBACK_BOUNCE)
 
 layout(set = 0, binding = 5) uniform texture3D color_texture;
 
-#endif // MODE_SECOND_BOUNCE
+#endif // MODE_SECOND_BOUNCE || MODE_FEEDBACK_BOUNCE
+
+#ifdef MODE_FEEDBACK_BOUNCE
+
+// Direct light of every cell, kept apart so bounces can be gathered again without accumulating.
+layout(set = 0, binding = 6, std430) restrict readonly buffer DirectLight {
+	vec4 data[];
+}
+direct_light;
+
+#endif // MODE_FEEDBACK_BOUNCE
 
 #ifndef MODE_DYNAMIC
 
@@ -94,8 +104,13 @@ layout(push_constant, std430) uniform Params {
 	uint light_count;
 	uint cell_offset;
 	uint cell_count;
-	float aniso_strength;
+	float bounce_feedback; // Only used by MODE_FEEDBACK_BOUNCE.
 	float cell_size;
+
+	ivec3 region_begin; // Only used by MODE_WRITE_TEXTURE_REGION, in cells.
+	uint cell_stride; // Process every Nth cell (0 or 1 for all of them), to spread updates over frames.
+	ivec3 region_end; // Exclusive.
+	uint cell_phase;
 }
 params;
 
@@ -112,6 +127,12 @@ layout(set = 0, binding = 10) uniform sampler texture_sampler;
 #ifdef MODE_WRITE_TEXTURE
 
 layout(rgba8, set = 0, binding = 5) uniform restrict writeonly image3D color_tex;
+
+#endif
+
+#ifdef MODE_WRITE_NORMAL_MASK
+
+layout(r8ui, set = 0, binding = 5) uniform restrict writeonly uimage3D normal_mask;
 
 #endif
 
@@ -404,6 +425,68 @@ bool compute_area_light(uint index, vec3 pos, vec3 normal, inout vec3 light) {
 
 #endif // MODE COMPUTE LIGHT
 
+#if defined(MODE_SECOND_BOUNCE) || defined(MODE_FEEDBACK_BOUNCE)
+
+// Light bouncing off the cell, gathered from the voxel texture with 6 cones around its normal.
+vec3 gather_bounce(uvec3 posu, uint cell_index, vec3 albedo) {
+	vec3 pos = vec3(posu) + vec3(0.5);
+	vec4 normal = unpackSnorm4x8(cell_data.data[cell_index].normal);
+
+	vec3 accum = vec3(0.0);
+
+	if (length(normal.xyz) > 0.2) {
+		vec3 v0 = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+		vec3 tangent = normalize(cross(v0, normal.xyz));
+		vec3 bitangent = normalize(cross(tangent, normal.xyz));
+		mat3 normal_mat = mat3(tangent, bitangent, normal.xyz);
+
+#define MAX_CONE_DIRS 6
+
+		vec3 cone_dirs[MAX_CONE_DIRS] = vec3[](
+				vec3(0.0, 0.0, 1.0),
+				vec3(0.866025, 0.0, 0.5),
+				vec3(0.267617, 0.823639, 0.5),
+				vec3(-0.700629, 0.509037, 0.5),
+				vec3(-0.700629, -0.509037, 0.5),
+				vec3(0.267617, -0.823639, 0.5));
+
+		float cone_weights[MAX_CONE_DIRS] = float[](0.25, 0.15, 0.15, 0.15, 0.15, 0.15);
+		float tan_half_angle = 0.577;
+
+		for (int i = 0; i < MAX_CONE_DIRS; i++) {
+			vec3 direction = normal_mat * cone_dirs[i];
+			vec4 color = vec4(0.0);
+			{
+				float dist = 1.5;
+				float max_distance = length(vec3(params.limits));
+				vec3 cell_size = 1.0 / vec3(params.limits);
+
+				while (dist < max_distance && color.a < 0.95) {
+					float diameter = max(1.0, 2.0 * tan_half_angle * dist);
+					vec3 uvw_pos = (pos + dist * direction) * cell_size;
+					float half_diameter = diameter * 0.5;
+					//check if outside, then break
+					//if ( any(greaterThan(abs(uvw_pos - 0.5),vec3(0.5f + half_diameter * cell_size)) ) ) {
+					//	break;
+					//}
+
+					float log2_diameter = log2(diameter);
+					vec4 scolor = textureLod(sampler3D(color_texture, texture_sampler), uvw_pos, log2_diameter);
+					float a = (1.0 - color.a);
+					color += a * scolor;
+					dist += half_diameter;
+				}
+			}
+			color *= cone_weights[i] * vec4(albedo, 1.0) * params.dynamic_range; //restore range
+			accum += color.rgb;
+		}
+	}
+
+	return accum;
+}
+
+#endif // MODE_SECOND_BOUNCE || MODE_FEEDBACK_BOUNCE
+
 void main() {
 #ifndef MODE_DYNAMIC
 
@@ -411,7 +494,7 @@ void main() {
 	if (cell_index >= params.cell_count) {
 		return;
 	}
-	cell_index += params.cell_offset;
+	cell_index = params.cell_offset + cell_index * max(1u, params.cell_stride) + params.cell_phase;
 
 	uvec3 posu = uvec3(cell_data.data[cell_index].position & 0x7FF, (cell_data.data[cell_index].position >> 11) & 0x3FF, cell_data.data[cell_index].position >> 21);
 	vec4 albedo = unpackUnorm4x8(cell_data.data[cell_index].albedo);
@@ -463,63 +546,19 @@ void main() {
 	/////////////////SECOND BOUNCE///////////////////////////////
 
 #ifdef MODE_SECOND_BOUNCE
-	vec3 pos = vec3(posu) + vec3(0.5);
-	ivec3 ipos = ivec3(posu);
-	vec4 normal = unpackSnorm4x8(cell_data.data[cell_index].normal);
-
-	vec3 accum = outputs.data[cell_index].rgb;
-
-	if (length(normal.xyz) > 0.2) {
-		vec3 v0 = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-		vec3 tangent = normalize(cross(v0, normal.xyz));
-		vec3 bitangent = normalize(cross(tangent, normal.xyz));
-		mat3 normal_mat = mat3(tangent, bitangent, normal.xyz);
-
-#define MAX_CONE_DIRS 6
-
-		vec3 cone_dirs[MAX_CONE_DIRS] = vec3[](
-				vec3(0.0, 0.0, 1.0),
-				vec3(0.866025, 0.0, 0.5),
-				vec3(0.267617, 0.823639, 0.5),
-				vec3(-0.700629, 0.509037, 0.5),
-				vec3(-0.700629, -0.509037, 0.5),
-				vec3(0.267617, -0.823639, 0.5));
-
-		float cone_weights[MAX_CONE_DIRS] = float[](0.25, 0.15, 0.15, 0.15, 0.15, 0.15);
-		float tan_half_angle = 0.577;
-
-		for (int i = 0; i < MAX_CONE_DIRS; i++) {
-			vec3 direction = normal_mat * cone_dirs[i];
-			vec4 color = vec4(0.0);
-			{
-				float dist = 1.5;
-				float max_distance = length(vec3(params.limits));
-				vec3 cell_size = 1.0 / vec3(params.limits);
-
-				while (dist < max_distance && color.a < 0.95) {
-					float diameter = max(1.0, 2.0 * tan_half_angle * dist);
-					vec3 uvw_pos = (pos + dist * direction) * cell_size;
-					float half_diameter = diameter * 0.5;
-					//check if outside, then break
-					//if ( any(greaterThan(abs(uvw_pos - 0.5),vec3(0.5f + half_diameter * cell_size)) ) ) {
-					//	break;
-					//}
-
-					float log2_diameter = log2(diameter);
-					vec4 scolor = textureLod(sampler3D(color_texture, texture_sampler), uvw_pos, log2_diameter);
-					float a = (1.0 - color.a);
-					color += a * scolor;
-					dist += half_diameter;
-				}
-			}
-			color *= cone_weights[i] * vec4(albedo.rgb, 1.0) * params.dynamic_range; //restore range
-			accum += color.rgb;
-		}
-	}
-
-	outputs.data[cell_index] = vec4(accum, 0.0);
-
+	outputs.data[cell_index] = vec4(outputs.data[cell_index].rgb + gather_bounce(posu, cell_index, albedo.rgb), 0.0);
 #endif // MODE_SECOND_BOUNCE
+
+	/////////////////FEEDBACK BOUNCE///////////////////////////////
+
+#ifdef MODE_FEEDBACK_BOUNCE
+	// The texture already holds previous bounces, so gathering from it again adds one more each time.
+	vec3 accum = direct_light.data[cell_index].rgb;
+	if (params.bounce_feedback > 0.0) {
+		accum += gather_bounce(posu, cell_index, albedo.rgb) * params.bounce_feedback;
+	}
+	outputs.data[cell_index] = vec4(accum, 0.0);
+#endif // MODE_FEEDBACK_BOUNCE
 
 	/////////////////UPDATE MIPMAPS///////////////////////////////
 
@@ -547,7 +586,33 @@ void main() {
 
 #ifdef MODE_WRITE_TEXTURE
 	{
+#ifdef MODE_WRITE_TEXTURE_REGION
+		if (any(lessThan(ivec3(posu), params.region_begin)) || any(greaterThanEqual(ivec3(posu), params.region_end))) {
+			return;
+		}
+#endif
 		imageStore(color_tex, ivec3(posu), vec4(outputs.data[cell_index].rgb / params.dynamic_range, albedo.a));
+	}
+#endif
+
+	///////////////////WRITE NORMAL MASK/////////////////////////////
+
+#ifdef MODE_WRITE_NORMAL_MASK
+	{
+		// Directions the surface in the voxel clearly faces, in the order used by the anisotropic mipmaps
+		// (+X, -X, +Y, -Y, +Z, -Z). No bits means unknown (thin geometry, fighting normals).
+		vec3 normal = unpackSnorm4x8(cell_data.data[cell_index].normal).xyz;
+		uint mask = 0u;
+		if (length(normal) > 0.2) {
+			normal = normalize(normal);
+			float facing[6] = float[](normal.x, -normal.x, normal.y, -normal.y, normal.z, -normal.z);
+			for (uint i = 0u; i < 6u; i++) {
+				if (facing[i] > 0.25) {
+					mask |= 1u << i;
+				}
+			}
+		}
+		imageStore(normal_mask, ivec3(posu), uvec4(mask));
 	}
 #endif
 

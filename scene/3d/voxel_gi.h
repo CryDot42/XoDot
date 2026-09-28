@@ -104,6 +104,7 @@ public:
 		SUBDIV_128,
 		SUBDIV_256,
 		SUBDIV_512,
+		SUBDIV_CUSTOM,
 		SUBDIV_MAX
 
 	};
@@ -118,6 +119,7 @@ private:
 	RID voxel_gi;
 
 	Subdiv subdiv = SUBDIV_128;
+	int custom_subdiv = 128;
 	Vector3 size = Vector3(20, 20, 20);
 	Ref<CameraAttributes> camera_attributes;
 
@@ -135,6 +137,7 @@ private:
 
 protected:
 	static void _bind_methods();
+	void _validate_property(PropertyInfo &p_property) const;
 #ifndef DISABLE_DEPRECATED
 	bool _set(const StringName &p_name, const Variant &p_value);
 	bool _get(const StringName &p_name, Variant &r_property) const;
@@ -150,6 +153,12 @@ public:
 
 	void set_subdiv(Subdiv p_subdiv);
 	Subdiv get_subdiv() const;
+
+	void set_custom_subdiv(int p_subdiv);
+	int get_custom_subdiv() const;
+
+	// Voxel count along the longest axis, resolving the Subdiv preset.
+	int get_subdiv_value() const;
 
 	void set_size(const Vector3 &p_size);
 	Vector3 get_size() const;
