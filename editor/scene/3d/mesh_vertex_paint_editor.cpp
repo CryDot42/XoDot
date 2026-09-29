@@ -41,6 +41,7 @@
 #include "editor/editor_node.h"
 #include "editor/editor_string_names.h"
 #include "editor/editor_undo_redo_manager.h"
+#include "editor/scene/3d/node_3d_editor_plugin.h"
 #include "editor/scene/3d/node_3d_editor_viewport.h"
 #include "editor/themes/editor_scale.h"
 #include "scene/3d/camera_3d.h"
@@ -1167,19 +1168,36 @@ EditorPlugin::AfterGUIInput MeshVertexPaintEditor::forward_3d_gui_input(Camera3D
 /* UI */
 
 void MeshVertexPaintEditor::_update_preview() {
+	const bool painting = _is_painting_enabled();
 	const int mode = preview_mode ? preview_mode->get_selected_id() : PREVIEW_MATERIAL;
-	const bool preview_enabled = _is_painting_enabled() && mode != PREVIEW_MATERIAL;
+	bool gizmo_changed = false;
 
 	MeshInstance3D *previewed = ObjectDB::get_instance<MeshInstance3D>(preview_node_id);
-	if (previewed && (!preview_enabled || previewed != node)) {
+	if (previewed && (!painting || previewed != node)) {
 		const Ref<Material> material_override = previewed->get_material_override();
 		RS::get_singleton()->instance_geometry_set_material_override(previewed->get_instance(), material_override.is_valid() ? material_override->get_rid() : RID());
+		gizmo_changed = !previewed->is_transform_gizmo_visible();
+		previewed->set_transform_gizmo_visible(true);
 	}
 	preview_node_id = ObjectID();
-	if (preview_enabled) {
-		preview_material->set_shader_parameter("channel", mode - PREVIEW_VERTEX_COLORS);
-		RS::get_singleton()->instance_geometry_set_material_override(node->get_instance(), preview_material->get_rid());
+
+	if (painting) {
+		RID instance_material;
+		if (mode == PREVIEW_MATERIAL) {
+			const Ref<Material> material_override = node->get_material_override();
+			instance_material = material_override.is_valid() ? material_override->get_rid() : RID();
+		} else {
+			preview_material->set_shader_parameter("channel", mode - PREVIEW_VERTEX_COLORS);
+			instance_material = preview_material->get_rid();
+		}
+		RS::get_singleton()->instance_geometry_set_material_override(node->get_instance(), instance_material);
+		// The transform gizmo would be in the way of the brush.
+		gizmo_changed = gizmo_changed || node->is_transform_gizmo_visible();
+		node->set_transform_gizmo_visible(false);
 		preview_node_id = node->get_instance_id();
+	}
+	if (gizmo_changed && Node3DEditor::get_singleton()) {
+		Node3DEditor::get_singleton()->update_transform_gizmo();
 	}
 }
 
@@ -1350,6 +1368,11 @@ void MeshVertexPaintEditor::set_active(bool p_active) {
 
 void MeshVertexPaintEditor::_notification(int p_what) {
 	switch (p_what) {
+		case NOTIFICATION_POSTINITIALIZE: {
+			// The signals of the class are only known once it's initialized, after the constructor.
+			connect("closed", callable_mp(this, &MeshVertexPaintEditor::_dock_closed));
+		} break;
+
 		case NOTIFICATION_THEME_CHANGED: {
 			tool_buttons[TOOL_PAINT]->set_button_icon(get_editor_theme_icon(SNAME("Paint")));
 			tool_buttons[TOOL_SMOOTH]->set_button_icon(get_editor_theme_icon(SNAME("CurveLinear")));
@@ -1418,7 +1441,6 @@ MeshVertexPaintEditor::MeshVertexPaintEditor() {
 	set_global(false);
 	set_transient(true);
 	set_closable(true);
-	connect("closed", callable_mp(this, &MeshVertexPaintEditor::_dock_closed));
 
 	ScrollContainer *scroll = memnew(ScrollContainer);
 	scroll->set_horizontal_scroll_mode(ScrollContainer::SCROLL_MODE_DISABLED);
@@ -1622,6 +1644,7 @@ MeshVertexPaintEditor::~MeshVertexPaintEditor() {
 	if (previewed) {
 		const Ref<Material> material_override = previewed->get_material_override();
 		RS::get_singleton()->instance_geometry_set_material_override(previewed->get_instance(), material_override.is_valid() ? material_override->get_rid() : RID());
+		previewed->set_transform_gizmo_visible(true);
 	}
 	_clear_cache();
 	if (cursor_instance.is_valid()) {

@@ -149,6 +149,7 @@ private:
 	double info_timer = 0.0;
 
 	// Preview of the vertex colors, as the material override of the rendering instance (never saved).
+	// The transform gizmo of the painted node is also hidden.
 	Ref<Shader> preview_shader;
 	Ref<ShaderMaterial> preview_material;
 	ObjectID preview_node_id;
