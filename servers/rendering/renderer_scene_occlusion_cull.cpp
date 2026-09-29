@@ -308,35 +308,35 @@ bool RendererSceneOcclusionCull::HZBuffer::reproject_depth(const DepthReadback &
 	reprojected_texels.resize(src_texel_count);
 	bool any_written = false;
 
-	ReprojectionData data;
-	data.src_size = src_size;
-	data.z_near = p_cam_projection.get_z_near();
-	data.target_scale = Vector2(size) * 0.5f;
-	data.cam_orthogonal = p_cam_orthogonal;
+	ReprojectionData reprojection_data;
+	reprojection_data.src_size = src_size;
+	reprojection_data.z_near = p_cam_projection.get_z_near();
+	reprojection_data.target_scale = Vector2(size) * 0.5f;
+	reprojection_data.cam_orthogonal = p_cam_orthogonal;
 
 	// Without parallax (i.e. when a perspective camera only rotates), nothing can be disoccluded.
 	const bool find_disocclusions = p_cam_orthogonal || p_readback.cam_orthogonal || !src_view_to_view.origin.is_zero_approx();
 
 	for (uint32_t v = 0; v < p_readback.view_count; v++) {
-		data.depth = &p_readback.depth[v * src_texel_count];
-		data.src_ndc_to_view = Projection(src_view_to_view) * p_readback.inv_projection[v];
-		data.src_ndc_to_clip = p_cam_projection * data.src_ndc_to_view;
+		reprojection_data.depth = &p_readback.depth[v * src_texel_count];
+		reprojection_data.src_ndc_to_view = Projection(src_view_to_view) * p_readback.inv_projection[v];
+		reprojection_data.src_ndc_to_clip = p_cam_projection * reprojection_data.src_ndc_to_view;
 
 		if (src_texel_count >= THREADED_REPROJECTION_MIN_TEXELS) {
-			WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &HZBuffer::_reproject_row, &data, src_size.y, -1, true, SNAME("HZBOcclusionReproject"));
+			WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &HZBuffer::_reproject_row, &reprojection_data, src_size.y, -1, true, SNAME("HZBOcclusionReproject"));
 			WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group_task);
 
 			if (find_disocclusions) {
-				group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &HZBuffer::_find_disocclusions_row, &data, src_size.y, -1, true, SNAME("HZBOcclusionFindDisocclusions"));
+				group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &HZBuffer::_find_disocclusions_row, &reprojection_data, src_size.y, -1, true, SNAME("HZBOcclusionFindDisocclusions"));
 				WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group_task);
 			}
 		} else {
 			for (int y = 0; y < src_size.y; y++) {
-				_reproject_row(y, &data);
+				_reproject_row(y, &reprojection_data);
 			}
 			if (find_disocclusions) {
 				for (int y = 0; y < src_size.y; y++) {
-					_find_disocclusions_row(y, &data);
+					_find_disocclusions_row(y, &reprojection_data);
 				}
 			}
 		}
