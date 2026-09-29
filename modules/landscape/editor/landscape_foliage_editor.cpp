@@ -37,6 +37,7 @@
 #include "core/object/class_db.h"
 #include "editor/editor_node.h"
 #include "editor/editor_undo_redo_manager.h"
+#include "editor/file_system/editor_file_system.h"
 #include "editor/gui/editor_file_dialog.h"
 #include "editor/inspector/editor_resource_picker.h"
 #include "editor/inspector/editor_resource_preview.h"
@@ -1185,6 +1186,90 @@ void LandscapeFoliagePanel::_update_debug_controls() {
 	updating = false;
 }
 
+void LandscapeFoliagePanel::_gpu_indirect_toggled(bool p_pressed) {
+	LandscapeFoliage3D *foliage = _get_foliage();
+	if (!foliage || updating) {
+		return;
+	}
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(TTR("Set Foliage GPU Culling"), UndoRedo::MERGE_DISABLE, foliage);
+	undo_redo->add_do_property(foliage, "gpu_indirect", p_pressed);
+	undo_redo->add_undo_property(foliage, "gpu_indirect", foliage->is_gpu_indirect());
+	undo_redo->add_do_method(this, "_update_streaming_controls");
+	undo_redo->add_undo_method(this, "_update_streaming_controls");
+	undo_redo->commit_action();
+}
+
+void LandscapeFoliagePanel::_save_data_pressed() {
+	const LandscapeFoliage3D *foliage = _get_foliage();
+	if (!foliage) {
+		return;
+	}
+	// Next to the scene by default.
+	String path = foliage->get_data().is_valid() ? foliage->get_data()->get_path() : String();
+	if (!path.is_resource_file()) {
+		const Node *scene = EditorNode::get_singleton()->get_edited_scene();
+		const String scene_path = scene ? scene->get_scene_file_path() : String();
+		const String base = scene_path.is_empty() ? String("res://foliage") : scene_path.get_basename() + "_" + String(foliage->get_name()).to_snake_case();
+		path = base + ".lfdata";
+	}
+	data_dialog->set_current_path(path);
+	data_dialog->popup_file_dialog();
+}
+
+void LandscapeFoliagePanel::_data_path_selected(const String &p_path) {
+	LandscapeFoliage3D *foliage = _get_foliage();
+	if (!foliage) {
+		return;
+	}
+	const Ref<LandscapeFoliageData> before = foliage->get_data();
+	const Error err = foliage->save_to_data_file(p_path);
+	if (err != OK) {
+		EditorNode::get_singleton()->show_warning(vformat(TTR("Can't save the foliage to \"%s\" (%s)."), p_path, error_names[err]));
+		return;
+	}
+	EditorFileSystem::get_singleton()->update_file(p_path);
+	if (foliage->get_data() != before) {
+		// The instances move from the scene to the file (undo puts them back in the scene).
+		EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+		undo_redo->create_action(TTR("Stream Foliage From File"), UndoRedo::MERGE_DISABLE, foliage);
+		undo_redo->add_do_property(foliage, "data", foliage->get_data());
+		undo_redo->add_undo_property(foliage, "data", before);
+		undo_redo->add_do_method(this, "_update_streaming_controls");
+		undo_redo->add_undo_method(this, "_update_streaming_controls");
+		undo_redo->commit_action(false);
+	}
+	_update_streaming_controls();
+}
+
+void LandscapeFoliagePanel::_update_streaming_controls() {
+	const LandscapeFoliage3D *foliage = _get_foliage();
+	updating = true;
+	gpu_indirect->set_disabled(!foliage || !LandscapeFoliage3D::is_gpu_indirect_supported());
+	gpu_indirect->set_pressed_no_signal(foliage && foliage->is_gpu_indirect());
+	save_data->set_disabled(!foliage);
+	updating = false;
+	String status;
+	if (foliage) {
+		const Ref<LandscapeFoliageData> foliage_data = foliage->get_data();
+		if (foliage_data.is_null()) {
+			status = TTR("Instances saved in the scene.");
+		} else if (!foliage_data->get_path().is_resource_file()) {
+			status = TTR("Instances saved in the scene (foliage data).");
+		} else {
+			status = vformat(TTR("Streamed from %s."), foliage_data->get_path().get_file());
+			if (foliage_data->has_unsaved_changes()) {
+				status += " " + TTR("Edits are saved with the scene.");
+			}
+		}
+		if (!LandscapeFoliage3D::is_gpu_indirect_supported()) {
+			status += "\n" + TTR("GPU culling requires the Forward+ or Mobile renderer.");
+		}
+	}
+	data_status->set_text(status);
+	save_data->set_text(foliage && foliage->get_data().is_valid() && foliage->get_data()->get_path().is_resource_file() ? TTR("Save As...") : TTR("Save to File..."));
+}
+
 void LandscapeFoliagePanel::_commit_type_data(const String &p_action, const Vector<int> &p_types, const Vector<PackedByteArray> &p_before) {
 	LandscapeFoliage3D *foliage = _get_foliage();
 	ERR_FAIL_NULL(foliage);
@@ -1469,7 +1554,19 @@ String LandscapeFoliagePanel::get_statistics_text() const {
 		return String();
 	}
 	const Dictionary s = foliage->get_statistics();
-	return vformat(TTR("Foliage: %s instances in %d cells, %d cells drawn (%d sorted per instance), %s instances in %d batches, update %s ms"), _format_count(int64_t(s["instances"])), int64_t(s["cells"]), int64_t(s["cells_rendered"]), int64_t(s["cells_mixed"]), _format_count(int64_t(s["instances_drawn"])), int64_t(s["batches"]), String::num(int64_t(s["update_usec"]) / 1000.0, 2));
+	String text;
+	if (bool(s["gpu_indirect"])) {
+		text = vformat(TTR("Foliage: %s instances in %d cells, GPU culling: %s instances in %d cells, %s drawn (%s shadow casters) in %d batches, %s MB"), _format_count(int64_t(s["instances"])), int64_t(s["cells"]), _format_count(int64_t(s["gpu_instances"])), int64_t(s["cells_rendered"]), _format_count(int64_t(s["instances_drawn"])), _format_count(int64_t(s["gpu_shadow_instances_drawn"])), int64_t(s["batches"]), String::num(int64_t(s["gpu_memory"]) / 1048576.0, 1));
+		if (int64_t(s["gpu_dropped"]) > 0) {
+			text += "\n" + vformat(TTR("%s instances dropped: increase GPU > Max Instances."), _format_count(int64_t(s["gpu_dropped"])));
+		}
+	} else {
+		text = vformat(TTR("Foliage: %s instances in %d cells, %d cells drawn (%d sorted per instance), %s instances in %d batches, update %s ms"), _format_count(int64_t(s["instances"])), int64_t(s["cells"]), int64_t(s["cells_rendered"]), int64_t(s["cells_mixed"]), _format_count(int64_t(s["instances_drawn"])), int64_t(s["batches"]), String::num(int64_t(s["update_usec"]) / 1000.0, 2));
+	}
+	if (foliage->get_data().is_valid()) {
+		text += "\n" + vformat(TTR("Streaming: %d cells loaded, %d loading, %s MB"), int64_t(s["cells_loaded"]), int64_t(s["cells_loading"]), String::num((int64_t(s["loaded_memory"]) + int64_t(s["data_memory"])) / 1048576.0, 1));
+	}
+	return text;
 }
 
 void LandscapeFoliagePanel::process(double p_delta) {
@@ -1511,6 +1608,7 @@ void LandscapeFoliagePanel::process(double p_delta) {
 		info->set_visible(!text.is_empty());
 		stats->set_text(get_statistics_text());
 		_update_debug_controls();
+		_update_streaming_controls();
 	}
 }
 
@@ -1573,6 +1671,7 @@ void LandscapeFoliagePanel::_notification(int p_what) {
 void LandscapeFoliagePanel::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_update_palette"), &LandscapeFoliagePanel::_update_palette);
 	ClassDB::bind_method(D_METHOD("_update_debug_controls"), &LandscapeFoliagePanel::_update_debug_controls);
+	ClassDB::bind_method(D_METHOD("_update_streaming_controls"), &LandscapeFoliagePanel::_update_streaming_controls);
 	ClassDB::bind_method(D_METHOD("_restore_type", "foliage", "index", "type", "data"), &LandscapeFoliagePanel::_restore_type);
 }
 
@@ -1742,6 +1841,25 @@ LandscapeFoliagePanel::LandscapeFoliagePanel() {
 	help->set_custom_minimum_size(Size2(200 * EDSCALE, 0));
 	add_child(help);
 
+	/* Streaming and GPU */
+	add_child(memnew(HSeparator));
+	Label *streaming_title = memnew(Label(TTR("Streaming and GPU")));
+	streaming_title->set_theme_type_variation("HeaderSmall");
+	add_child(streaming_title);
+	data_status = memnew(Label);
+	data_status->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+	data_status->set_custom_minimum_size(Size2(200 * EDSCALE, 0));
+	data_status->set_modulate(Color(1, 1, 1, 0.7));
+	add_child(data_status);
+	save_data = memnew(Button(TTR("Save to File...")));
+	save_data->set_tooltip_text(TTR("Save the instances to a .lfdata file instead of the scene: only the cells within the cull distance of the camera and of the streaming sources are loaded."));
+	save_data->connect(SceneStringName(pressed), callable_mp(this, &LandscapeFoliagePanel::_save_data_pressed));
+	add_child(save_data);
+	gpu_indirect = memnew(CheckBox(TTR("GPU Culling (Indirect)")));
+	gpu_indirect->set_tooltip_text(TTR("Cull the instances and choose their levels of detail on the GPU, drawn with indirect MultiMeshes (Forward+ and Mobile)."));
+	gpu_indirect->connect(SceneStringName(toggled), callable_mp(this, &LandscapeFoliagePanel::_gpu_indirect_toggled));
+	add_child(gpu_indirect);
+
 	/* Debug */
 	add_child(memnew(HSeparator));
 	Label *debug_title = memnew(Label(TTR("Debug")));
@@ -1792,6 +1910,15 @@ LandscapeFoliagePanel::LandscapeFoliagePanel() {
 	fill_confirm->connect(SceneStringName(confirmed), callable_mp(this, &LandscapeFoliagePanel::_fill_confirmed));
 	add_child(fill_confirm);
 
+	data_dialog = memnew(EditorFileDialog);
+	data_dialog->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+	data_dialog->set_access(EditorFileDialog::ACCESS_RESOURCES);
+	data_dialog->set_title(TTR("Save Foliage Data"));
+	data_dialog->add_filter("*.lfdata", TTR("Foliage Data"));
+	data_dialog->connect("file_selected", callable_mp(this, &LandscapeFoliagePanel::_data_path_selected));
+	add_child(data_dialog);
+
 	_update_buttons();
 	_update_debug_controls();
+	_update_streaming_controls();
 }

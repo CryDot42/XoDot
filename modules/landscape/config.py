@@ -13,6 +13,7 @@ def get_doc_classes():
         "LandscapeBrush",
         "LandscapeData",
         "LandscapeFoliage3D",
+        "LandscapeFoliageData",
         "LandscapeFoliageType",
         "LandscapeLayer",
         "LandscapeRoadMaterial",

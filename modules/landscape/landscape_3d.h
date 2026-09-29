@@ -316,6 +316,8 @@ public:
 
 	// Position of the camera used for the LOD (and to build spline meshes and foliage around it).
 	bool get_view_position(Vector3 &r_global) const;
+	// The camera used for the LOD (lod_camera_path, the editor camera or the current camera).
+	Camera3D *get_lod_camera() const { return _get_lod_camera(); }
 
 	// Editor support.
 	void set_brush_preview(bool p_visible, const Vector3 &p_local_center = Vector3(), real_t p_radius = 0.0, real_t p_falloff = 0.0, const Color &p_color = Color(0.25, 0.6, 1.0));

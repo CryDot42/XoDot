@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LandscapeFoliageData" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Instances of a [LandscapeFoliage3D], streamed from a [code].lfdata[/code] file.
+	</brief_description>
+	<description>
+		Stores the instances of the foliage types of a [LandscapeFoliage3D] (one layer per type, in the same order) in square cells of [member chunk_size] meters. A [code].lfdata[/code] file holds an index (instance count and bounds of every cell) and the compressed instances of each cell: loading the file only reads the index, the cells are then loaded on demand by the node, in the background (through [WorldStreaming]), around the camera and the streaming sources.
+		Cells edited by the node are kept in memory until the data is saved (in the editor, when the scene is saved). A data that isn't saved to a file (e.g. embedded in a scene) keeps every cell in memory.
+		The memory used by the streamed cells is reported in the [code]Streaming/Foliage CPU[/code] monitor, the memory of [member LandscapeFoliage3D.gpu_indirect] in [code]Streaming/Foliage GPU[/code].
+		[b]Note:[/b] Create it with [method LandscapeFoliage3D.save_to_data_file] (or the [b]Save to File[/b] button of the Foliage tab of the Landscape dock).
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_cell_count" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="layer" type="int" default="-1" />
+			<description>
+				Returns the number of cells that have instances in the layer [param layer] (all layers if negative).
+			</description>
+		</method>
+		<method name="get_instance_count" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="layer" type="int" default="-1" />
+			<description>
+				Returns the number of instances in the layer [param layer] (all layers if negative), loaded or not.
+			</description>
+		</method>
+		<method name="get_layer_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of layers (foliage types).
+			</description>
+		</method>
+		<method name="get_memory_usage" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the memory in bytes kept by the data: the edited cells not saved yet and the loaded cells not taken by the node yet (the cells loaded by the node are counted by [method LandscapeFoliage3D.get_statistics]).
+			</description>
+		</method>
+		<method name="has_unsaved_changes" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if cells were edited since the data was last saved or loaded.
+			</description>
+		</method>
+		<method name="is_streamed" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the cells are read from a [code].lfdata[/code] file.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="chunk_size" type="float" setter="set_chunk_size" getter="get_chunk_size" default="32.0">
+			Size in meters of the cells. It follows [member LandscapeFoliage3D.chunk_size]: changing it sorts every instance into the new cells (they are kept in memory until the data is saved).
+		</member>
+	</members>
+</class>

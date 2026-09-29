@@ -9,6 +9,7 @@ env_landscape = env_modules.Clone()
 if env["rendering_device"] and "RD_GLSL" in env["BUILDERS"]:
     # GPU quadtree traversal compute shader.
     env_landscape.RD_GLSL("shaders/landscape_lod.glsl")
+    env_landscape.RD_GLSL("shaders/landscape_foliage_cull.glsl")
     env_landscape.Depends(Glob("shaders/*.glsl.gen.h"), ["#glsl_builders.py"])
 
 # Godot source files

@@ -33,8 +33,12 @@
 #include "../landscape_3d.h"
 #include "../landscape_data.h"
 #include "../landscape_foliage_3d.h"
+#include "../landscape_foliage_data.h"
 #include "../landscape_foliage_type.h"
 
+#include "core/config/project_settings.h"
+#include "core/io/dir_access.h"
+#include "core/io/resource_saver.h"
 #include "scene/3d/camera_3d.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/window.h"
@@ -471,6 +475,163 @@ TEST_CASE("[SceneTree][Landscape][Foliage] Debug views and frozen levels of deta
 	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
 	CHECK(int64_t(foliage->get_statistics()["debug_bounds"]) == 0);
 	CHECK(int64_t(foliage->get_statistics()["instances_drawn"]) == 6);
+
+	memdelete(landscape);
+}
+
+static void process_streaming(LandscapeFoliage3D *p_foliage) {
+	// Requests the needed cells, waits for their loads and installs them.
+	p_foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	if (p_foliage->get_data().is_valid()) {
+		p_foliage->get_data()->wait_for_loads();
+	}
+	p_foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	p_foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS); // Rendering updates over the budget of a frame.
+}
+
+TEST_CASE("[SceneTree][Landscape][Foliage] Streamed foliage data") {
+	const String path = TestUtils::get_temp_path("foliage_streaming.lfdata");
+	const String path2 = TestUtils::get_temp_path("foliage_streaming_2.lfdata");
+	LandscapeFoliage3D *foliage = nullptr;
+	Landscape3D *landscape = make_landscape(foliage, 0.0);
+	Camera3D *camera = memnew(Camera3D);
+	landscape->add_child(camera);
+	camera->set_position(Vector3(0, 0, 64));
+	landscape->set_lod_camera_path(landscape->get_path_to(camera));
+	Ref<LandscapeFoliageType> type = make_type(10.0);
+	type->set_cull_distance(20.0);
+	type->set_lod_transition(0.0);
+	foliage->add_foliage_type(type);
+	foliage->add_foliage_type(make_type(1.0)); // Never culled: always loaded.
+	foliage->fill(0);
+	foliage->fill(1);
+	const int64_t count0 = foliage->get_instance_count(0);
+	const int64_t count1 = foliage->get_instance_count(1);
+	CHECK(count0 > 1000);
+	CHECK(count1 > 50);
+	const TypedArray<Transform3D> far_before = foliage->get_instances_in_radius(0, Vector3(110, 0, 20), 10.0);
+
+	// Saved to a file: the loaded cells are kept, then the far ones are released.
+	REQUIRE(foliage->save_to_data_file(path) == OK);
+	Ref<LandscapeFoliageData> data = foliage->get_data();
+	REQUIRE(data.is_valid());
+	CHECK(data->is_streamed());
+	CHECK_FALSE(data->has_unsaved_changes());
+	CHECK(data->get_layer_count() == 2);
+	CHECK(data->get_instance_count(0) == count0);
+	CHECK(Array(foliage->get("instance_data")).is_empty()); // Not in the scene anymore.
+	CHECK(int64_t(foliage->get_statistics()["cells_loaded"]) == 32);
+	process_streaming(foliage);
+	CHECK(int64_t(foliage->get_statistics()["cells_loaded"]) < 32);
+	CHECK(foliage->get_instance_count(0) == count0);
+
+	// Another node streams the same file: only the cells within the cull distance of the camera
+	// (cells of 32 m, 20 m of cull distance) are loaded, and every cell of the other type.
+	LandscapeFoliage3D *streamed = memnew(LandscapeFoliage3D);
+	landscape->add_child(streamed);
+	streamed->add_foliage_type(type);
+	streamed->add_foliage_type(make_type(1.0));
+	Ref<LandscapeFoliageData> loaded;
+	loaded.instantiate();
+	REQUIRE(loaded->load_from_file(path) == OK);
+	streamed->set_data(loaded);
+	CHECK(streamed->get_instance_count(0) == count0);
+	CHECK(streamed->get_instance_count(1) == count1);
+	CHECK(int64_t(streamed->get_statistics()["cells_loaded"]) == 0);
+	process_streaming(streamed);
+	Dictionary stats = streamed->get_statistics();
+	CHECK(int64_t(stats["cells_loading"]) == 0);
+	CHECK(int64_t(stats["cells_loaded"]) == 6 + 16);
+	CHECK(int64_t(stats["loaded_memory"]) > 0);
+	// Instances drawn from the loaded cells only.
+	CHECK(int64_t(stats["instances_drawn"]) > 0);
+	CHECK(int64_t(stats["instances_drawn"]) < count0);
+
+	// Queries and edits load the cells they need.
+	CHECK(streamed->get_instances_in_radius(0, Vector3(110, 0, 20), 10.0).size() == far_before.size());
+	CHECK(streamed->remove_instances_in_radius(0, Vector3(110, 0, 20), 10.0) == far_before.size());
+	CHECK(streamed->get_instance_count(0) == count0 - far_before.size());
+	streamed->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(loaded->has_unsaved_changes());
+	CHECK(loaded->get_instance_count(0) == count0 - far_before.size());
+
+	// The camera moves: the cells follow, over a tiny budget only the needed cells stay.
+	ProjectSettings::get_singleton()->set_setting("rendering/landscape/streaming/foliage_cache_size_mb", 0);
+	camera->set_position(Vector3(128, 0, 64));
+	process_streaming(streamed);
+	ProjectSettings::get_singleton()->set_setting("rendering/landscape/streaming/foliage_cache_size_mb", 256);
+	stats = streamed->get_statistics();
+	CHECK(int64_t(stats["cells_loaded"]) == 6 + 16);
+	CHECK(streamed->get_instance_count(0) == count0 - far_before.size());
+
+	// Saved to another file (with the edited cell), then read by a third data.
+	REQUIRE(ResourceSaver::save(loaded, path2) == OK);
+	CHECK_FALSE(loaded->has_unsaved_changes());
+	CHECK(loaded->is_streamed());
+	Ref<LandscapeFoliageData> reloaded;
+	reloaded.instantiate();
+	REQUIRE(reloaded->load_from_file(path2) == OK);
+	CHECK(reloaded->get_instance_count(0) == count0 - far_before.size());
+	CHECK(reloaded->get_instance_count(1) == count1);
+
+	// Embedded in a scene: the whole layers.
+	Ref<LandscapeFoliageData> embedded;
+	embedded.instantiate();
+	embedded->set("chunk_size", reloaded->get("chunk_size"));
+	embedded->set("_layers_data", reloaded->get("_layers_data"));
+	CHECK(embedded->get_instance_count() == reloaded->get_instance_count());
+	CHECK_FALSE(embedded->is_streamed());
+
+	// Types added and removed keep the layers aligned.
+	streamed->add_foliage_type(make_type(1.0));
+	CHECK(loaded->get_layer_count() == 3);
+	streamed->remove_foliage_type(0);
+	CHECK(loaded->get_layer_count() == 2);
+	CHECK(streamed->get_instance_count(0) == count1);
+	CHECK(loaded->get_instance_count(0) == count1);
+
+	// Detached: every instance goes back to the node.
+	streamed->set_data(Ref<LandscapeFoliageData>());
+	CHECK(streamed->get_instance_count() == count1);
+	CHECK(Array(streamed->get("instance_data")).size() == 2);
+
+	memdelete(landscape);
+	data.unref();
+	loaded.unref();
+	reloaded.unref();
+	DirAccess::remove_absolute(path);
+	DirAccess::remove_absolute(path2);
+}
+
+TEST_CASE("[SceneTree][Landscape][Foliage] GPU indirect rendering falls back to the CPU") {
+	LandscapeFoliage3D *foliage = nullptr;
+	Landscape3D *landscape = make_landscape(foliage, 0.0);
+	Camera3D *camera = memnew(Camera3D);
+	landscape->add_child(camera);
+	camera->set_position(Vector3(0, 0, 64));
+	landscape->set_lod_camera_path(landscape->get_path_to(camera));
+	Ref<LandscapeFoliageType> type = make_type();
+	type->set_cull_distance(60.0);
+	type->set_lod_transition(0.0);
+	foliage->add_foliage_type(type);
+	for (int i = 0; i < 13; i++) {
+		foliage->add_instance(0, Transform3D(Basis(), Vector3(5 + i * 10, 0, 64)));
+	}
+	foliage->set_gpu_indirect(true);
+	CHECK(foliage->is_gpu_indirect());
+	// No rendering device without a display (and with the Compatibility renderer).
+	CHECK_FALSE(LandscapeFoliage3D::is_gpu_indirect_supported());
+	CHECK_FALSE(foliage->is_gpu_indirect_active());
+	CHECK(foliage->get_configuration_warnings().size() == 1);
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	const Dictionary stats = foliage->get_statistics();
+	CHECK_FALSE(bool(stats["gpu_indirect"]));
+	CHECK(int64_t(stats["instances_drawn"]) == 6);
+
+	foliage->set_gpu_max_instances(10);
+	CHECK(foliage->get_gpu_max_instances() == 1024);
+	foliage->set_gpu_indirect(false);
+	CHECK(foliage->get_configuration_warnings().is_empty());
 
 	memdelete(landscape);
 }

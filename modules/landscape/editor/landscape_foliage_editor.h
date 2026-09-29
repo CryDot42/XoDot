@@ -242,10 +242,14 @@ private:
 	SpinBox *erase_density = nullptr;
 	OptionButton *debug_view = nullptr;
 	CheckBox *freeze_lod = nullptr;
+	CheckBox *gpu_indirect = nullptr;
+	Label *data_status = nullptr;
+	Button *save_data = nullptr;
 	Label *info = nullptr;
 	Label *stats = nullptr;
 	double stats_timer = 0.0;
 	EditorFileDialog *file_dialog = nullptr;
+	EditorFileDialog *data_dialog = nullptr;
 	ConfirmationDialog *fill_confirm = nullptr;
 	bool updating = false;
 
@@ -279,6 +283,10 @@ private:
 	void _debug_view_selected(int p_index);
 	void _freeze_lod_toggled(bool p_pressed);
 	void _update_debug_controls();
+	void _gpu_indirect_toggled(bool p_pressed);
+	void _save_data_pressed();
+	void _data_path_selected(const String &p_path);
+	void _update_streaming_controls();
 	void _commit_type_data(const String &p_action, const Vector<int> &p_types, const Vector<PackedByteArray> &p_before);
 
 	Vector<Ref<Resource>> _get_dropped_resources(const Variant &p_data) const;
