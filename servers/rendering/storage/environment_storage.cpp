@@ -893,7 +893,7 @@ bool RendererEnvironmentStorage::environment_get_sdfgi_radiance_cascades_enabled
 
 uint32_t RendererEnvironmentStorage::environment_get_sdfgi_rc_base_oct_size(RID p_env) const {
 	Environment *env = environment_owner.get_or_null(p_env);
-	ERR_FAIL_NULL_V(env, 2);
+	ERR_FAIL_NULL_V(env, 4);
 	return env->sdfgi_rc_base_oct_size;
 }
 

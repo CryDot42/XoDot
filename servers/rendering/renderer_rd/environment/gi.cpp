@@ -577,8 +577,13 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 		tf_rc_radiance.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
 		tf_rc_radiance.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT;
 
-		radiance_cascade_trace_tex = create_clear_texture(tf_rc_radiance, "SDFGI Radiance Cascade Trace Texture");
 		radiance_cascade_merged_tex = create_clear_texture(tf_rc_radiance, "SDFGI Radiance Cascade Merged Texture");
+
+		// Trace buffers hold each probe's own interval plus its near band (RC_TRACE_ROWS in the shader).
+		RD::TextureFormat tf_rc_trace = tf_rc_radiance;
+		tf_rc_trace.height = probe_axis_count * (SDFGI::RC_MAX_OCT_SIZE * SDFGI::RC_MAX_OCT_SIZE) * 2;
+		radiance_cascade_trace_tex[0] = create_clear_texture(tf_rc_trace, "SDFGI Radiance Cascade Trace Texture 0");
+		radiance_cascade_trace_tex[1] = create_clear_texture(tf_rc_trace, "SDFGI Radiance Cascade Trace Texture 1");
 
 		RD::TextureFormat tf_rc_sh = tf_rc_radiance;
 		tf_rc_sh.format = RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
@@ -1261,10 +1266,11 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 			uniforms.push_back(u);
 		}
 		{
+			// Probe visibility, used by MODE_MERGE to keep next-cascade probes behind walls out.
 			RD::Uniform u;
-			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-			u.binding = 10;
-			u.append_id(radiance_cascade_trace_tex);
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			u.binding = 5;
+			u.append_id(occlusion_texture);
 			uniforms.push_back(u);
 		}
 		{
@@ -1282,7 +1288,26 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 			uniforms.push_back(u);
 		}
 
-		radiance_cascades_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.radiance_cascades.version_get_shader(gi->sdfgi_shader.radiance_cascades_shader, 0), 0);
+		// One set per trace buffer direction: [i] writes trace_tex[i] and reads trace_tex[i ^ 1]
+		// (last frame's moving average) as history.
+		for (int i = 0; i < 2; i++) {
+			Vector<RD::Uniform> set_uniforms = uniforms;
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 10;
+				u.append_id(radiance_cascade_trace_tex[i]);
+				set_uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 13;
+				u.append_id(radiance_cascade_trace_tex[i ^ 1]);
+				set_uniforms.push_back(u);
+			}
+			radiance_cascades_uniform_set[i] = RD::get_singleton()->uniform_set_create(set_uniforms, gi->sdfgi_shader.radiance_cascades.version_get_shader(gi->sdfgi_shader.radiance_cascades_shader, 0), 0);
+		}
 	}
 
 	bounce_feedback = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_bounce_feedback(p_env);
@@ -1291,12 +1316,20 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 	probe_bias = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_probe_bias(p_env);
 	reads_sky = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_read_sky_light(p_env);
 
-	radiance_cascades_enabled = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_radiance_cascades_enabled(p_env);
-	rc_base_oct_size = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_rc_base_oct_size(p_env);
-	rc_max_oct_size = MIN(RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_rc_max_oct_size(p_env), uint32_t(SDFGI::RC_MAX_OCT_SIZE));
-	rc_angular_branching_log2 = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_rc_angular_branching_log2(p_env);
-	screen_probes_enabled = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_screen_probes_enabled(p_env);
-	screen_probe_spacing = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_screen_probe_spacing(p_env);
+	_read_radiance_cascades_settings(p_env);
+}
+
+void GI::SDFGI::_read_radiance_cascades_settings(RID p_env) {
+	RendererSceneRenderRD *scene_render = RendererSceneRenderRD::get_singleton();
+
+	radiance_cascades_enabled = scene_render->environment_get_sdfgi_radiance_cascades_enabled(p_env);
+	// Both sizes are powers of two (the Environment setter rejects anything else); keep them
+	// within what the shader buffers hold and above the degenerate 2x2 case.
+	rc_max_oct_size = CLAMP(scene_render->environment_get_sdfgi_rc_max_oct_size(p_env), uint32_t(SDFGI::RC_MIN_OCT_SIZE), uint32_t(SDFGI::RC_MAX_OCT_SIZE));
+	rc_base_oct_size = CLAMP(scene_render->environment_get_sdfgi_rc_base_oct_size(p_env), uint32_t(SDFGI::RC_MIN_OCT_SIZE), rc_max_oct_size);
+	rc_angular_branching_log2 = MIN(scene_render->environment_get_sdfgi_rc_angular_branching_log2(p_env), 3u);
+	screen_probes_enabled = scene_render->environment_get_sdfgi_screen_probes_enabled(p_env);
+	screen_probe_spacing = scene_render->environment_get_sdfgi_screen_probe_spacing(p_env);
 }
 
 void GI::SDFGI::free_data() {
@@ -1339,7 +1372,8 @@ GI::SDFGI::~SDFGI() {
 	RD::get_singleton()->free_rid(occlusion_data);
 	RD::get_singleton()->free_rid(ambient_texture);
 
-	RD::get_singleton()->free_rid(radiance_cascade_trace_tex);
+	RD::get_singleton()->free_rid(radiance_cascade_trace_tex[0]);
+	RD::get_singleton()->free_rid(radiance_cascade_trace_tex[1]);
 	RD::get_singleton()->free_rid(radiance_cascade_merged_tex);
 	RD::get_singleton()->free_rid(radiance_cascade_sh_tex);
 
@@ -1370,12 +1404,7 @@ void GI::SDFGI::update(RID p_env, const Vector3 &p_world_position) {
 	probe_bias = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_probe_bias(p_env);
 	reads_sky = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_read_sky_light(p_env);
 
-	radiance_cascades_enabled = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_radiance_cascades_enabled(p_env);
-	rc_base_oct_size = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_rc_base_oct_size(p_env);
-	rc_max_oct_size = MIN(RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_rc_max_oct_size(p_env), uint32_t(SDFGI::RC_MAX_OCT_SIZE));
-	rc_angular_branching_log2 = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_rc_angular_branching_log2(p_env);
-	screen_probes_enabled = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_screen_probes_enabled(p_env);
-	screen_probe_spacing = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_screen_probe_spacing(p_env);
+	_read_radiance_cascades_settings(p_env);
 
 	int32_t drag_margin = (cascade_size / SDFGI::PROBE_DIVISOR) / 2;
 
@@ -1601,40 +1630,81 @@ void GI::SDFGI::update_probes(RID p_env, SkyRD::Sky *p_sky) {
 }
 
 void GI::SDFGI::update_probes_radiance_cascades(RID p_env, SkyRD::Sky *p_sky) {
-	// Experimental Radiance Cascades probe backend (see sdfgi_radiance_cascades.glsl for the
-	// full design note). Unlike the legacy PROCESS/STORE pair above, there is no persistent
-	// history to scroll: every call re-traces and re-merges every cascade from scratch, in
-	// four full passes (TRACE, MERGE, PROJECT, STORE) over all cascades.
+	// Radiance Cascades probe backend, see sdfgi_radiance_cascades.glsl for the design. Four passes
+	// over every cascade: TRACE (jittered, folded into a per-direction moving average), MERGE
+	// (farthest cascade first), PROJECT to SH, STORE into the lightprobe texture gi.glsl reads.
 	RD::get_singleton()->draw_command_begin_label("SDFGI Update Probes (Radiance Cascades)");
 
+	const uint32_t cascade_count = cascades.size();
+	const int32_t probe_divisor = cascade_size / SDFGI::PROBE_DIVISOR;
+
+	// Per-cascade angular resolution and distance interval. Angular resolution grows by
+	// 2^rc_angular_branching_log2 per cascade up to rc_max_oct_size. Interval length is
+	// RC_INTERVAL0_CELLS of the cascade's own cells, scaled by its angular resolution relative to
+	// cascade 0, so the next cascade's probe spacing stays small next to the distance its interval
+	// starts at, relative to its angular texel size - what lets Radiance Cascades interpolate the far
+	// field between the next cascade's probes. The last cascade's interval runs out to the sky.
+	uint32_t oct_sizes[SDFGI::MAX_CASCADES];
+	float interval_start[SDFGI::MAX_CASCADES];
+	float interval_end[SDFGI::MAX_CASCADES];
+	{
+		float distance = 0.0;
+		for (uint32_t i = 0; i < cascade_count; i++) {
+			const uint32_t shift = MIN(i * rc_angular_branching_log2, 8u);
+			oct_sizes[i] = CLAMP(rc_base_oct_size << shift, rc_base_oct_size, rc_max_oct_size);
+			const float length = float(SDFGI::RC_INTERVAL0_CELLS) * float(oct_sizes[i]) / float(rc_base_oct_size) * cascades[i].cell_size;
+			interval_start[i] = distance;
+			interval_end[i] = i == cascade_count - 1 ? -1.0f : distance + length;
+			distance += length;
+		}
+	}
+
+	// The trace buffers hold a per-direction moving average across frames. Last frame's is only
+	// usable if this path also ran last frame with the same angular layout; per cascade, the probe
+	// grid may have scrolled since, which the shader follows through history_scroll.
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+	const uint32_t settings = rc_base_oct_size | (rc_max_oct_size << 8) | (rc_angular_branching_log2 << 16);
+	const bool history_usable = rc_frame > 0 && frame - rc_last_update_frame <= 1 && settings == rc_history_settings;
+	rc_last_update_frame = frame;
+	rc_history_settings = settings;
+
+	const float history_blend = 1.0f / float(MAX(history_size, 1u)); // same frames-to-converge setting as the legacy integrator
+	Vector3i history_scroll[SDFGI::MAX_CASCADES];
+	float history_blends[SDFGI::MAX_CASCADES];
+	for (uint32_t i = 0; i < cascade_count; i++) {
+		if (history_usable && rc_history_valid[i]) {
+			history_scroll[i] = (cascades[i].position - rc_history_position[i]) / probe_divisor;
+			history_blends[i] = history_blend;
+		} else {
+			history_scroll[i] = Vector3i();
+			history_blends[i] = 1.0f;
+		}
+		rc_history_position[i] = cascades[i].position;
+		rc_history_valid[i] = true;
+	}
+
+	const RID uniform_set = radiance_cascades_uniform_set[rc_frame & 1];
+
 	SDFGIShader::RadianceCascadesPushConstant push_constant;
+	memset(&push_constant, 0, sizeof(SDFGIShader::RadianceCascadesPushConstant));
 	push_constant.grid_size[0] = cascade_size;
 	push_constant.grid_size[1] = cascade_size;
 	push_constant.grid_size[2] = cascade_size;
-	push_constant.max_cascades = cascades.size();
+	push_constant.max_cascades = cascade_count;
 	push_constant.probe_axis_size = probe_axis_count;
-	push_constant.angular_branching_log2 = rc_angular_branching_log2;
-	push_constant.base_oct_size = rc_base_oct_size;
 	push_constant.image_size[0] = probe_axis_count * probe_axis_count;
 	push_constant.image_size[1] = probe_axis_count;
+	push_constant.frame = rc_frame;
 	push_constant.ray_bias = probe_bias;
-	push_constant.world_offset[0] = 0;
-	push_constant.world_offset[1] = 0;
-	push_constant.world_offset[2] = 0;
+	push_constant.y_mult = y_mult;
 	push_constant.store_ambient_texture = RendererSceneRenderRD::get_singleton()->environment_get_volumetric_fog_enabled(p_env);
-	push_constant.rc_max_oct_size = rc_max_oct_size;
+	push_constant.base_oct_size = rc_base_oct_size;
 
 	const float sky_irradiance_border_size = p_sky != nullptr ? p_sky->uv_border_size : 0.0f;
 	push_constant.sky_irradiance_border_size[0] = sky_irradiance_border_size;
 	push_constant.sky_irradiance_border_size[1] = 1.0 - sky_irradiance_border_size * 2.0f;
 
 	RID sky_uniform_set = gi->sdfgi_shader.radiance_cascades_default_sky_uniform_set;
-	push_constant.sky_flags = 0;
-	push_constant.y_mult = y_mult;
-	push_constant.sky_energy = 0.0;
-	push_constant.sky_color_or_orientation[0] = 0.0;
-	push_constant.sky_color_or_orientation[1] = 0.0;
-	push_constant.sky_color_or_orientation[2] = 0.0;
 
 	if (reads_sky && p_env.is_valid()) {
 		push_constant.sky_energy = RendererSceneRenderRD::get_singleton()->environment_get_bg_energy_multiplier(p_env);
@@ -1688,16 +1758,33 @@ void GI::SDFGI::update_probes_radiance_cascades(RID p_env, SkyRD::Sky *p_sky) {
 		}
 	}
 
+	auto dispatch_cascade = [&](RD::ComputeListID p_compute_list, uint32_t p_cascade, bool p_texel_grid) {
+		push_constant.cascade = p_cascade;
+		push_constant.oct_size = oct_sizes[p_cascade];
+		push_constant.next_oct_size = p_cascade + 1 < cascade_count ? oct_sizes[p_cascade + 1] : oct_sizes[p_cascade];
+		push_constant.interval_start = interval_start[p_cascade];
+		push_constant.interval_end = interval_end[p_cascade];
+		push_constant.history_scroll[0] = history_scroll[p_cascade].x;
+		push_constant.history_scroll[1] = history_scroll[p_cascade].y;
+		push_constant.history_scroll[2] = history_scroll[p_cascade].z;
+		push_constant.history_blend = history_blends[p_cascade];
+
+		const uint32_t texel_scale = p_texel_grid ? uint32_t(SDFGI::LIGHTPROBE_OCT_SIZE) : 1u;
+		push_constant.image_size[0] = probe_axis_count * probe_axis_count * texel_scale;
+		push_constant.image_size[1] = probe_axis_count * texel_scale;
+
+		RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, uniform_set, 0);
+		RD::get_singleton()->compute_list_bind_uniform_set(p_compute_list, sky_uniform_set, 1);
+		RD::get_singleton()->compute_list_set_push_constant(p_compute_list, &push_constant, sizeof(SDFGIShader::RadianceCascadesPushConstant));
+		RD::get_singleton()->compute_list_dispatch_threads(p_compute_list, push_constant.image_size[0], push_constant.image_size[1], 1);
+	};
+
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
-	// TRACE: every cascade only ray-marches its own bounds, independent of the others.
+	// TRACE: every cascade's interval, independent of the others.
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->sdfgi_shader.radiance_cascades_pipeline[SDFGIShader::RADIANCE_CASCADES_MODE_TRACE].get_rid());
-	for (uint32_t i = 0; i < cascades.size(); i++) {
-		push_constant.cascade = i;
-		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, radiance_cascades_uniform_set, 0);
-		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, sky_uniform_set, 1);
-		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SDFGIShader::RadianceCascadesPushConstant));
-		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_axis_count * probe_axis_count, probe_axis_count, 1);
+	for (uint32_t i = 0; i < cascade_count; i++) {
+		dispatch_cascade(compute_list, i, false);
 	}
 
 	RD::get_singleton()->compute_list_add_barrier(compute_list);
@@ -1705,42 +1792,30 @@ void GI::SDFGI::update_probes_radiance_cascades(RID p_env, SkyRD::Sky *p_sky) {
 	// MERGE: cascade i needs cascade i+1's merge result, so this must run strictly from the
 	// farthest cascade down to the nearest one, with a barrier between every step.
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->sdfgi_shader.radiance_cascades_pipeline[SDFGIShader::RADIANCE_CASCADES_MODE_MERGE].get_rid());
-	for (int32_t i = cascades.size() - 1; i >= 0; i--) {
-		push_constant.cascade = uint32_t(i);
-		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, radiance_cascades_uniform_set, 0);
-		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, sky_uniform_set, 1);
-		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SDFGIShader::RadianceCascadesPushConstant));
-		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_axis_count * probe_axis_count, probe_axis_count, 1);
+	for (int32_t i = cascade_count - 1; i >= 0; i--) {
+		dispatch_cascade(compute_list, uint32_t(i), false);
 		RD::get_singleton()->compute_list_add_barrier(compute_list);
 	}
 
-	// PROJECT: reduces each cascade's now fully-merged radiance to SH, independently.
+	// PROJECT: each cascade's fully merged radiance to SH, independently.
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->sdfgi_shader.radiance_cascades_pipeline[SDFGIShader::RADIANCE_CASCADES_MODE_PROJECT].get_rid());
-	for (uint32_t i = 0; i < cascades.size(); i++) {
-		push_constant.cascade = i;
-		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, radiance_cascades_uniform_set, 0);
-		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, sky_uniform_set, 1);
-		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SDFGIShader::RadianceCascadesPushConstant));
-		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_axis_count * probe_axis_count, probe_axis_count, 1);
+	for (uint32_t i = 0; i < cascade_count; i++) {
+		dispatch_cascade(compute_list, i, false);
 	}
 
 	RD::get_singleton()->compute_list_add_barrier(compute_list);
 
-	// STORE: bakes each cascade's SH into the same octahedral RGBE lightprobe texture the
-	// legacy integrator writes, dispatched over the larger per-texel grid like its own MODE_STORE.
+	// STORE: bakes each cascade's SH into the same octahedral RGBE lightprobe texture the legacy
+	// integrator writes, dispatched over the larger per-texel grid like its own MODE_STORE.
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->sdfgi_shader.radiance_cascades_pipeline[SDFGIShader::RADIANCE_CASCADES_MODE_STORE].get_rid());
-	push_constant.image_size[0] = probe_axis_count * probe_axis_count * SDFGI::LIGHTPROBE_OCT_SIZE;
-	push_constant.image_size[1] = probe_axis_count * SDFGI::LIGHTPROBE_OCT_SIZE;
-	for (uint32_t i = 0; i < cascades.size(); i++) {
-		push_constant.cascade = i;
-		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, radiance_cascades_uniform_set, 0);
-		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, sky_uniform_set, 1);
-		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SDFGIShader::RadianceCascadesPushConstant));
-		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_axis_count * probe_axis_count * SDFGI::LIGHTPROBE_OCT_SIZE, probe_axis_count * SDFGI::LIGHTPROBE_OCT_SIZE, 1);
+	for (uint32_t i = 0; i < cascade_count; i++) {
+		dispatch_cascade(compute_list, i, true);
 	}
 
 	RD::get_singleton()->compute_list_end();
 	RD::get_singleton()->draw_command_end_label();
+
+	rc_frame++;
 }
 
 void GI::SDFGI::store_probes() {
@@ -4839,7 +4914,7 @@ void GI::init(SkyRD *p_sky) {
 	}
 	{
 		// Experimental: screen probes over SDFGI alone, see sdfgi_screen_probes.glsl.
-		String defines = "\n#define SDFGI_SCREEN_PROBE_OCT_SIZE " + itos(SDFGI::LIGHTPROBE_OCT_SIZE) + "\n";
+		String defines = "\n#define SDFGI_OCT_SIZE " + itos(SDFGI::LIGHTPROBE_OCT_SIZE) + "\n";
 		Vector<String> versions;
 		versions.push_back("\n#define MODE_TRACE\n");
 		versions.push_back("\n#define MODE_FILTER\n");
@@ -5074,10 +5149,6 @@ void GI::RenderBuffersGI::free_data() {
 	if (sdfgi_screen_probe_gi_ubo.is_valid()) {
 		RD::get_singleton()->free_rid(sdfgi_screen_probe_gi_ubo);
 		sdfgi_screen_probe_gi_ubo = RID();
-	}
-	if (sdfgi_screen_probe_sdfgi_ubo.is_valid()) {
-		RD::get_singleton()->free_rid(sdfgi_screen_probe_sdfgi_ubo);
-		sdfgi_screen_probe_sdfgi_ubo = RID();
 	}
 	screen_probe_history_valid = false;
 	screen_probe_last_frame = RID();
@@ -5670,7 +5741,6 @@ void GI::_setup_sdfgi_screen_probes(Ref<RenderSceneBuffersRD> p_render_buffers, 
 	if (p_rbgi->sdfgi_screen_probe_trace_ubo.is_null()) {
 		p_rbgi->sdfgi_screen_probe_trace_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(SDFGIScreenProbeTraceParams));
 		p_rbgi->sdfgi_screen_probe_gi_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(ScreenProbeGIParams));
-		p_rbgi->sdfgi_screen_probe_sdfgi_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(SDFGIScreenProbeSdfgiParams));
 		p_rbgi->screen_probe_history_valid = false;
 	}
 
@@ -5739,20 +5809,6 @@ void GI::_setup_sdfgi_screen_probes(Ref<RenderSceneBuffersRD> p_render_buffers, 
 		RD::get_singleton()->buffer_update(p_rbgi->sdfgi_screen_probe_gi_ubo, 0, sizeof(ScreenProbeGIParams), &params);
 	}
 
-	{
-		SDFGIScreenProbeSdfgiParams params;
-		memset(&params, 0, sizeof(SDFGIScreenProbeSdfgiParams));
-		params.grid_size[0] = p_sdfgi->cascade_size;
-		params.grid_size[1] = p_sdfgi->cascade_size;
-		params.grid_size[2] = p_sdfgi->cascade_size;
-		params.max_cascades = p_sdfgi->cascades.size();
-		params.probe_axis_size = p_sdfgi->probe_axis_count;
-		params.y_mult = p_sdfgi->y_mult;
-		params.normal_bias = p_sdfgi->normal_bias;
-		params.use_sdfgi = 1;
-		RD::get_singleton()->buffer_update(p_rbgi->sdfgi_screen_probe_sdfgi_ubo, 0, sizeof(SDFGIScreenProbeSdfgiParams), &params);
-	}
-
 	// UNIFORM SETS
 
 	RID linear_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
@@ -5768,12 +5824,14 @@ void GI::_setup_sdfgi_screen_probes(Ref<RenderSceneBuffersRD> p_render_buffers, 
 		RD::Uniform u_mipmap_sampler(RD::UNIFORM_TYPE_SAMPLER, 7, mipmap_sampler);
 		RD::Uniform u_probe_sh(RD::UNIFORM_TYPE_IMAGE, 8, probe_sh);
 		RD::Uniform u_params(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 9, p_rbgi->sdfgi_screen_probe_trace_ubo);
-		RD::Uniform u_cascades(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 12, p_sdfgi->cascades_ubo);
+		// The same SDFGI buffer gi.glsl reads (camera relative cascades, probe-unit normal bias,
+		// per-cascade exposure), filled by SDFGI::pre_process_gi() earlier this frame.
+		RD::Uniform u_sdfgi(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 12, sdfgi_ubo);
 		RD::Uniform u_lightprobe_texture(RD::UNIFORM_TYPE_TEXTURE, 13, p_sdfgi->lightprobe_texture);
-		RD::Uniform u_sdfgi_params(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 14, p_rbgi->sdfgi_screen_probe_sdfgi_ubo);
+		RD::Uniform u_occlusion_texture(RD::UNIFORM_TYPE_TEXTURE, 14, p_sdfgi->occlusion_texture);
 
 		RID trace_shader = sdfgi_screen_probes_shader.version_get_shader(sdfgi_screen_probes_shader_version, SCREEN_PROBES_TRACE);
-		r_trace_set = UniformSetCacheRD::get_singleton()->get_cache(trace_shader, 0, u_depth, u_normal_roughness, u_last_frame, u_linear_sampler, u_mipmap_sampler, u_probe_sh, u_params, u_cascades, u_lightprobe_texture, u_sdfgi_params);
+		r_trace_set = UniformSetCacheRD::get_singleton()->get_cache(trace_shader, 0, u_depth, u_normal_roughness, u_last_frame, u_linear_sampler, u_mipmap_sampler, u_probe_sh, u_params, u_sdfgi, u_lightprobe_texture, u_occlusion_texture);
 	}
 
 	{

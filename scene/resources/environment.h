@@ -160,7 +160,7 @@ private:
 
 	// Experimental SDFGI Radiance Cascades probe backend and screen probes.
 	bool sdfgi_radiance_cascades_enabled = false;
-	int sdfgi_rc_base_oct_size = 2;
+	int sdfgi_rc_base_oct_size = 4;
 	int sdfgi_rc_max_oct_size = 8;
 	int sdfgi_rc_angular_branching_log2 = 1;
 	bool sdfgi_screen_probes_enabled = false;

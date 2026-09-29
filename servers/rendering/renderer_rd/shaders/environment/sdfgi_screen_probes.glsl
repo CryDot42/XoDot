@@ -6,22 +6,21 @@
 
 // Screen probe gather for SDFGI, mirroring voxel_gi_screen_probes.glsl: probes are placed on the
 // depth buffer, every probe traces a hemisphere of rays that first march the depth buffer (lit by
-// the previous frame) and fall back to a single octahedral tap of the baked SDFGI/Radiance-Cascades
-// probe volume when a ray leaves the screen or finds nothing. The result is stored as L1 spherical
+// the previous frame) and fall back to SDFGI's baked probe volume (Radiance Cascades or the legacy
+// integrator) when a ray leaves the screen or finds nothing. The result is stored as L1 spherical
 // harmonics, in the exact same format gi.glsl's USE_SCREEN_PROBES path already knows how to gather
-// and temporally filter for VoxelGI - see the USE_SCREEN_PROBES block added under USE_SDFGI there.
+// and temporally filter for VoxelGI - see the USE_SCREEN_PROBES block under USE_SDFGI there.
 //
-// The SDFGI fallback here is intentionally simpler than gi.glsl's own sdfvoxel_gi_process(): a
-// single nearest-probe octahedral bilinear sample, no 8-probe trilinear cross-fade and no
-// occlusion texture. That is enough for a screen-probe miss fallback (screen probes only rely on
-// it for the minority of rays that escape the screen), and keeps this experimental shader
-// self-contained. Follow-up work could switch to the full trilinear+occlusion sample instead.
+// The fallback reads the probe volume through the same SDFGI uniform buffer gi.glsl uses (camera
+// relative cascade positions, probe-unit normal bias, per-cascade exposure) with the same cascade
+// selection, edge blend and trilinear + occlusion probe weighting as sdfvoxel_gi_process(), but
+// samples the non-convolved radiance layer along the ray instead of irradiance along the normal.
 
 #extension GL_EXT_samplerless_texture_functions : enable
 
 #define PROBE_RAY_COUNT 64
 #define PROBE_RAY_SIDE 8
-#define MAX_CASCADES 8
+#define SDFGI_MAX_CASCADES 8
 
 #ifdef MODE_TRACE
 layout(local_size_x = PROBE_RAY_COUNT, local_size_y = 1, local_size_z = 1) in;
@@ -42,31 +41,46 @@ layout(set = 0, binding = 1) uniform texture2D normal_roughness_buffer;
 layout(set = 0, binding = 3) uniform texture2D last_frame;
 layout(set = 0, binding = 7) uniform sampler linear_sampler_with_mipmaps;
 
-struct CascadeData {
-	vec3 offset; //offset of (0,0,0) in world coordinates
-	float to_cell; // 1/bounds * grid_size
+// Must match the SDFGI uniform block in gi.glsl (it is the same buffer, GI::sdfgi_ubo).
+struct ProbeCascadeData {
+	vec3 position; // camera relative, y-scaled
+	float to_probe;
 	ivec3 probe_world_offset;
-	uint pad;
-	vec4 pad2;
+	float to_cell;
+	vec3 pad;
+	float exposure_normalization;
 };
 
-layout(set = 0, binding = 12, std140) uniform Cascades {
-	CascadeData data[MAX_CASCADES];
-}
-cascades;
-
-layout(set = 0, binding = 13) uniform texture2DArray lightprobe_texture;
-
-layout(set = 0, binding = 14, std140) uniform SDFGIParams {
+layout(set = 0, binding = 12, std140) uniform SDFGI {
 	vec3 grid_size;
 	uint max_cascades;
 
-	uint probe_axis_size;
+	bool use_occlusion;
+	int probe_axis_size;
+	float probe_to_uvw;
+	float normal_bias; // in probe units
+
+	vec3 lightprobe_tex_pixel_size;
+	float energy;
+
+	vec3 lightprobe_uv_offset;
 	float y_mult;
-	float normal_bias;
-	uint use_sdfgi;
+
+	vec3 occlusion_clamp;
+	uint pad3;
+
+	vec3 occlusion_renormalize;
+	uint pad4;
+
+	vec3 cascade_probe_size;
+	uint pad5;
+
+	ProbeCascadeData cascades[SDFGI_MAX_CASCADES];
 }
 sdfgi;
+
+layout(set = 0, binding = 13) uniform texture2DArray lightprobe_texture;
+layout(set = 0, binding = 14) uniform texture3D occlusion_texture;
 
 #endif // MODE_TRACE
 
@@ -118,45 +132,111 @@ float get_view_z(vec2 p_uv) {
 	return reconstruct_view_position((vec2(pixel) + 0.5) / vec2(params.screen_size), depth).z;
 }
 
-// Single-tap octahedral fallback against the baked SDFGI/Radiance-Cascades probe volume.
-// See the file comment above for why this skips the full trilinear+occlusion sample gi.glsl uses.
-vec3 sdfgi_probe_fallback(vec3 p_origin, vec3 p_normal, vec3 p_dir) {
-	if (sdfgi.use_sdfgi == 0) {
-		return vec3(0.0);
+// Radiance arriving from p_dir, read from one cascade of the baked probe volume. p_cascade_pos is
+// in that cascade's probe units, p_normal/p_dir are y-scaled. Same weighting as gi.glsl's
+// sdfvoxel_gi_process(); the lookup goes into the radiance half of the lightprobe texture.
+vec3 sdfgi_cascade_radiance(uint p_cascade, vec3 p_cascade_pos, vec3 p_normal, vec3 p_dir) {
+	p_cascade_pos += p_normal * sdfgi.normal_bias;
+
+	ivec3 probe_base_pos = ivec3(floor(p_cascade_pos));
+
+	ivec3 tex_pos = ivec3(probe_base_pos.xy, int(p_cascade));
+	tex_pos.x += probe_base_pos.z * sdfgi.probe_axis_size;
+	tex_pos.xy = tex_pos.xy * (SDFGI_OCT_SIZE + 2) + ivec2(1);
+
+	vec3 radiance_posf = (vec3(tex_pos) + vec3(vec3_to_oct(p_dir) * float(SDFGI_OCT_SIZE), float(sdfgi.max_cascades))) * sdfgi.lightprobe_tex_pixel_size;
+
+	vec4 accum = vec4(0.0);
+
+	for (uint j = 0; j < 8; j++) {
+		ivec3 offset = (ivec3(j) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1);
+		ivec3 probe_posi = probe_base_pos + offset;
+		vec3 probe_pos = vec3(probe_posi);
+		vec3 probe_to_pos = p_cascade_pos - probe_pos;
+		vec3 probe_dir = normalize(-probe_to_pos);
+
+		vec3 trilinear = vec3(1.0) - abs(probe_to_pos);
+		float weight = trilinear.x * trilinear.y * trilinear.z * max(0.005, dot(p_normal, probe_dir));
+
+		if (sdfgi.use_occlusion) {
+			ivec3 occ_indexv = abs((sdfgi.cascades[p_cascade].probe_world_offset + probe_posi) & ivec3(1, 1, 1)) * ivec3(1, 2, 4);
+			vec4 occ_mask = mix(vec4(0.0), vec4(1.0), equal(ivec4(occ_indexv.x | occ_indexv.y), ivec4(0, 1, 2, 3)));
+
+			vec3 occ_pos = clamp(p_cascade_pos, probe_pos - sdfgi.occlusion_clamp, probe_pos + sdfgi.occlusion_clamp) * sdfgi.probe_to_uvw;
+			occ_pos.z += float(p_cascade);
+			if (occ_indexv.z != 0) { //z bit is on, means index is >=4, so make it switch to the other half of textures
+				occ_pos.x += 1.0;
+			}
+
+			occ_pos *= sdfgi.occlusion_renormalize;
+			float occlusion = dot(textureLod(sampler3D(occlusion_texture, linear_sampler), occ_pos, 0.0), occ_mask);
+
+			weight *= max(occlusion, 0.01);
+		}
+
+		vec3 pos_uvw = radiance_posf;
+		pos_uvw.xy += vec2(offset.xy) * sdfgi.lightprobe_uv_offset.xy;
+		pos_uvw.x += float(offset.z) * sdfgi.lightprobe_uv_offset.z;
+		vec3 radiance = textureLod(sampler2DArray(lightprobe_texture, linear_sampler), pos_uvw, 0.0).rgb;
+
+		accum += vec4(radiance * weight * sdfgi.cascades[p_cascade].exposure_normalization, weight);
 	}
 
-	vec3 pos = p_origin;
-	pos.y *= sdfgi.y_mult;
-	vec3 normal = normalize(p_normal * vec3(1.0, sdfgi.y_mult, 1.0));
-	pos += normal * sdfgi.normal_bias;
+	return accum.a > 0.0 ? accum.rgb / accum.a : vec3(0.0);
+}
+
+// Radiance arriving at p_position (camera relative world space, like gi.glsl's) from p_dir, read
+// from SDFGI's baked probe volume for rays the screen trace could not resolve. Cascade selection
+// and the blend into the next cascade near the edge follow gi.glsl's sdfgi_process().
+vec3 sdfgi_probe_fallback(vec3 p_position, vec3 p_normal, vec3 p_dir) {
+	vec3 position = p_position;
+	position.y *= sdfgi.y_mult;
+	vec3 normal = p_normal;
+	normal.y *= sdfgi.y_mult;
+	normal = normalize(normal);
+	vec3 dir = p_dir;
+	dir.y *= sdfgi.y_mult;
+	dir = normalize(dir);
 
 	uint cascade = 0xFFFFFFFFu;
-	vec3 probe_pos;
+	vec3 cascade_pos;
 
 	for (uint i = 0; i < sdfgi.max_cascades; i++) {
-		probe_pos = (pos - cascades.data[i].offset) * cascades.data[i].to_cell;
-		if (any(lessThan(probe_pos, vec3(0.0))) || any(greaterThanEqual(probe_pos, sdfgi.grid_size))) {
+		cascade_pos = (position - sdfgi.cascades[i].position) * sdfgi.cascades[i].to_probe;
+		if (any(lessThan(cascade_pos, vec3(0.0))) || any(greaterThanEqual(cascade_pos, sdfgi.cascade_probe_size))) {
 			continue;
 		}
 		cascade = i;
 		break;
 	}
 
-	if (cascade == 0xFFFFFFFFu) {
+	if (cascade >= SDFGI_MAX_CASCADES) {
 		return vec3(0.0);
 	}
 
-	float probe_cell_size = sdfgi.grid_size.x / float(sdfgi.probe_axis_size - 1);
-	ivec3 probe_cell = clamp(ivec3(round(probe_pos / probe_cell_size)), ivec3(0), ivec3(int(sdfgi.probe_axis_size) - 1));
+	vec3 radiance = sdfgi_cascade_radiance(cascade, cascade_pos, normal, dir);
 
-	ivec3 tex_pos = ivec3(probe_cell.xy, int(cascade));
-	tex_pos.x += probe_cell.z * int(sdfgi.probe_axis_size);
-	tex_pos.xy = tex_pos.xy * (SDFGI_SCREEN_PROBE_OCT_SIZE + 2) + ivec2(1);
+	float blend_from = (float(sdfgi.probe_axis_size - 1) / 2.0) - 2.5;
+	float blend_to = blend_from + 2.0;
 
-	vec2 oct_uv = vec3_to_oct(p_dir);
-	vec3 lookup_uvw = (vec3(tex_pos) + vec3(oct_uv * float(SDFGI_SCREEN_PROBE_OCT_SIZE), 0.0)) / vec3(textureSize(lightprobe_texture, 0));
+	vec3 inner_pos = position * sdfgi.cascades[cascade].to_probe;
+	float len = length(inner_pos);
+	if (len > 0.0) {
+		inner_pos = abs(inner_pos / len);
+		len *= max(inner_pos.x, max(inner_pos.y, inner_pos.z));
+	}
 
-	return textureLod(sampler2DArray(lightprobe_texture, linear_sampler), lookup_uvw, 0.0).rgb;
+	if (len >= blend_from) {
+		float blend = smoothstep(blend_from, blend_to, len);
+		if (cascade == sdfgi.max_cascades - 1) {
+			radiance *= 1.0 - blend;
+		} else {
+			vec3 cascade_pos_next = (position - sdfgi.cascades[cascade + 1].position) * sdfgi.cascades[cascade + 1].to_probe;
+			radiance = mix(radiance, sdfgi_cascade_radiance(cascade + 1, cascade_pos_next, normal, dir), blend);
+		}
+	}
+
+	return radiance * sdfgi.energy;
 }
 
 shared vec4 sh_red[PROBE_RAY_COUNT];

@@ -44,7 +44,7 @@ CASES = [
     ),
     (
         "environment/sdfgi_screen_probes.glsl",
-        ["#define SDFGI_SCREEN_PROBE_OCT_SIZE 6"],
+        ["#define SDFGI_OCT_SIZE 6"],
         ["#define MODE_TRACE", "#define MODE_FILTER"],
     ),
     (

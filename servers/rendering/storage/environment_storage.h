@@ -172,7 +172,7 @@ private:
 		// SDFGI experimental probe backend (Radiance Cascades) and screen probes.
 		// See sdfgi_radiance_cascades.glsl / sdfgi_screen_probes.glsl.
 		bool sdfgi_radiance_cascades_enabled = false;
-		uint32_t sdfgi_rc_base_oct_size = 2; // Angular resolution (per axis) of cascade 0. Must be a power of two.
+		uint32_t sdfgi_rc_base_oct_size = 4; // Angular resolution (per axis) of cascade 0. Must be a power of two.
 		uint32_t sdfgi_rc_max_oct_size = 8; // Angular resolution cap for the farthest cascades. Must be a power of two, main quality/cost knob.
 		uint32_t sdfgi_rc_angular_branching_log2 = 1; // How many angular doublings per cascade step (RC's branching factor).
 		bool sdfgi_screen_probes_enabled = false;

@@ -575,22 +575,27 @@ private:
 
 			uint32_t probe_axis_size;
 			uint32_t cascade;
-			uint32_t angular_branching_log2;
-			uint32_t base_oct_size;
+			uint32_t oct_size;
+			uint32_t next_oct_size;
 
 			int32_t image_size[2];
-			float ray_bias;
-			uint32_t sky_flags;
+			float interval_start;
+			float interval_end; // < 0: unbounded
 
-			int32_t world_offset[3];
-			float sky_energy;
+			int32_t history_scroll[3];
+			float history_blend;
 
 			float sky_color_or_orientation[3];
-			float y_mult;
+			float sky_energy;
 
 			float sky_irradiance_border_size[2];
+			uint32_t sky_flags;
+			uint32_t frame;
+
+			float ray_bias;
+			float y_mult;
 			uint32_t store_ambient_texture;
-			uint32_t rc_max_oct_size; // runtime quality cap; see rc_oct_size() in sdfgi_radiance_cascades.glsl
+			uint32_t base_oct_size; // also the near band's resolution, see sdfgi_radiance_cascades.glsl
 		};
 
 		SdfgiRadianceCascadesShaderRD radiance_cascades;
@@ -644,7 +649,6 @@ public:
 		// since only one screen-probe backend is ever active on a given render buffer.
 		RID sdfgi_screen_probe_trace_ubo;
 		RID sdfgi_screen_probe_gi_ubo;
-		RID sdfgi_screen_probe_sdfgi_ubo;
 
 		RID uniform_set[RendererSceneRender::MAX_RENDER_VIEWS];
 		RID scene_data_ubo;
@@ -747,11 +751,17 @@ public:
 			MAX_STATIC_LIGHTS = 1024,
 			LIGHTPROBE_OCT_SIZE = 6,
 			SH_SIZE = 16,
-			// Compile-time cap for the experimental Radiance Cascades probe backend's angular
-			// resolution (see RC_MAX_OCT_SIZE in sdfgi_radiance_cascades.glsl). The Environment's
-			// runtime rc_max_oct_size setting is clamped to this; raising it means recompiling.
+			// Radiance Cascades probe backend (see sdfgi_radiance_cascades.glsl).
+			// RC_MAX_OCT_SIZE sizes the per-direction buffers and caps the Environment's
+			// rc_max_oct_size (raising it means recompiling the shader). Below RC_MIN_OCT_SIZE the
+			// octahedral texel centres degenerate (at 2x2 all four lie on one plane) and an order-2
+			// SH projection of them is meaningless.
+			RC_MIN_OCT_SIZE = 4,
 			RC_MAX_OCT_SIZE = 8,
 			RC_SH_TERMS = 9,
+			// Length of cascade 0's interval, in cascade 0 cells (two probe spacings). Later
+			// cascades scale it by their cell size and their angular resolution relative to cascade 0.
+			RC_INTERVAL0_CELLS = 16,
 		};
 
 		struct Cascade {
@@ -845,13 +855,20 @@ public:
 		// Experimental Radiance Cascades probe backend (see sdfgi_radiance_cascades.glsl).
 		// Single arrays covering every cascade (layer = cascade index), unlike the per-cascade
 		// lightprobe_history_tex/lightprobe_average_tex above - the shader picks its layer via
-		// the push constant, so one uniform set covers every cascade's dispatch. These hold no
-		// cross-frame temporal state: every update_probes_radiance_cascades() call re-traces
-		// and re-merges them from scratch.
-		RID radiance_cascade_trace_tex;
+		// the push constant. The trace buffer holds a moving average across frames and is
+		// ping-ponged (this frame / last frame), so there is one uniform set per direction.
+		RID radiance_cascade_trace_tex[2];
 		RID radiance_cascade_merged_tex;
 		RID radiance_cascade_sh_tex;
-		RID radiance_cascades_uniform_set;
+		RID radiance_cascades_uniform_set[2]; // [i] writes trace_tex[i], reads trace_tex[i ^ 1] as history
+
+		// Where each cascade's probes were when the trace buffer was last written, to follow
+		// cascade scrolling when reading history (see history_scroll in the shader).
+		Vector3i rc_history_position[SDFGI::MAX_CASCADES];
+		bool rc_history_valid[SDFGI::MAX_CASCADES] = {};
+		uint32_t rc_frame = 0;
+		uint64_t rc_last_update_frame = 0;
+		uint32_t rc_history_settings = 0; // angular settings the history was accumulated with
 
 		uint32_t history_size = 0;
 		float solid_cell_ratio = 0;
@@ -886,7 +903,7 @@ public:
 		// environment_storage's sdfgi_radiance_cascades_enabled / sdfgi_screen_probes_enabled).
 		// Cached every update() call, same as bounce_feedback/energy/... above.
 		bool radiance_cascades_enabled = false;
-		uint32_t rc_base_oct_size = 2;
+		uint32_t rc_base_oct_size = 4;
 		uint32_t rc_max_oct_size = 8;
 		uint32_t rc_angular_branching_log2 = 1;
 		bool screen_probes_enabled = false;
@@ -901,6 +918,7 @@ public:
 		void update(RID p_env, const Vector3 &p_world_position);
 		void update_light();
 		void update_probes(RID p_env, RendererRD::SkyRD::Sky *p_sky);
+		void _read_radiance_cascades_settings(RID p_env);
 		void update_probes_radiance_cascades(RID p_env, RendererRD::SkyRD::Sky *p_sky);
 		void store_probes();
 		int get_pending_region_data(int p_region, Vector3i &r_local_offset, Vector3i &r_local_size, AABB &r_bounds) const;
@@ -1104,17 +1122,6 @@ public:
 		uint32_t pad0;
 		uint32_t pad1;
 		uint32_t pad2;
-	};
-
-	// Must match SDFGIParams in sdfgi_screen_probes.glsl.
-	struct SDFGIScreenProbeSdfgiParams {
-		float grid_size[3];
-		uint32_t max_cascades;
-
-		uint32_t probe_axis_size;
-		float y_mult;
-		float normal_bias;
-		uint32_t use_sdfgi;
 	};
 
 	SdfgiScreenProbesShaderRD sdfgi_screen_probes_shader;

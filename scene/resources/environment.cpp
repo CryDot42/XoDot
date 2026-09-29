@@ -1471,8 +1471,9 @@ void Environment::_bind_methods() {
 	// Experimental Radiance Cascades probe backend, replacing the per-probe hemisphere trace
 	// above with sdfgi_radiance_cascades.glsl. See that shader for the design note.
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "sdfgi_radiance_cascades_enabled"), "set_sdfgi_radiance_cascades_enabled", "is_sdfgi_radiance_cascades_enabled");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdfgi_rc_base_oct_size", PROPERTY_HINT_RANGE, "1,16,1,or_greater"), "set_sdfgi_rc_base_oct_size", "get_sdfgi_rc_base_oct_size");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdfgi_rc_max_oct_size", PROPERTY_HINT_RANGE, "1,16,1,or_greater"), "set_sdfgi_rc_max_oct_size", "get_sdfgi_rc_max_oct_size");
+	// Octahedral resolution per axis; the renderer supports 4 and 8 (see SDFGI::RC_MIN_OCT_SIZE / RC_MAX_OCT_SIZE).
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdfgi_rc_base_oct_size", PROPERTY_HINT_ENUM, "4:4,8:8"), "set_sdfgi_rc_base_oct_size", "get_sdfgi_rc_base_oct_size");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdfgi_rc_max_oct_size", PROPERTY_HINT_ENUM, "4:4,8:8"), "set_sdfgi_rc_max_oct_size", "get_sdfgi_rc_max_oct_size");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdfgi_rc_angular_branching_log2", PROPERTY_HINT_RANGE, "0,3,1"), "set_sdfgi_rc_angular_branching_log2", "get_sdfgi_rc_angular_branching_log2");
 	// Experimental screen-space probe layer over SDFGI's own probes, see sdfgi_screen_probes.glsl.
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "sdfgi_screen_probes_enabled"), "set_sdfgi_screen_probes_enabled", "is_sdfgi_screen_probes_enabled");
