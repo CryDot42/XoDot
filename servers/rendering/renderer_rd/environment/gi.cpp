@@ -579,9 +579,8 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 
 		radiance_cascade_merged_tex = create_clear_texture(tf_rc_radiance, "SDFGI Radiance Cascade Merged Texture");
 
-		// Trace buffers hold each probe's own interval plus its near band (RC_TRACE_ROWS in the shader).
+		// This frame's and last frame's trace results (per-direction moving average), same layout.
 		RD::TextureFormat tf_rc_trace = tf_rc_radiance;
-		tf_rc_trace.height = probe_axis_count * (SDFGI::RC_MAX_OCT_SIZE * SDFGI::RC_MAX_OCT_SIZE) * 2;
 		radiance_cascade_trace_tex[0] = create_clear_texture(tf_rc_trace, "SDFGI Radiance Cascade Trace Texture 0");
 		radiance_cascade_trace_tex[1] = create_clear_texture(tf_rc_trace, "SDFGI Radiance Cascade Trace Texture 1");
 
@@ -1638,24 +1637,21 @@ void GI::SDFGI::update_probes_radiance_cascades(RID p_env, SkyRD::Sky *p_sky) {
 	const uint32_t cascade_count = cascades.size();
 	const int32_t probe_divisor = cascade_size / SDFGI::PROBE_DIVISOR;
 
-	// Per-cascade angular resolution and distance interval. Angular resolution grows by
-	// 2^rc_angular_branching_log2 per cascade up to rc_max_oct_size. Interval length is
-	// RC_INTERVAL0_CELLS of the cascade's own cells, scaled by its angular resolution relative to
-	// cascade 0, so the next cascade's probe spacing stays small next to the distance its interval
-	// starts at, relative to its angular texel size - what lets Radiance Cascades interpolate the far
-	// field between the next cascade's probes. The last cascade's interval runs out to the sky.
+	// Per-cascade angular resolution and ray reach. Angular resolution grows by
+	// 2^rc_angular_branching_log2 per cascade up to rc_max_oct_size. Each cascade reaches
+	// RC_REACH0_CELLS of its own cells (scaled by its angular resolution relative to cascade 0)
+	// farther than the previous one, so beyond its reach, where the next cascade takes over, that
+	// cascade's sparser probes and finer directions resolve the far field well enough. The last
+	// cascade's rays run out to the sky.
 	uint32_t oct_sizes[SDFGI::MAX_CASCADES];
-	float interval_start[SDFGI::MAX_CASCADES];
-	float interval_end[SDFGI::MAX_CASCADES];
+	float ray_reach[SDFGI::MAX_CASCADES];
 	{
 		float distance = 0.0;
 		for (uint32_t i = 0; i < cascade_count; i++) {
 			const uint32_t shift = MIN(i * rc_angular_branching_log2, 8u);
 			oct_sizes[i] = CLAMP(rc_base_oct_size << shift, rc_base_oct_size, rc_max_oct_size);
-			const float length = float(SDFGI::RC_INTERVAL0_CELLS) * float(oct_sizes[i]) / float(rc_base_oct_size) * cascades[i].cell_size;
-			interval_start[i] = distance;
-			interval_end[i] = i == cascade_count - 1 ? -1.0f : distance + length;
-			distance += length;
+			distance += float(SDFGI::RC_REACH0_CELLS) * float(oct_sizes[i]) / float(rc_base_oct_size) * cascades[i].cell_size;
+			ray_reach[i] = i == cascade_count - 1 ? -1.0f : distance;
 		}
 	}
 
@@ -1698,7 +1694,6 @@ void GI::SDFGI::update_probes_radiance_cascades(RID p_env, SkyRD::Sky *p_sky) {
 	push_constant.ray_bias = probe_bias;
 	push_constant.y_mult = y_mult;
 	push_constant.store_ambient_texture = RendererSceneRenderRD::get_singleton()->environment_get_volumetric_fog_enabled(p_env);
-	push_constant.base_oct_size = rc_base_oct_size;
 
 	const float sky_irradiance_border_size = p_sky != nullptr ? p_sky->uv_border_size : 0.0f;
 	push_constant.sky_irradiance_border_size[0] = sky_irradiance_border_size;
@@ -1762,8 +1757,7 @@ void GI::SDFGI::update_probes_radiance_cascades(RID p_env, SkyRD::Sky *p_sky) {
 		push_constant.cascade = p_cascade;
 		push_constant.oct_size = oct_sizes[p_cascade];
 		push_constant.next_oct_size = p_cascade + 1 < cascade_count ? oct_sizes[p_cascade + 1] : oct_sizes[p_cascade];
-		push_constant.interval_start = interval_start[p_cascade];
-		push_constant.interval_end = interval_end[p_cascade];
+		push_constant.ray_reach = ray_reach[p_cascade];
 		push_constant.history_scroll[0] = history_scroll[p_cascade].x;
 		push_constant.history_scroll[1] = history_scroll[p_cascade].y;
 		push_constant.history_scroll[2] = history_scroll[p_cascade].z;
@@ -1781,7 +1775,7 @@ void GI::SDFGI::update_probes_radiance_cascades(RID p_env, SkyRD::Sky *p_sky) {
 
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
-	// TRACE: every cascade's interval, independent of the others.
+	// TRACE: every cascade, independent of the others.
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->sdfgi_shader.radiance_cascades_pipeline[SDFGIShader::RADIANCE_CASCADES_MODE_TRACE].get_rid());
 	for (uint32_t i = 0; i < cascade_count; i++) {
 		dispatch_cascade(compute_list, i, false);

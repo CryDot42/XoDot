@@ -579,8 +579,8 @@ private:
 			uint32_t next_oct_size;
 
 			int32_t image_size[2];
-			float interval_start;
-			float interval_end; // < 0: unbounded
+			float ray_reach; // < 0: unbounded
+			float ray_bias;
 
 			int32_t history_scroll[3];
 			float history_blend;
@@ -592,10 +592,9 @@ private:
 			uint32_t sky_flags;
 			uint32_t frame;
 
-			float ray_bias;
 			float y_mult;
 			uint32_t store_ambient_texture;
-			uint32_t base_oct_size; // also the near band's resolution, see sdfgi_radiance_cascades.glsl
+			uint32_t pad[2];
 		};
 
 		SdfgiRadianceCascadesShaderRD radiance_cascades;
@@ -759,9 +758,10 @@ public:
 			RC_MIN_OCT_SIZE = 4,
 			RC_MAX_OCT_SIZE = 8,
 			RC_SH_TERMS = 9,
-			// Length of cascade 0's interval, in cascade 0 cells (two probe spacings). Later
-			// cascades scale it by their cell size and their angular resolution relative to cascade 0.
-			RC_INTERVAL0_CELLS = 16,
+			// Ray reach of cascade 0, in cascade 0 cells (two probe spacings). Every later cascade
+			// reaches farther by this many of its own cells, scaled by its angular resolution
+			// relative to cascade 0.
+			RC_REACH0_CELLS = 16,
 		};
 
 		struct Cascade {

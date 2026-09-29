@@ -11,28 +11,31 @@
 // and writes the same octahedral RGBE lightprobe texture sdfgi_integrate.glsl writes, so everything
 // downstream (gi.glsl, the direct light bounce feedback, volumetric fog) reads it unchanged.
 //
-// Every SDFGI cascade's probe grid is one radiance cascade. Cascade c owns a band of distances
-// from its probes, [interval_start, interval_end) in world units (y-scaled space), traced with
-// oct_size^2 directions. Probe spacing doubles per cascade on its own; interval length and angular
-// resolution grow with it, as computed on the C++ side (GI::SDFGI::update_probes_radiance_cascades).
-// The last cascade's interval is unbounded and ends in the sky.
+// Every SDFGI cascade's probe grid is one radiance cascade. Cascade c traces oct_size^2 directions
+// from its probes out to ray_reach world units (y-scaled space). Probe spacing doubles per cascade
+// on its own; reach and angular resolution grow with it, as computed on the C++ side
+// (GI::SDFGI::update_probes_radiance_cascades). The last cascade's rays are unbounded and end in
+// the sky. Beyond a cascade's reach, the next cascade's merged radiance takes over.
 //
-// Unlike textbook Radiance Cascades, where only cascade 0 is ever read, gi.glsl reads every SDFGI
-// cascade directly in its own clipmap region, so every cascade must end up with the radiance
-// arriving from all distances, not just from interval_start onwards. Cascades past the first
-// therefore also trace a near band [0, interval_start) at the base angular resolution, used only
-// for their own output (MODE_PROJECT), never passed down the merge chain.
+// Unlike textbook Radiance Cascades, rays always start at the probe instead of at the end of the
+// previous cascade's interval. SDFGI probes are sparse (8 cells apart), so the next cascade's
+// probes are as far apart as that interval start would be: its rays would start behind walls the
+// nearer cascade's rays never reach, and bring the lighting behind them in (a sealed room would
+// light up from outside). Starting at the probe, what the next cascade contributes is only as
+// wrong as interpolating between SDFGI probes already is, which the occlusion weights below keep
+// in check the same way gi.glsl does. It also means every cascade holds radiance from all
+// distances, which gi.glsl needs, as it reads every cascade directly in its own clipmap region.
 //
-// - MODE_TRACE: march this cascade's interval(s) (moving on to coarser SDF cascades once the ray
+// - MODE_TRACE: march out to this cascade's reach (moving on to coarser SDF cascades once the ray
 //   leaves the current one, like sdfgi_integrate.glsl does) along a direction jittered inside each
 //   octahedral texel every frame, and fold the result into an exponential moving average read from
-//   last frame's buffer, following cascade scrolling. rgb = radiance found inside the interval,
-//   a = transmittance (fraction of the texel's rays that crossed the whole interval unobstructed).
+//   last frame's buffer, following cascade scrolling. rgb = radiance found within reach,
+//   a = transmittance (fraction of the texel's rays that reached ray_reach unobstructed).
 // - MODE_MERGE: from the farthest cascade to the nearest, add the next cascade's merged radiance
 //   in proportion to each direction's transmittance. The next cascade's 8 surrounding probes are
 //   weighted trilinearly times SDFGI's probe visibility (occlusion texture), and probes embedded in
 //   geometry are rejected: without both, light leaks through walls into the merged result.
-// - MODE_PROJECT: put the near band in front of the merged radiance and project to order-2 SH.
+// - MODE_PROJECT: project the merged radiance to order-2 SH.
 // - MODE_STORE: same RGBE9995 octahedral encoding as sdfgi_integrate.glsl's MODE_STORE.
 //
 // Directions live in SDFGI's y-scaled space throughout (the space the SDF volume is in and the
@@ -71,18 +74,15 @@ layout(rgba16f, set = 0, binding = 9) uniform restrict writeonly image2DArray li
 #define RC_MAX_OCT_SIZE 8
 #endif
 #define RC_MAX_ANGULAR_TEXELS (RC_MAX_OCT_SIZE * RC_MAX_OCT_SIZE)
-// Rows per probe in the trace buffers: the cascade's own interval first, then its near band.
-#define RC_TRACE_ROWS (RC_MAX_ANGULAR_TEXELS * 2)
-#define RC_NEAR_ROW_OFFSET RC_MAX_ANGULAR_TEXELS
 
 #define SH_TERMS 9
 
 // Upper bound on sphere tracing steps inside one SDF cascade, so a ray grazing a surface for a long
-// stretch cannot stall the GPU. Such a ray is treated as not having crossed its interval.
+// stretch cannot stall the GPU. Such a ray is treated as having reached its end unobstructed.
 #define RC_MAX_MARCH_STEPS 256
 
-// Per-direction buffers, one layer per cascade. Each probe owns RC_TRACE_ROWS rows in the trace
-// buffers and RC_MAX_ANGULAR_TEXELS rows in the merged one. radiance_cascade_trace (this frame) and
+// Per-direction buffers, one layer per cascade, RC_MAX_ANGULAR_TEXELS rows per probe.
+// radiance_cascade_trace (this frame) and
 // radiance_cascade_trace_history (last frame) are swapped every frame on the C++ side. In
 // radiance_cascade_merged, a = -1 flags a probe embedded in geometry.
 layout(rgba16f, set = 0, binding = 10) uniform restrict image2DArray radiance_cascade_trace;
@@ -111,8 +111,8 @@ layout(push_constant, std430) uniform Params {
 	uint next_oct_size; // angular resolution of cascade + 1 (== oct_size for the last cascade)
 
 	ivec2 image_size;
-	float interval_start; // world units from the probe
-	float interval_end; // world units from the probe, negative = unbounded (last cascade)
+	float ray_reach; // world units from the probe, negative = unbounded (last cascade)
+	float ray_bias;
 
 	ivec3 history_scroll; // add to a probe cell to find where it was stored last frame
 	float history_blend; // weight of this frame's sample in the moving average, 1 = no history
@@ -124,10 +124,10 @@ layout(push_constant, std430) uniform Params {
 	uint sky_flags;
 	uint frame;
 
-	float ray_bias;
 	float y_mult;
 	uint store_ambient_texture;
-	uint base_oct_size; // angular resolution of cascade 0, also used for every cascade's near band
+	uint pad0;
+	uint pad1;
 }
 params;
 
@@ -246,22 +246,20 @@ vec3 rc_sky(vec3 p_dir) {
 	return vec3(0.0);
 }
 
-// Traces [p_start, p_end) from p_probe_pos along p_dir (unit length, y-scaled space); p_end < 0
-// means unbounded. Returns rgb = radiance found inside the interval, a = 1 if nothing was hit.
-vec4 rc_trace_interval(vec3 p_probe_pos, vec3 p_dir, float p_start, float p_end) {
+// Traces from p_probe_pos along p_dir (unit length, y-scaled space) out to p_reach world units,
+// p_reach < 0 meaning unbounded. Returns rgb = radiance found within reach, a = 1 if nothing was hit.
+vec4 rc_trace(vec3 p_probe_pos, vec3 p_dir, float p_reach) {
 	vec3 inv_dir = 1.0 / (p_dir + vec3(equal(p_dir, vec3(0.0))) * 1e-6);
 	vec3 pos_to_uvw = 1.0 / params.grid_size;
 
-	vec3 ray_pos = p_probe_pos + p_dir * p_start;
-	if (p_start <= 0.0) {
-		// Same origin offset sdfgi_integrate.glsl applies, to step out of the probe's own voxel.
-		vec3 abs_dir = abs(p_dir);
-		ray_pos += p_dir * (1.0 / max(abs_dir.x, max(abs_dir.y, abs_dir.z))) * params.ray_bias / cascades.data[params.cascade].to_cell;
-	}
-	float remaining = p_end < 0.0 ? 1e20 : p_end - p_start;
+	// Same origin offset sdfgi_integrate.glsl applies, to step out of the probe's own voxel.
+	vec3 abs_dir = abs(p_dir);
+	float bias = (1.0 / max(abs_dir.x, max(abs_dir.y, abs_dir.z))) * params.ray_bias / cascades.data[params.cascade].to_cell;
+	vec3 ray_pos = p_probe_pos + p_dir * bias;
+	float remaining = p_reach < 0.0 ? 1e20 : max(p_reach - bias, 0.0);
 
 	bool hit = false;
-	bool interval_ended = false;
+	bool reached_end = false;
 	uint hit_cascade = 0;
 	vec3 uvw = vec3(0.0);
 
@@ -290,7 +288,7 @@ vec4 rc_trace_interval(vec3 p_probe_pos, vec3 p_dir, float p_start, float p_end)
 			advance += distance;
 			steps++;
 			if (steps >= RC_MAX_MARCH_STEPS) {
-				interval_ended = true;
+				reached_end = true;
 				break;
 			}
 		}
@@ -299,12 +297,12 @@ vec4 rc_trace_interval(vec3 p_probe_pos, vec3 p_dir, float p_start, float p_end)
 			hit_cascade = j;
 			break;
 		}
-		if (interval_ended || remaining_cells <= max_advance) {
-			interval_ended = true;
+		if (reached_end || remaining_cells <= max_advance) {
+			reached_end = true;
 			break;
 		}
 
-		// Left this cascade before the interval ended, continue from its boundary in the next one.
+		// Left this cascade before reaching the end, continue from its boundary in the next one.
 		float advance_world = max_advance / cascades.data[j].to_cell;
 		ray_pos += p_dir * advance_world;
 		remaining -= advance_world;
@@ -337,11 +335,11 @@ vec4 rc_trace_interval(vec3 p_probe_pos, vec3 p_dir, float p_start, float p_end)
 		return vec4(light, 0.0);
 	}
 
-	if (interval_ended) {
-		return vec4(0.0, 0.0, 0.0, 1.0); // nothing in this band, farther cascades fill it in
+	if (reached_end) {
+		return vec4(0.0, 0.0, 0.0, 1.0); // nothing within reach, farther cascades fill it in
 	}
 
-	// Left the outermost cascade before the interval ended: only the sky lies beyond.
+	// Left the outermost cascade before reaching the end: only the sky lies beyond.
 	return vec4(rc_sky(p_dir), 0.0);
 }
 
@@ -377,43 +375,31 @@ void main() {
 	bool has_history = params.history_blend < 1.0 && all(greaterThanEqual(history_cell, ivec3(0))) && all(lessThan(history_cell, ivec3(params.probe_axis_size)));
 	ivec2 history_texel = rc_probe_texel(history_cell);
 
-	// Row 0..: this cascade's own interval at oct_size. Row RC_NEAR_ROW_OFFSET..: the near band
-	// [0, interval_start) at base_oct_size, which cascade 0 doesn't need (its interval starts at 0).
-	bool has_near = params.interval_start > 0.0;
-	uint near_count = params.base_oct_size * params.base_oct_size;
-	uint row_count = has_near ? RC_NEAR_ROW_OFFSET + near_count : dir_count;
-
-	for (uint row = 0; row < row_count; row++) {
-		bool is_near = row >= RC_NEAR_ROW_OFFSET;
-		if (!is_near && row >= dir_count) {
-			continue; // gap between the (smaller) own interval and the near band
-		}
-
-		// Embedded probes trace nothing (see-through everywhere): MODE_MERGE fills them from the
-		// next cascade, which gives gi.glsl something sensible if it ever reads them.
-		vec4 result = vec4(0.0, 0.0, 0.0, 1.0);
+	for (uint li = 0; li < dir_count; li++) {
+		// Embedded probes trace nothing and stay black, opaque in every direction. Whatever lies
+		// around them is as likely to be on the far side of the wall as on the near one (typically
+		// the sunlit outside of a room), so passing anything in from the next cascade would leak it
+		// into the room along the walls wherever gi.glsl blends them in.
+		vec4 result = vec4(0.0);
 
 		if (!embedded) {
-			uint li = is_near ? row - RC_NEAR_ROW_OFFSET : row;
-			uint h = rc_hash(world_probe ^ uvec3(row * 0x9E3779B9u, params.frame * 0x85EBCA6Bu, params.cascade * 0xC2B2AE35u));
+			uint h = rc_hash(world_probe ^ uvec3(li * 0x9E3779B9u, params.frame * 0x85EBCA6Bu, params.cascade * 0xC2B2AE35u));
 			vec2 jitter = vec2(h & 0xFFFFu, h >> 16u) / 65536.0;
-			if (is_near) {
-				result = rc_trace_interval(probe_pos, rc_direction(li, params.base_oct_size, jitter), 0.0, params.interval_start);
-			} else {
-				result = rc_trace_interval(probe_pos, rc_direction(li, params.oct_size, jitter), params.interval_start, params.interval_end);
-			}
+			result = rc_trace(probe_pos, rc_direction(li, params.oct_size, jitter), params.ray_reach);
 		}
 
 		if (has_history) {
-			vec4 previous = imageLoad(radiance_cascade_trace_history, ivec3(history_texel.x, history_texel.y * RC_TRACE_ROWS + int(row), int(params.cascade)));
+			vec4 previous = imageLoad(radiance_cascade_trace_history, ivec3(history_texel.x, history_texel.y * RC_MAX_ANGULAR_TEXELS + int(li), int(params.cascade)));
 			result = mix(previous, result, params.history_blend);
 		}
 
-		if (any(isnan(result)) || any(isinf(result))) {
+		if (embedded) {
+			result = vec4(0.0); // no history either: a probe that just got buried must not keep its light
+		} else if (any(isnan(result)) || any(isinf(result))) {
 			result = vec4(0.0, 0.0, 0.0, 1.0);
 		}
 
-		imageStore(radiance_cascade_trace, ivec3(pos.x, pos.y * RC_TRACE_ROWS + int(row), int(params.cascade)), result);
+		imageStore(radiance_cascade_trace, ivec3(pos.x, pos.y * RC_MAX_ANGULAR_TEXELS + int(li), int(params.cascade)), result);
 	}
 
 #endif // MODE_TRACE
@@ -483,7 +469,7 @@ void main() {
 
 	for (uint li = 0; li < dir_count; li++) {
 		ivec3 own_pos = ivec3(pos.x, pos.y * RC_MAX_ANGULAR_TEXELS + int(li), int(params.cascade));
-		vec4 own = imageLoad(radiance_cascade_trace, ivec3(pos.x, pos.y * RC_TRACE_ROWS + int(li), int(params.cascade)));
+		vec4 own = imageLoad(radiance_cascade_trace, own_pos);
 
 		vec3 merged = own.rgb;
 
@@ -522,20 +508,8 @@ void main() {
 
 	float weight = (4.0 * PI) / float(dir_count);
 
-	// Past cascade 0 the merged radiance only covers [interval_start, infinity): put this cascade's
-	// near band (traced at base_oct_size) in front of it, so gi.glsl gets radiance from all distances.
-	bool has_near = params.interval_start > 0.0;
-	int near_ratio = int(max(1u, params.oct_size / params.base_oct_size));
-
 	for (uint li = 0; li < dir_count; li++) {
 		vec3 radiance = imageLoad(radiance_cascade_merged, ivec3(pos.x, pos.y * RC_MAX_ANGULAR_TEXELS + int(li), int(params.cascade))).rgb;
-
-		if (has_near) {
-			ivec2 near_xy = ivec2(int(li % params.oct_size), int(li / params.oct_size)) / near_ratio;
-			uint near_li = rc_encode(near_xy, params.base_oct_size);
-			vec4 near_band = imageLoad(radiance_cascade_trace, ivec3(pos.x, pos.y * RC_TRACE_ROWS + RC_NEAR_ROW_OFFSET + int(near_li), int(params.cascade)));
-			radiance = near_band.rgb + near_band.a * radiance;
-		}
 
 		vec3 dir = rc_direction(li, params.oct_size, vec2(0.5)); // texel centre: what the texel's average represents
 
