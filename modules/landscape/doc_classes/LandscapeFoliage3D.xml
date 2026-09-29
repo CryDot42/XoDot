@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LandscapeFoliage3D" inherits="Node3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Foliage (trees, bushes, grass, rocks...) painted on a [Landscape3D].
+	</brief_description>
+	<description>
+		Instances of [LandscapeFoliageType]s placed on the terrain of a [Landscape3D] ancestor, similar to foliage in Unreal Engine. In the editor, they are painted in the Foliage tab of the Landscape dock (paint, erase, single instance, reapply, fill), with undo and redo.
+		Instances are stored in the space of the landscape and sorted into square cells ([member chunk_size]):
+		- each cell is drawn with one [MultiMesh] per level of detail, with the bounds of the cell, so cells are frustum and occlusion culled independently;
+		- the level of detail of each instance is chosen from its distance to the camera of the landscape (see [member Landscape3D.lod_camera_path]). Cells entirely within one level are drawn with that level as a whole and aren't updated until they leave it; cells crossing a level or cull distance are sorted per instance, with hysteresis ([member LandscapeFoliageType.lod_transition]), and only the levels whose instances changed are uploaded;
+		- cells beyond the cull distance have no rendering resources; the updates are limited to a time budget per frame, nearest cells first.
+		The per-instance random value [code]INSTANCE_CUSTOM.x[/code] (between [code]0[/code] and [code]1[/code]) can be used by shaders for variations.
+		When the terrain is sculpted (in the editor or at runtime), instances follow it ([member follow_terrain]).
+		[b]Note:[/b] The transform of this node is ignored: instances are placed in the space of the landscape and move with it.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="add_foliage_type">
+			<return type="int" />
+			<param index="0" name="type" type="LandscapeFoliageType" />
+			<description>
+				Adds a foliage type without instances and returns its index.
+			</description>
+		</method>
+		<method name="add_instance">
+			<return type="bool" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="global_transform" type="Transform3D" />
+			<description>
+				Adds an instance of the type [param type_index] with a global transform. It keeps its height above the ground when the terrain changes.
+			</description>
+		</method>
+		<method name="add_instances">
+			<return type="void" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="global_transforms" type="Transform3D[]" />
+			<description>
+				Adds instances of the type [param type_index] with global transforms.
+			</description>
+		</method>
+		<method name="clear">
+			<return type="void" />
+			<param index="0" name="type_index" type="int" default="-1" />
+			<description>
+				Removes all instances of the type [param type_index] (of all types when negative).
+			</description>
+		</method>
+		<method name="erase">
+			<return type="int" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="global_center" type="Vector3" />
+			<param index="2" name="radius" type="float" />
+			<param index="3" name="density_scale" type="float" default="0.0" />
+			<description>
+				Removes random instances of the type [param type_index] in a horizontal circle (global center, radius in meters) until [param density_scale] times the density of the type is left in it ([code]0[/code]: all of them). A negative type index erases every type. Returns the number of removed instances.
+			</description>
+		</method>
+		<method name="estimate_fill_count" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="type_index" type="int" />
+			<description>
+				Returns the number of instances [method fill] would place on the whole landscape without filters (the density of the type times the area of the landscape).
+			</description>
+		</method>
+		<method name="fill">
+			<return type="int" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="rect" type="Rect2" default="Rect2(0, 0, 0, 0)" />
+			<description>
+				Places the type [param type_index] everywhere its filters allow it, at its density, in a rect of the landscape space (the whole landscape when empty). Existing instances count towards the density. Returns the number of new instances.
+			</description>
+		</method>
+		<method name="find_foliage_type" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="type" type="LandscapeFoliageType" />
+			<description>
+				Returns the index of a foliage type, or [code]-1[/code].
+			</description>
+		</method>
+		<method name="force_update">
+			<return type="void" />
+			<description>
+				Rebuilds the rendering of all cells.
+			</description>
+		</method>
+		<method name="get_foliage_type" qualifiers="const">
+			<return type="LandscapeFoliageType" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the foliage type at [param index].
+			</description>
+		</method>
+		<method name="get_foliage_type_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of foliage types.
+			</description>
+		</method>
+		<method name="get_instance_count" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="type_index" type="int" default="-1" />
+			<description>
+				Returns the number of instances of the type [param type_index] (of all types when negative).
+			</description>
+		</method>
+		<method name="get_instance_transforms" qualifiers="const">
+			<return type="Transform3D[]" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="global_aabb" type="AABB" default="AABB(0, 0, 0, 0, 0, 0)" />
+			<description>
+				Returns the global transforms of the instances of the type [param type_index], optionally only those inside a global [AABB].
+			</description>
+		</method>
+		<method name="get_instances_in_radius" qualifiers="const">
+			<return type="Transform3D[]" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="global_center" type="Vector3" />
+			<param index="2" name="radius" type="float" />
+			<description>
+				Returns the global transforms of the instances of the type [param type_index] in a horizontal circle.
+			</description>
+		</method>
+		<method name="get_instances_in_rect" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="rect" type="Rect2" />
+			<description>
+				Returns the instances of the type [param type_index] in a rect of the landscape space, as raw data ([constant INSTANCE_FLOATS] floats per instance). Used by the undo and redo of the editor tools, with [method set_instances_in_rect].
+			</description>
+		</method>
+		<method name="get_statistics" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns statistics about the instances and their rendering: [code]types[/code], [code]instances[/code], [code]cells[/code], [code]cells_rendered[/code] (cells with rendering resources), [code]cells_mixed[/code] (cells sorted per instance), [code]batches[/code] (drawn multimeshes), [code]instances_drawn[/code], [code]update_usec[/code] and [code]updated_cells[/code] (last update of the levels of detail).
+			</description>
+		</method>
+		<method name="get_type_data" qualifiers="const">
+			<return type="PackedByteArray" />
+			<param index="0" name="type_index" type="int" />
+			<description>
+				Returns the instances of the type [param type_index] compressed, as stored in [member instance_data].
+			</description>
+		</method>
+		<method name="move_foliage_type">
+			<return type="void" />
+			<param index="0" name="from" type="int" />
+			<param index="1" name="to" type="int" />
+			<description>
+				Moves the foliage type at index [param from] (with its instances) to index [param to].
+			</description>
+		</method>
+		<method name="paint">
+			<return type="int" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="global_center" type="Vector3" />
+			<param index="2" name="radius" type="float" />
+			<param index="3" name="density_scale" type="float" default="1.0" />
+			<description>
+				Adds instances of the type [param type_index] in a horizontal circle (global center, radius in meters) until [param density_scale] times its density is reached where its filters allow it. Repeated calls at the same place don't add more. Returns the number of new instances.
+			</description>
+		</method>
+		<method name="place_instance">
+			<return type="bool" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="global_position" type="Vector3" />
+			<description>
+				Places one instance of the type [param type_index] on the ground below a global position, with the placement settings of the type (without its filters). Returns [code]false[/code] outside of the landscape.
+			</description>
+		</method>
+		<method name="reapply">
+			<return type="int" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="global_center" type="Vector3" />
+			<param index="2" name="radius" type="float" />
+			<description>
+				Applies the current placement settings (scale, rotation, alignment, offset) and filters of the type [param type_index] to its instances in a horizontal circle: instances that don't match the filters anymore are removed. Returns the number of changed or removed instances.
+			</description>
+		</method>
+		<method name="remove_foliage_type">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Removes the foliage type at [param index] and its instances.
+			</description>
+		</method>
+		<method name="remove_instances_in_radius">
+			<return type="int" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="global_center" type="Vector3" />
+			<param index="2" name="radius" type="float" />
+			<description>
+				Removes the instances of the type [param type_index] in a horizontal circle (a negative type index removes all types). Returns the number of removed instances.
+			</description>
+		</method>
+		<method name="set_foliage_type">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="type" type="LandscapeFoliageType" />
+			<description>
+				Replaces the foliage type at [param index], keeping its instances.
+			</description>
+		</method>
+		<method name="set_instances_in_rect">
+			<return type="void" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="rect" type="Rect2" />
+			<param index="2" name="instances" type="PackedFloat32Array" />
+			<description>
+				Replaces the instances of the type [param type_index] in a rect of the landscape space by raw instances (see [method get_instances_in_rect]).
+			</description>
+		</method>
+		<method name="set_type_data">
+			<return type="void" />
+			<param index="0" name="type_index" type="int" />
+			<param index="1" name="data" type="PackedByteArray" />
+			<description>
+				Replaces all the instances of the type [param type_index] by compressed data (see [method get_type_data]).
+			</description>
+		</method>
+		<method name="snap_to_terrain">
+			<return type="void" />
+			<param index="0" name="rect" type="Rect2" default="Rect2(0, 0, 0, 0)" />
+			<description>
+				Puts the instances in a rect of the landscape space (all of them when empty) back on the terrain.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="cast_shadows" type="bool" setter="set_cast_shadows" getter="is_casting_shadows" default="true">
+			If [code]false[/code], no level of detail casts shadows.
+		</member>
+		<member name="chunk_size" type="float" setter="set_chunk_size" getter="get_chunk_size" default="32.0">
+			Size in meters of the cells (chunks) the instances are sorted into. Smaller cells are culled more precisely and switch levels of detail as a whole more often, at the cost of more draw calls.
+		</member>
+		<member name="foliage_types" type="LandscapeFoliageType[]" setter="set_foliage_types" getter="get_foliage_types" default="[]">
+			The foliage types of the instances. Use [method add_foliage_type], [method remove_foliage_type] and [method set_foliage_type] to change them while keeping the instances.
+		</member>
+		<member name="follow_terrain" type="bool" setter="set_follow_terrain" getter="is_following_terrain" default="true">
+			If [code]true[/code], instances are put back on the terrain (keeping their offset from the ground and adjusting their alignment) when the heights of the landscape change under them.
+		</member>
+		<member name="instance_data" type="Array" setter="set_instance_data" getter="get_instance_data" default="[]">
+			The instances of each foliage type, compressed (see [method get_type_data]).
+		</member>
+		<member name="lod_distance_scale" type="float" setter="set_lod_distance_scale" getter="get_lod_distance_scale" default="1.0">
+			Multiplies the level of detail and cull distances of all foliage types (e.g. a quality setting).
+		</member>
+		<member name="render_layers" type="int" setter="set_render_layers" getter="get_render_layers" default="1">
+			The render layers the foliage is drawn on.
+		</member>
+	</members>
+	<constants>
+		<constant name="INSTANCE_FLOATS" value="16">
+			Number of floats of an instance in the raw data of [method get_instances_in_rect]: the 3 x 4 transform in the layout of [MultiMesh] buffers, the offset from the ground, the random value and the alignment normal.
+		</constant>
+	</constants>
+</class>

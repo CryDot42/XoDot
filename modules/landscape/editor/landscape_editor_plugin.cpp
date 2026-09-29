@@ -175,6 +175,10 @@ void LandscapeEditor::_mode_changed(int p_mode) {
 	paint_panel->set_visible(mode == MODE_PAINT);
 	brush_panel->set_visible(mode == MODE_SCULPT || mode == MODE_PAINT);
 	splines_panel->set_visible(mode == MODE_SPLINES);
+	foliage_panel->set_visible(mode == MODE_FOLIAGE);
+	if (mode != MODE_FOLIAGE) {
+		foliage_panel->cancel_stroke();
+	}
 	if (mode != MODE_SPLINES && spline_draw->is_pressed()) {
 		spline_draw->set_pressed(false);
 	}
@@ -623,6 +627,10 @@ bool LandscapeEditor::_update_cursor(Camera3D *p_camera, const Point2 &p_positio
 
 void LandscapeEditor::_update_brush_preview() {
 	if (!landscape) {
+		return;
+	}
+	if (mode == MODE_FOLIAGE) {
+		foliage_panel->update_brush_preview();
 		return;
 	}
 	if (!cursor_valid || mode == MODE_MANAGE || !is_visible_in_tree()) {
@@ -1113,6 +1121,9 @@ EditorPlugin::AfterGUIInput LandscapeEditor::forward_3d_gui_input(Camera3D *p_ca
 	if (mode == MODE_SPLINES) {
 		return _spline_gui_input(p_camera, p_event);
 	}
+	if (mode == MODE_FOLIAGE) {
+		return foliage_panel->forward_3d_gui_input(p_camera, p_event);
+	}
 	if (!_validate_landscape() || mode == MODE_MANAGE || landscape->get_data().is_null() || !landscape->get_data()->is_valid()) {
 		return EditorPlugin::AFTER_GUI_INPUT_PASS;
 	}
@@ -1186,6 +1197,7 @@ void LandscapeEditor::edit(Landscape3D *p_landscape) {
 	_update_info();
 	spline_list_hash = 0;
 	_update_spline_list();
+	foliage_panel->edit(landscape);
 	if (landscape && (landscape->get_data().is_null() || !landscape->get_data()->is_valid())) {
 		// Nothing to sculpt yet, start with the creation settings.
 		mode_tabs->set_current_tab(MODE_MANAGE);
@@ -1211,6 +1223,18 @@ void LandscapeEditor::edit_spline(LandscapeSpline3D *p_spline) {
 	_update_spline_panel();
 }
 
+void LandscapeEditor::edit_foliage(LandscapeFoliage3D *p_foliage) {
+	if (p_foliage && p_foliage->get_landscape()) {
+		// The landscape of the foliage is edited, in the Foliage mode.
+		_validate_landscape();
+		if (landscape != p_foliage->get_landscape()) {
+			edit(p_foliage->get_landscape());
+		}
+		mode_tabs->set_current_tab(MODE_FOLIAGE);
+	}
+	foliage_panel->edit_foliage(p_foliage);
+}
+
 void LandscapeEditor::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_THEME_CHANGED: {
@@ -1227,6 +1251,9 @@ void LandscapeEditor::_notification(int p_what) {
 		} break;
 
 		case NOTIFICATION_PROCESS: {
+			if (mode == MODE_FOLIAGE) {
+				foliage_panel->process(get_process_delta_time());
+			}
 			if (mode == MODE_SPLINES) {
 				spline_timer -= get_process_delta_time();
 				if (spline_timer <= 0.0) {
@@ -1319,6 +1346,7 @@ LandscapeEditor::LandscapeEditor() {
 	mode_tabs->add_tab(TTR("Sculpt"));
 	mode_tabs->add_tab(TTR("Paint"));
 	mode_tabs->add_tab(TTR("Splines"));
+	mode_tabs->add_tab(TTR("Foliage"));
 	mode_tabs->set_clip_tabs(false);
 	mode_tabs->connect("tab_changed", callable_mp(this, &LandscapeEditor::_mode_changed));
 	main_vb->add_child(mode_tabs);
@@ -1581,6 +1609,10 @@ LandscapeEditor::LandscapeEditor() {
 		splines_panel->add_child(help);
 	}
 
+	/* Foliage */
+	foliage_panel = memnew(LandscapeFoliagePanel);
+	main_vb->add_child(foliage_panel);
+
 	/* Brush */
 	brush_panel = memnew(VBoxContainer);
 	main_vb->add_child(brush_panel);
@@ -1740,9 +1772,19 @@ void LandscapeEditorPlugin::_notification(int p_what) {
 			Node3DEditor::get_singleton()->add_gizmo_plugin(spline_gizmo_plugin);
 			material_conversion_plugin.instantiate();
 			add_resource_conversion_plugin(material_conversion_plugin);
+			foliage_inspector_plugin.instantiate();
+			add_inspector_plugin(foliage_inspector_plugin);
+			foliage_lod_dialog = memnew(LandscapeFoliageLodDialog);
+			EditorNode::get_singleton()->get_gui_base()->add_child(foliage_lod_dialog);
 		} break;
 
 		case NOTIFICATION_EXIT_TREE: {
+			if (foliage_lod_dialog) {
+				foliage_lod_dialog->queue_free();
+				foliage_lod_dialog = nullptr;
+			}
+			remove_inspector_plugin(foliage_inspector_plugin);
+			foliage_inspector_plugin.unref();
 			remove_resource_conversion_plugin(material_conversion_plugin);
 			material_conversion_plugin.unref();
 			Node3DEditor::get_singleton()->remove_gizmo_plugin(spline_gizmo_plugin);
@@ -1772,11 +1814,16 @@ void LandscapeEditorPlugin::edit(Object *p_object) {
 		landscape_editor->edit_spline(spline);
 		return;
 	}
+	LandscapeFoliage3D *foliage = Object::cast_to<LandscapeFoliage3D>(p_object);
+	if (foliage) {
+		landscape_editor->edit_foliage(foliage);
+		return;
+	}
 	landscape_editor->edit(Object::cast_to<Landscape3D>(p_object));
 }
 
 bool LandscapeEditorPlugin::handles(Object *p_object) const {
-	return Object::cast_to<Landscape3D>(p_object) != nullptr || Object::cast_to<LandscapeSpline3D>(p_object) != nullptr;
+	return Object::cast_to<Landscape3D>(p_object) != nullptr || Object::cast_to<LandscapeSpline3D>(p_object) != nullptr || Object::cast_to<LandscapeFoliage3D>(p_object) != nullptr;
 }
 
 void LandscapeEditorPlugin::make_visible(bool p_visible) {

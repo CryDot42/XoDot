@@ -33,6 +33,7 @@
 #include "../landscape_3d.h"
 #include "../landscape_brush.h"
 #include "../landscape_spline_3d.h"
+#include "landscape_foliage_editor.h"
 #include "landscape_spline_editor.h"
 
 #include "core/object/undo_redo.h"
@@ -67,7 +68,7 @@ public:
 };
 
 // UE-like "Landscape Mode" panel: Manage, Sculpt and Paint tools with shared brush settings,
-// and the Splines tools (roads, rivers, streams, lakes).
+// the Splines tools (roads, rivers, streams, lakes) and the Foliage tools.
 class LandscapeEditor : public EditorDock {
 	GDCLASS(LandscapeEditor, EditorDock);
 
@@ -77,6 +78,7 @@ public:
 		MODE_SCULPT,
 		MODE_PAINT,
 		MODE_SPLINES,
+		MODE_FOLIAGE,
 	};
 
 	enum SplineAction {
@@ -171,6 +173,9 @@ private:
 
 	bool updating_ui = false;
 
+	// Foliage.
+	LandscapeFoliagePanel *foliage_panel = nullptr;
+
 	// Splines.
 	VBoxContainer *splines_panel = nullptr;
 	ItemList *spline_list = nullptr;
@@ -263,6 +268,7 @@ public:
 	EditorPlugin::AfterGUIInput forward_3d_gui_input(Camera3D *p_camera, const Ref<InputEvent> &p_event);
 	void edit(Landscape3D *p_landscape);
 	void edit_spline(LandscapeSpline3D *p_spline);
+	void edit_foliage(LandscapeFoliage3D *p_foliage);
 	Landscape3D *get_landscape() const { return landscape; }
 
 	LandscapeEditor();
@@ -275,6 +281,8 @@ class LandscapeEditorPlugin : public EditorPlugin {
 	Ref<LandscapeGizmoPlugin> gizmo_plugin;
 	Ref<LandscapeSplineGizmoPlugin> spline_gizmo_plugin;
 	Ref<LandscapeSplineMaterialConversionPlugin> material_conversion_plugin;
+	Ref<LandscapeFoliageInspectorPlugin> foliage_inspector_plugin;
+	LandscapeFoliageLodDialog *foliage_lod_dialog = nullptr;
 
 	static Camera3D *_get_editor_camera();
 

@@ -43,6 +43,12 @@
 				Returns the index of the material layer with the highest weight at the given global position.
 			</description>
 		</method>
+		<method name="get_foliages" qualifiers="const">
+			<return type="LandscapeFoliage3D[]" />
+			<description>
+				Returns the [LandscapeFoliage3D] descendants painted on this landscape.
+			</description>
+		</method>
 		<method name="get_height_at" qualifiers="const">
 			<return type="float" />
 			<param index="0" name="global_position" type="Vector3" />

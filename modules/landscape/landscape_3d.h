@@ -43,6 +43,7 @@
 #include "scene/resources/shader.h"
 
 class Camera3D;
+class LandscapeFoliage3D;
 class LandscapeSpline3D;
 class TriangleMesh;
 
@@ -209,6 +210,10 @@ private:
 	void _update_splines(bool p_immediate);
 	TypedArray<LandscapeSpline3D> _get_splines_bind() const;
 
+	// Foliage (follows the terrain).
+	LocalVector<LandscapeFoliage3D *> foliages;
+	TypedArray<LandscapeFoliage3D> _get_foliages_bind() const;
+
 	void _clear_collision();
 	void _update_collision();
 	void _mark_collision_dirty(const Rect2i &p_rect);
@@ -304,7 +309,12 @@ public:
 	void update_splines(); // Applies the pending spline changes to the terrain now.
 	void rebuild_splines(); // Applies every spline again.
 	bool has_pending_spline_changes() const { return spline_system.has_pending_changes(); }
-	// Position of the camera used for the LOD (and to build spline meshes around it).
+	// Foliage.
+	void _register_foliage(LandscapeFoliage3D *p_foliage);
+	void _unregister_foliage(LandscapeFoliage3D *p_foliage);
+	const LocalVector<LandscapeFoliage3D *> &get_foliages() const { return foliages; }
+
+	// Position of the camera used for the LOD (and to build spline meshes and foliage around it).
 	bool get_view_position(Vector3 &r_global) const;
 
 	// Editor support.
