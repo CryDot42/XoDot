@@ -191,13 +191,14 @@ void main() {
 
 	vec4 radiance = vec4(0.0);
 	vec3 ray_dir = vec3(0.0, 0.0, 1.0);
+	vec3 normal = vec3(0.0);
 
 	if (valid) {
 		float depth = texelFetch(sampler2D(depth_buffer, linear_sampler), pixel, 0).r;
 		vec3 view_pos = reconstruct_view_position(uv, depth);
 		vec3 view_normal = normalize(normal_roughness.xyz * 2.0 - 1.0);
 
-		vec3 normal = normalize(mat3(params.cam_basis) * view_normal);
+		normal = normalize(mat3(params.cam_basis) * view_normal);
 		vec3 origin = mat3(params.cam_basis) * view_pos;
 
 		// Stratified uniform hemisphere sample, rotated randomly every frame.
@@ -297,7 +298,8 @@ void main() {
 		imageStore(probe_sh, ivec3(probe, 0), sh_red[0]);
 		imageStore(probe_sh, ivec3(probe, 1), sh_green[0]);
 		imageStore(probe_sh, ivec3(probe, 2), sh_blue[0]);
-		imageStore(probe_sh, ivec3(probe, 3), sh_visibility[0]);
+		// Only the average visibility is kept, along with the normal the hemisphere was traced around.
+		imageStore(probe_sh, ivec3(probe, 3), vec4(sh_visibility[0].x, normal));
 	}
 }
 
