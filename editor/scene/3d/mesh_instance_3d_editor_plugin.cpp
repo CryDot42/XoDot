@@ -32,10 +32,12 @@
 
 #include "core/io/resource_loader.h"
 #include "core/object/callable_mp.h"
+#include "editor/docks/editor_dock_manager.h"
 #include "editor/editor_node.h"
 #include "editor/editor_string_names.h"
 #include "editor/editor_undo_redo_manager.h"
 #include "editor/inspector/multi_node_edit.h"
+#include "editor/scene/3d/mesh_vertex_paint_editor.h"
 #include "editor/scene/3d/node_3d_editor_plugin.h"
 #include "editor/themes/editor_scale.h"
 #include "scene/3d/navigation/navigation_region_3d.h"
@@ -575,6 +577,9 @@ void MeshInstance3DEditor::_menu_option(int p_option) {
 			}
 			_create_uv_lines(1);
 		} break;
+		case MENU_OPTION_VERTEX_PAINT: {
+			vertex_paint_callback.call(node);
+		} break;
 	}
 }
 
@@ -790,6 +795,8 @@ void MeshInstance3DEditor::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_THEME_CHANGED: {
 			options->set_button_icon(get_editor_theme_icon(SNAME("MeshInstance3D")));
+			PopupMenu *popup = options->get_popup();
+			popup->set_item_icon(popup->get_item_index(MENU_OPTION_VERTEX_PAINT), get_editor_theme_icon(SNAME("Paint")));
 		} break;
 	}
 }
@@ -812,6 +819,9 @@ MeshInstance3DEditor::MeshInstance3DEditor() {
 	options->get_popup()->add_item(TTR("View UV1"), MENU_OPTION_DEBUG_UV1);
 	options->get_popup()->add_item(TTR("View UV2"), MENU_OPTION_DEBUG_UV2);
 	options->get_popup()->add_item(TTR("Unwrap UV2 for Lightmap/AO"), MENU_OPTION_CREATE_UV2);
+	options->get_popup()->add_separator();
+	options->get_popup()->add_item(TTR("Vertex Paint..."), MENU_OPTION_VERTEX_PAINT);
+	options->get_popup()->set_item_tooltip(-1, TTR("Open the tools to paint the colors of the vertices of the mesh in the viewport."));
 
 	options->get_popup()->connect(SceneStringName(id_pressed), callable_mp(this, &MeshInstance3DEditor::_menu_option));
 
@@ -934,27 +944,58 @@ MeshInstance3DEditor::MeshInstance3DEditor() {
 	navigation_mesh_dialog->connect(SceneStringName(confirmed), callable_mp(this, &MeshInstance3DEditor::_create_navigation_mesh));
 }
 
-void MeshInstance3DEditorPlugin::edit(Object *p_object) {
-	{
-		MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(p_object);
-		if (mi) {
-			mesh_editor->edit(mi);
-			return;
-		}
+void MeshInstance3DEditorPlugin::_open_vertex_paint(Object *p_node) {
+	MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(p_node);
+	if (!vertex_paint_editor || !mi) {
+		return;
 	}
+	vertex_paint_editor->edit(mi);
+	vertex_paint_editor->set_active(true);
+}
+
+void MeshInstance3DEditorPlugin::_notification(int p_what) {
+	switch (p_what) {
+		case NOTIFICATION_ENTER_TREE: {
+			vertex_paint_editor = memnew(MeshVertexPaintEditor);
+			EditorDockManager::get_singleton()->add_dock(vertex_paint_editor);
+			vertex_paint_editor->close();
+		} break;
+
+		case NOTIFICATION_EXIT_TREE: {
+			vertex_paint_editor->set_active(false);
+			EditorDockManager::get_singleton()->remove_dock(vertex_paint_editor);
+			memdelete(vertex_paint_editor);
+			vertex_paint_editor = nullptr;
+		} break;
+	}
+}
+
+EditorPlugin::AfterGUIInput MeshInstance3DEditorPlugin::forward_3d_gui_input(Camera3D *p_camera, const Ref<InputEvent> &p_event) {
+	if (!vertex_paint_editor || !vertex_paint_editor->is_active()) {
+		return EditorPlugin::AFTER_GUI_INPUT_PASS;
+	}
+	return vertex_paint_editor->forward_3d_gui_input(p_camera, p_event);
+}
+
+void MeshInstance3DEditorPlugin::edit(Object *p_object) {
+	MeshInstance3D *edited = Object::cast_to<MeshInstance3D>(p_object);
 
 	Ref<MultiNodeEdit> mne = Ref<MultiNodeEdit>(p_object);
 	Node *edited_scene = EditorNode::get_singleton()->get_edited_scene();
-	if (mne.is_valid() && edited_scene) {
+	if (!edited && mne.is_valid() && edited_scene) {
 		for (int i = 0; i < mne->get_node_count(); i++) {
 			MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(edited_scene->get_node(mne->get_node(i)));
 			if (mi) {
-				mesh_editor->edit(mi);
-				return;
+				edited = mi;
+				break;
 			}
 		}
 	}
-	mesh_editor->edit(nullptr);
+	mesh_editor->edit(edited);
+	if (vertex_paint_editor) {
+		// Painting goes on with the newly selected mesh.
+		vertex_paint_editor->edit(edited);
+	}
 }
 
 bool MeshInstance3DEditorPlugin::handles(Object *p_object) const {
@@ -985,11 +1026,16 @@ void MeshInstance3DEditorPlugin::make_visible(bool p_visible) {
 	} else {
 		mesh_editor->options->hide();
 		mesh_editor->edit(nullptr);
+		if (vertex_paint_editor) {
+			vertex_paint_editor->set_active(false);
+			vertex_paint_editor->edit(nullptr);
+		}
 	}
 }
 
 MeshInstance3DEditorPlugin::MeshInstance3DEditorPlugin() {
 	mesh_editor = memnew(MeshInstance3DEditor);
+	mesh_editor->vertex_paint_callback = callable_mp(this, &MeshInstance3DEditorPlugin::_open_vertex_paint);
 	EditorNode::get_singleton()->get_gui_base()->add_child(mesh_editor);
 
 	mesh_editor->options->hide();
