@@ -3998,6 +3998,17 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 	}
 
 	{
+		// No cached directional shadow atlas either. The shader declares it next to the one
+		// above, for every mode, so this pass has to supply it too.
+		RD::Uniform u;
+		u.binding = 39;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		RID texture = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
+		u.append_id(texture);
+		uniforms.push_back(u);
+	}
+
+	{
 		// No Lightmaps
 		RD::Uniform u;
 		u.binding = 7;
