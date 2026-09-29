@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="OctahedralImpostorBaker" inherits="RefCounted" api_type="editor" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Bakes the views of a node into the atlases of an octahedral impostor (editor only).
+	</brief_description>
+	<description>
+		Renders a node and its visible descendants from [member frames] × [member frames] directions and packs the views into the atlases of an [OctahedralImpostorMaterial3D]. The editor uses it for the [b]Create Octahedral Impostor[/b] dialog (context menus of the Scene and FileSystem docks), it can also be used by editor scripts, e.g. to bake many objects at once:
+		[codeblock]
+		var baker = OctahedralImpostorBaker.new()
+		baker.frames = 16
+		baker.atlas_size = 2048
+		for tree in get_tree().get_nodes_in_group("trees"):
+		    if baker.bake(tree) == OK:
+		        baker.save("res://impostors/%s.tres" % tree.name.to_snake_case())
+		[/codeblock]
+		The baked geometry is the one of the [MeshInstance3D], [MultiMeshInstance3D] and root [CSGShape3D] nodes, with their materials (including [ShaderMaterial]s), material overrides and overlays, blend shapes and instance shader parameters. Hidden nodes, geometry that only casts shadows, far levels of detail ([member GeometryInstance3D.visibility_range_begin] greater than [code]0[/code]) and impostors are skipped. The views are rendered with the renderer of the editor, the frames of a region of the atlas in a single draw, and supersampled.
+		The albedo atlas is the unshaded color of the materials. With the Forward+ renderer, the normals and the depth are read from the buffers of the renderer, so they include the normal maps and the custom shaders of all the materials. With the other renderers, and for the ORM atlas, the materials are replaced by materials with their parameters: all the parameters of [BaseMaterial3D], and the usual parameter names of [ShaderMaterial]s ([code]albedo[/code], [code]texture_albedo[/code], [code]alpha_scissor_threshold[/code], [code]texture_normal[/code], [code]roughness[/code], [code]metallic[/code]...).
+		The empty pixels of each frame are filled with the colors of their neighbors, so that filtering and mipmaps don't bring in the background.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="bake">
+			<return type="int" enum="Error" />
+			<param index="0" name="node" type="Node" />
+			<param index="1" name="show_progress" type="bool" default="false" />
+			<description>
+				Bakes the atlases of the impostor of [param node], which must be a [Node3D]. The node doesn't have to be inside the scene tree, except for [CSGShape3D] nodes. The views are in the space of the node: the impostor has the transform of the node (without its own transform). If [param show_progress] is [code]true[/code], a progress dialog is shown, which allows to cancel the bake ([constant ERR_SKIP] is returned then).
+			</description>
+		</method>
+		<method name="create_material" qualifiers="const">
+			<return type="OctahedralImpostorMaterial3D" />
+			<description>
+				Returns a new material with the result of the last bake, with [ImageTexture]s of the atlases. Useful for previews: use [method save] to create the resources of an impostor.
+			</description>
+		</method>
+		<method name="get_albedo_image" qualifiers="const">
+			<return type="Image" />
+			<description>
+				Returns the albedo atlas of the last bake: color and coverage.
+			</description>
+		</method>
+		<method name="get_frame_size" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the size in pixels of a frame of the atlas with the current settings: [member atlas_size] divided by [member frames], rounded down to a multiple of 4 (the size of the blocks of the compressed texture formats). The atlas is [member frames] times this size.
+			</description>
+		</method>
+		<method name="get_normal_depth_image" qualifiers="const">
+			<return type="Image" />
+			<description>
+				Returns the normal and depth atlas of the last bake, see [member OctahedralImpostorMaterial3D.normal_depth_texture].
+			</description>
+		</method>
+		<method name="get_orm_image" qualifiers="const">
+			<return type="Image" />
+			<description>
+				Returns the ORM atlas of the last bake, or [code]null[/code] if [member bake_orm] was [code]false[/code].
+			</description>
+		</method>
+		<method name="get_sphere_center" qualifiers="const">
+			<return type="Vector3" />
+			<description>
+				Returns the center of the bounding sphere of the last bake, in the space of the node.
+			</description>
+		</method>
+		<method name="get_sphere_radius" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns the radius of the bounding sphere of the last bake. It contains the geometry with a margin of a few pixels in each frame.
+			</description>
+		</method>
+		<method name="save">
+			<return type="Mesh" />
+			<param index="0" name="path" type="String" />
+			<description>
+				Saves the result of the last bake: the atlases next to [param path] as [code]&lt;name&gt;_albedo.png[/code], [code]&lt;name&gt;_normal_depth.png[/code] and [code]&lt;name&gt;_orm.png[/code] (imported as compressed textures with mipmaps), and a [QuadMesh] with an [OctahedralImpostorMaterial3D] at [param path]. Returns the mesh, or [code]null[/code] on error. When the mesh is already loaded (e.g. baked again), it is updated in place, so the scenes that use it show the new impostor. The import settings of the atlases changed after a previous bake are kept.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="atlas_size" type="int" setter="set_atlas_size" getter="get_atlas_size" default="2048">
+			The size in pixels of the atlases. It's rounded down to a multiple of the [member frames], see [method get_frame_size].
+		</member>
+		<member name="bake_orm" type="bool" setter="set_bake_orm" getter="is_baking_orm" default="false">
+			If [code]true[/code], also bakes the ORM atlas (ambient occlusion, roughness and metallic). Otherwise the impostor uses the mean roughness and metallic of the materials.
+		</member>
+		<member name="frames" type="int" setter="set_frames" getter="get_frames" default="12">
+			The number of views per side of the atlas. More views give smoother transitions between them, at the cost of the resolution of each view.
+		</member>
+		<member name="layout" type="int" setter="set_layout" getter="get_layout" enum="OctahedralImpostorMaterial3D.Layout" default="0">
+			The directions of the views, see [enum OctahedralImpostorMaterial3D.Layout].
+		</member>
+		<member name="supersampling" type="int" setter="set_supersampling" getter="get_supersampling" default="2">
+			The views are rendered at this factor of the resolution of the atlas and downsampled, for smooth edges.
+		</member>
+	</members>
+</class>

@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="OctahedralImpostorMaterial3D" inherits="Material" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		A material that draws an object from far away with a quad and the views of an octahedral impostor.
+	</brief_description>
+	<description>
+		The material of an octahedral impostor: a camera-facing quad that shows an object from the views baked around it, so that a single quad replaces a mesh of any complexity at a distance (trees, rocks, props, buildings). The views are taken from directions spread over a sphere or a hemisphere with an octahedral mapping, in [member frames] × [member frames] frames of an atlas. For each pixel, the material:
+		- Blends the three views closest to the direction of the camera ([member blend_frames]), so the object turns smoothly.
+		- Offsets the texture coordinates of each view with its depth ([member parallax_scale]), so the parallax between the views matches the shape of the object.
+		- Lights the object with the object space normals of the views, like the real object.
+		- Writes the depth of the surface ([member depth_offset_enabled]), so the impostor intersects the ground and other objects correctly, and casts and receives shadows like the object.
+		Impostors are created by the editor: right-click a node with meshes in the Scene dock, or a scene in the FileSystem dock, and choose [b]Create Octahedral Impostor[/b]. The editor bakes the atlases with [OctahedralImpostorBaker] and saves a [QuadMesh] with this material, which can be used by a [MeshInstance3D] (e.g. as the far level of detail of the node, with the visibility ranges of [GeometryInstance3D]) or a [MultiMeshInstance3D].
+		The mesh must be a quad with texture coordinates from 0 to 1 (such as [QuadMesh]): the vertex shader places its corners around the bounding sphere, facing the camera. Its custom AABB should contain [method get_bounds] for culling.
+		[b]Note:[/b] The scale of the node should be uniform. The impostor is lit as an opaque object, transparent materials of the baked object become alpha tested.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_bounds" qualifiers="const">
+			<return type="AABB" />
+			<description>
+				Returns the box that contains the quad for any direction of view, in the space of the object. Use it as the custom AABB of the mesh ([member PrimitiveMesh.custom_aabb]).
+			</description>
+		</method>
+		<method name="get_texture" qualifiers="const">
+			<return type="Texture2D" />
+			<param index="0" name="param" type="int" enum="OctahedralImpostorMaterial3D.TextureParam" />
+			<description>
+				Returns the [Texture2D] associated with the specified [enum TextureParam].
+			</description>
+		</method>
+		<method name="set_texture">
+			<return type="void" />
+			<param index="0" name="param" type="int" enum="OctahedralImpostorMaterial3D.TextureParam" />
+			<param index="1" name="texture" type="Texture2D" />
+			<description>
+				Sets the texture for the slot specified by [param param]. See [enum TextureParam] for available slots.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="albedo_color" type="Color" setter="set_albedo_color" getter="get_albedo_color" default="Color(1, 1, 1, 1)">
+			The color multiplied with the albedo atlas. Its alpha channel multiplies the coverage.
+		</member>
+		<member name="albedo_texture" type="Texture2D" setter="set_texture" getter="get_texture">
+			The albedo atlas: the color of the views in RGB (sRGB) and their coverage in A.
+		</member>
+		<member name="alpha_antialiasing_edge" type="float" setter="set_alpha_antialiasing_edge" getter="get_alpha_antialiasing_edge" default="0.3">
+			Threshold at which the alpha to coverage antialiasing takes effect, see [member BaseMaterial3D.alpha_antialiasing_edge].
+		</member>
+		<member name="alpha_antialiasing_mode" type="int" setter="set_alpha_antialiasing" getter="get_alpha_antialiasing" enum="BaseMaterial3D.AlphaAntiAliasing" default="0">
+			The antialiasing of the edges with MSAA, see [member BaseMaterial3D.alpha_antialiasing_mode].
+		</member>
+		<member name="alpha_hash_scale" type="float" setter="set_alpha_hash_scale" getter="get_alpha_hash_scale" default="1.0">
+			The hashing scale of the dithering, for [constant TRANSPARENCY_ALPHA_HASH]. See [member BaseMaterial3D.alpha_hash_scale].
+		</member>
+		<member name="alpha_scissor_threshold" type="float" setter="set_alpha_scissor_threshold" getter="get_alpha_scissor_threshold" default="0.5">
+			The coverage below which the pixels are discarded, for [constant TRANSPARENCY_ALPHA_SCISSOR].
+		</member>
+		<member name="ao_light_affect" type="float" setter="set_ao_light_affect" getter="get_ao_light_affect" default="0.0">
+			How much the ambient occlusion of the ORM atlas affects the direct lights, see [member BaseMaterial3D.ao_light_affect]. Only with [member orm_texture].
+		</member>
+		<member name="backlight" type="Color" setter="set_backlight" getter="get_backlight" default="Color(0, 0, 0, 1)">
+			The color of the light that goes through the object (e.g. through the leaves of trees), see [member BaseMaterial3D.backlight].
+		</member>
+		<member name="backlight_enabled" type="bool" setter="set_backlight_enabled" getter="is_backlight_enabled" default="false">
+			If [code]true[/code], the light that comes from behind the object goes through it, with the [member backlight] color.
+		</member>
+		<member name="blend_frames" type="bool" setter="set_blend_frames" getter="is_blending_frames" default="true">
+			If [code]true[/code], the three views closest to the direction of the camera are blended, for smooth transitions when the object turns. If [code]false[/code], only the closest view is shown, which is faster but pops between the views.
+		</member>
+		<member name="depth_offset_enabled" type="bool" setter="set_depth_offset_enabled" getter="is_depth_offset_enabled" default="true">
+			If [code]true[/code], the pixels write the depth of the surface of the object read from the depth of the views, and are lit at that position: the impostor intersects the ground and other objects like the object, casts shadows with the shape of the object and doesn't shadow itself. Writing the depth disables some optimizations of the depth test.
+			If [code]false[/code], the quad is moved toward the camera by half of the radius of the bounding sphere (away from the light in shadow passes) to limit the intersections and the self-shadowing.
+		</member>
+		<member name="frames" type="int" setter="set_frames" getter="get_frames" default="12">
+			The number of views per side of the atlas. Must match the atlases.
+		</member>
+		<member name="layout" type="int" setter="set_layout" getter="get_layout" enum="OctahedralImpostorMaterial3D.Layout" default="0">
+			The directions of the views of the atlas. Must match the atlases.
+		</member>
+		<member name="metallic" type="float" setter="set_metallic" getter="get_metallic" default="0.0">
+			The metallic of the impostor, a multiplier of the metallic of the ORM atlas when [member orm_texture] is set.
+		</member>
+		<member name="metallic_specular" type="float" setter="set_metallic_specular" getter="get_metallic_specular" default="0.5">
+			The intensity of the specular reflections of non-metallic surfaces, see [member BaseMaterial3D.metallic_specular].
+		</member>
+		<member name="normal_depth_texture" type="Texture2D" setter="set_texture" getter="get_texture">
+			The normal and depth atlas: the object space normal of the views in RGB (encoded from [code]0[/code] to [code]1[/code]) and their depth in A, from the front ([code]0[/code]) to the back ([code]1[/code]) of the bounding sphere along the direction of the view. This texture must not be imported as a normal map.
+		</member>
+		<member name="orm_texture" type="Texture2D" setter="set_texture" getter="get_texture">
+			The optional ORM atlas: the ambient occlusion, roughness and metallic of the views in the red, green and blue channels.
+		</member>
+		<member name="parallax_scale" type="float" setter="set_parallax_scale" getter="get_parallax_scale" default="1.0">
+			How much the depth of the views shifts their texture coordinates to the surface of the object along the view ray. [code]1.0[/code] matches the depth of the object, [code]0.0[/code] disables the parallax.
+		</member>
+		<member name="roughness" type="float" setter="set_roughness" getter="get_roughness" default="1.0">
+			The roughness of the impostor, a multiplier of the roughness of the ORM atlas when [member orm_texture] is set.
+		</member>
+		<member name="sphere_center" type="Vector3" setter="set_sphere_center" getter="get_sphere_center" default="Vector3(0, 0, 0)">
+			The center of the bounding sphere of the object, in the space of the object. The views look at this point.
+		</member>
+		<member name="sphere_radius" type="float" setter="set_sphere_radius" getter="get_sphere_radius" default="1.0">
+			The radius of the bounding sphere of the object. Each view covers a square of twice this size.
+		</member>
+		<member name="transparency" type="int" setter="set_transparency" getter="get_transparency" enum="OctahedralImpostorMaterial3D.Transparency" default="0">
+			How the coverage of the views makes the pixels transparent.
+		</member>
+		<member name="vertex_color_use_as_albedo" type="bool" setter="set_vertex_color_use_as_albedo" getter="is_vertex_color_used_as_albedo" default="false">
+			If [code]true[/code], the vertex color (e.g. the colors of the instances of a [MultiMesh]) multiplies the albedo, for variations of the impostors.
+		</member>
+	</members>
+	<constants>
+		<constant name="LAYOUT_HEMISPHERE" value="0" enum="Layout">
+			The views are taken from the upper hemisphere only, for objects that are never seen from below (e.g. trees, rocks, buildings). Views from below use the views of the horizon. Gives more views and resolution for the directions that are seen.
+		</constant>
+		<constant name="LAYOUT_FULL_SPHERE" value="1" enum="Layout">
+			The views are taken from all directions, for objects that can be seen from below.
+		</constant>
+		<constant name="LAYOUT_MAX" value="2" enum="Layout">
+			Represents the size of the [enum Layout] enum.
+		</constant>
+		<constant name="TRANSPARENCY_ALPHA_SCISSOR" value="0" enum="Transparency">
+			The pixels with a coverage below [member alpha_scissor_threshold] are discarded.
+		</constant>
+		<constant name="TRANSPARENCY_ALPHA_HASH" value="1" enum="Transparency">
+			The coverage is dithered with a hash, smoother with temporal antialiasing.
+		</constant>
+		<constant name="TRANSPARENCY_MAX" value="2" enum="Transparency">
+			Represents the size of the [enum Transparency] enum.
+		</constant>
+		<constant name="TEXTURE_ALBEDO" value="0" enum="TextureParam">
+			The albedo atlas, see [member albedo_texture].
+		</constant>
+		<constant name="TEXTURE_NORMAL_DEPTH" value="1" enum="TextureParam">
+			The normal and depth atlas, see [member normal_depth_texture].
+		</constant>
+		<constant name="TEXTURE_ORM" value="2" enum="TextureParam">
+			The ORM atlas, see [member orm_texture].
+		</constant>
+		<constant name="TEXTURE_MAX" value="3" enum="TextureParam">
+			Represents the size of the [enum TextureParam] enum.
+		</constant>
+	</constants>
+</class>
