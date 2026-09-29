@@ -221,6 +221,9 @@ layout(set = 0, binding = 20) uniform texture2D sky_texture;
 
 layout(set = 0, binding = 21) uniform texture2D area_light_atlas;
 
+// Atlas of the cascades that are only rendered once in a while, see DIRECTIONAL_LIGHT_DYNAMIC_CASCADES.
+layout(set = 0, binding = 22) uniform texture2D directional_shadow_atlas_cached;
+
 float get_depth_at_pos(float cell_depth_size, int z) {
 	float d = float(z) * cell_depth_size + cell_depth_size * 0.5; //center of voxels
 	d = pow(d, params.detail_spread);
@@ -407,28 +410,18 @@ void main() {
 					vec4 v = vec4(view_pos, 1.0);
 					float z_range;
 
-					if (depth_z < directional_lights.data[i].shadow_split_offsets.x) {
-						pssm_coord = (directional_lights.data[i].shadow_matrix1 * v);
-						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.x;
+					const uint cascade = directional_light_cascade_from_depth(directional_lights.data[i].shadow_split_offsets[0], directional_lights.data[i].shadow_split_offsets[1], directional_lights.data[i].shadow_cascade_count, depth_z);
 
-					} else if (depth_z < directional_lights.data[i].shadow_split_offsets.y) {
-						pssm_coord = (directional_lights.data[i].shadow_matrix2 * v);
-						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.y;
+					pssm_coord = (directional_lights.data[i].shadow_matrix[cascade] * v);
+					pssm_coord /= pssm_coord.w;
+					z_range = DIRECTIONAL_LIGHT_CASCADE_VALUE(directional_lights.data[i].shadow_z_range, cascade);
 
-					} else if (depth_z < directional_lights.data[i].shadow_split_offsets.z) {
-						pssm_coord = (directional_lights.data[i].shadow_matrix3 * v);
-						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.z;
-
+					float depth;
+					if (cascade < DIRECTIONAL_LIGHT_DYNAMIC_CASCADES) {
+						depth = texture(sampler2D(directional_shadow_atlas, linear_sampler), pssm_coord.xy).r;
 					} else {
-						pssm_coord = (directional_lights.data[i].shadow_matrix4 * v);
-						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.w;
+						depth = texture(sampler2D(directional_shadow_atlas_cached, linear_sampler), pssm_coord.xy).r;
 					}
-
-					float depth = texture(sampler2D(directional_shadow_atlas, linear_sampler), pssm_coord.xy).r;
 					float shadow = exp(min(0.0, (pssm_coord.z - depth)) * z_range * INV_FOG_FADE);
 
 					shadow = mix(shadow, 1.0, smoothstep(directional_lights.data[i].fade_from, directional_lights.data[i].fade_to, view_pos.z)); //done with negative values for performance

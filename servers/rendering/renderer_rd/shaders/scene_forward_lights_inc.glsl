@@ -452,6 +452,31 @@ half sample_directional_soft_shadow(texture2D shadow, vec3 pssm_coord, vec2 tex_
 	}
 }
 
+// The shadow maps of the cascades are in two atlases, this samples the one the cascade is rendered to.
+half sample_directional_pcf_shadow_cascade(uint cascade, vec2 shadow_pixel_size, vec4 coord, float taa_frame_count) {
+	if (cascade < DIRECTIONAL_LIGHT_DYNAMIC_CASCADES) {
+		return sample_directional_pcf_shadow(directional_shadow_atlas, shadow_pixel_size, coord, taa_frame_count);
+	} else {
+		return sample_directional_pcf_shadow(directional_shadow_atlas_cached, shadow_pixel_size, coord, taa_frame_count);
+	}
+}
+
+half sample_directional_soft_shadow_cascade(uint cascade, vec3 pssm_coord, vec2 tex_scale, float taa_frame_count) {
+	if (cascade < DIRECTIONAL_LIGHT_DYNAMIC_CASCADES) {
+		return sample_directional_soft_shadow(directional_shadow_atlas, pssm_coord, tex_scale, taa_frame_count);
+	} else {
+		return sample_directional_soft_shadow(directional_shadow_atlas_cached, pssm_coord, tex_scale, taa_frame_count);
+	}
+}
+
+float sample_directional_shadow_depth_cascade(uint cascade, vec2 uv) {
+	if (cascade < DIRECTIONAL_LIGHT_DYNAMIC_CASCADES) {
+		return textureLod(sampler2D(directional_shadow_atlas, SAMPLER_LINEAR_CLAMP), uv, 0.0).r;
+	} else {
+		return textureLod(sampler2D(directional_shadow_atlas_cached, SAMPLER_LINEAR_CLAMP), uv, 0.0).r;
+	}
+}
+
 #endif // SHADOWS_DISABLED
 
 half get_omni_attenuation(float distance, float inv_range, float decay) {

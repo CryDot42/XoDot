@@ -200,7 +200,11 @@ void DebugEffects::draw_shadow_frustum(RID p_light, const Projection &p_cam_proj
 		splits = 4;
 	} else if (shadow_mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS) {
 		splits = 2;
+	} else if (shadow_mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS) {
+		splits = 8;
 	}
+	// Only the dynamic cascades are in the atlas that is displayed.
+	const int drawn_splits = MIN(splits, (int)RendererSceneRender::DIRECTIONAL_LIGHT_DYNAMIC_CASCADES);
 
 	// Setup our camera info (this is mostly a duplicate of the logic found in RendererSceneCull::_light_instance_setup_directional_shadow).
 	bool is_orthogonal = p_cam_projection.is_orthogonal();
@@ -224,10 +228,10 @@ void DebugEffects::draw_shadow_frustum(RID p_light, const Projection &p_cam_proj
 	min_distance = MIN(min_distance, max_distance);
 	real_t range = max_distance - min_distance;
 
-	real_t distances[5];
+	real_t distances[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES + 1];
 	distances[0] = min_distance;
-	for (int i = 0; i < splits; i++) {
-		distances[i + 1] = min_distance + RSG::light_storage->light_get_param(base, RSE::LightParam(RSE::LIGHT_PARAM_SHADOW_SPLIT_1_OFFSET + i)) * range;
+	for (int i = 0; i < splits - 1; i++) {
+		distances[i + 1] = min_distance + RSG::light_storage->light_get_param(base, RSE::light_param_shadow_split_offset(i)) * range;
 	};
 	distances[splits] = max_distance;
 
@@ -238,7 +242,7 @@ void DebugEffects::draw_shadow_frustum(RID p_light, const Projection &p_cam_proj
 		Color(1.0, 1.0, 0.0, 0.1),
 	};
 
-	for (int split = 0; split < splits; split++) {
+	for (int split = 0; split < drawn_splits; split++) {
 		// Load frustum points into vertex buffer.
 		uint8_t *w = points.ptrw();
 		Vector3 *vw = (Vector3 *)w;
@@ -301,13 +305,13 @@ void DebugEffects::draw_shadow_frustum(RID p_light, const Projection &p_cam_proj
 
 		RD::get_singleton()->draw_list_end();
 
-		if (split < (splits - 1) && splits > 1) {
+		if (split < (drawn_splits - 1) && drawn_splits > 1) {
 			// Also draw it in the last split so we get a proper overview of the whole view frustum...
 
 			// Get our light projection info.
-			light_projection = light_storage->light_instance_get_shadow_camera(p_light, (splits - 1));
-			light_transform = light_storage->light_instance_get_shadow_transform(p_light, (splits - 1));
-			atlas_rect_norm = light_storage->light_instance_get_directional_shadow_atlas_rect(p_light, (splits - 1));
+			light_projection = light_storage->light_instance_get_shadow_camera(p_light, (drawn_splits - 1));
+			light_transform = light_storage->light_instance_get_shadow_transform(p_light, (drawn_splits - 1));
+			atlas_rect_norm = light_storage->light_instance_get_directional_shadow_atlas_rect(p_light, (drawn_splits - 1));
 
 			if (!is_orthogonal) {
 				light_transform.orthogonalize();

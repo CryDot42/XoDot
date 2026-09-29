@@ -155,6 +155,12 @@ void LightStorage::_light_initialize(RID p_light, RSE::LightType p_type) {
 	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_1_OFFSET] = 0.1;
 	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_2_OFFSET] = 0.3;
 	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_3_OFFSET] = 0.6;
+	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_4_OFFSET] = 0.7;
+	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_5_OFFSET] = 0.8;
+	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_6_OFFSET] = 0.9;
+	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_7_OFFSET] = 0.95;
+	light.param[RSE::LIGHT_PARAM_SHADOW_CACHE_UPDATE_INTERVAL] = 8.0;
+	light.param[RSE::LIGHT_PARAM_SHADOW_CACHE_MARGIN] = 0.25;
 	light.param[RSE::LIGHT_PARAM_SHADOW_FADE_START] = 0.8;
 	light.param[RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS] = 1.0;
 	light.param[RSE::LIGHT_PARAM_SHADOW_BIAS] = 0.02;
@@ -234,6 +240,10 @@ void LightStorage::light_set_param(RID p_light, RSE::LightParam p_param, float p
 		case RSE::LIGHT_PARAM_SHADOW_SPLIT_1_OFFSET:
 		case RSE::LIGHT_PARAM_SHADOW_SPLIT_2_OFFSET:
 		case RSE::LIGHT_PARAM_SHADOW_SPLIT_3_OFFSET:
+		case RSE::LIGHT_PARAM_SHADOW_SPLIT_4_OFFSET:
+		case RSE::LIGHT_PARAM_SHADOW_SPLIT_5_OFFSET:
+		case RSE::LIGHT_PARAM_SHADOW_SPLIT_6_OFFSET:
+		case RSE::LIGHT_PARAM_SHADOW_SPLIT_7_OFFSET:
 		case RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS:
 		case RSE::LIGHT_PARAM_SHADOW_PANCAKE_SIZE:
 		case RSE::LIGHT_PARAM_SHADOW_BIAS: {
@@ -627,7 +637,7 @@ void LightStorage::light_instance_set_shadow_transform(RID p_light_instance, con
 	LightInstance *light_instance = light_instance_owner.get_or_null(p_light_instance);
 	ERR_FAIL_NULL(light_instance);
 
-	ERR_FAIL_INDEX(p_pass, 6);
+	ERR_FAIL_INDEX(p_pass, RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES);
 
 	light_instance->shadow_transform[p_pass].camera = p_projection;
 	light_instance->shadow_transform[p_pass].transform = p_transform;
@@ -816,9 +826,17 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				}
 
 				light_data.bake_mode = light->bake_mode;
+				light_data.shadow_cascade_count = 0;
+
+				if (light_data.shadow_opacity > 0.001 && light_instance->directional_cascade_count == 0) {
+					// The scene culling did not set up any cascade for this light, there is no shadow to sample.
+					light_data.shadow_opacity = 0.0;
+				}
 
 				if (light_data.shadow_opacity > 0.001) {
-					RSE::LightDirectionalShadowMode smode = light->directional_shadow_mode;
+					const uint32_t cascade_count = light_instance->directional_cascade_count;
+					const uint32_t limit = cascade_count - 1; // Last cascade in use.
+					light_data.shadow_cascade_count = cascade_count;
 
 					light_data.soft_shadow_scale = light->param[RSE::LIGHT_PARAM_SHADOW_BLUR];
 					light_data.softshadow_angle = angular_diameter;
@@ -827,9 +845,8 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 						light_data.soft_shadow_scale *= RendererSceneRenderRD::get_singleton()->directional_shadow_quality_radius_get(); // Only use quality radius for PCF
 					}
 
-					int limit = smode == RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL ? 0 : (smode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS ? 1 : 3);
-					light_data.blend_splits = (smode != RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL) && light->directional_blend_splits;
-					for (int j = 0; j < 4; j++) {
+					light_data.blend_splits = (cascade_count > 1) && light->directional_blend_splits;
+					for (uint32_t j = 0; j < RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES; j++) {
 						Rect2 atlas_rect = light_instance->shadow_transform[j].atlas_rect;
 						Projection correction;
 						correction.set_depth_correction(false, true, false);
@@ -855,24 +872,8 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 						Vector2 uv_scale = light_instance->shadow_transform[j].uv_scale;
 						uv_scale *= atlas_rect.size; //adapt to atlas size
-						switch (j) {
-							case 0: {
-								light_data.uv_scale1[0] = uv_scale.x;
-								light_data.uv_scale1[1] = uv_scale.y;
-							} break;
-							case 1: {
-								light_data.uv_scale2[0] = uv_scale.x;
-								light_data.uv_scale2[1] = uv_scale.y;
-							} break;
-							case 2: {
-								light_data.uv_scale3[0] = uv_scale.x;
-								light_data.uv_scale3[1] = uv_scale.y;
-							} break;
-							case 3: {
-								light_data.uv_scale4[0] = uv_scale.x;
-								light_data.uv_scale4[1] = uv_scale.y;
-							} break;
-						}
+						light_data.uv_scale[j][0] = uv_scale.x;
+						light_data.uv_scale[j][1] = uv_scale.y;
 					}
 
 					float fade_start = light->param[RSE::LIGHT_PARAM_SHADOW_FADE_START];
@@ -2789,19 +2790,39 @@ uint32_t LightStorage::get_shadow_atlas_depth_usage_bits() {
 /* DIRECTIONAL SHADOW */
 
 void LightStorage::update_directional_shadow_atlas() {
-	if (directional_shadow.depth.is_null() && directional_shadow.size > 0) {
-		RD::TextureFormat tf;
-		tf.format = get_shadow_atlas_depth_format(directional_shadow.use_16_bits);
-		tf.width = directional_shadow.size;
-		tf.height = directional_shadow.size;
-		tf.usage_bits = get_shadow_atlas_depth_usage_bits();
+	RD::TextureFormat tf;
+	tf.format = get_shadow_atlas_depth_format(directional_shadow.use_16_bits);
+	tf.width = directional_shadow.size;
+	tf.height = directional_shadow.size;
+	tf.usage_bits = get_shadow_atlas_depth_usage_bits();
 
+	if (directional_shadow.depth.is_null() && directional_shadow.size > 0) {
 		directional_shadow.depth = RD::get_singleton()->texture_create(tf, RD::TextureView());
 		Vector<RID> fb_tex;
 		fb_tex.push_back(directional_shadow.depth);
 		directional_shadow.fb = RD::get_singleton()->framebuffer_create(fb_tex);
 	}
+
+	if (directional_shadow.cached_needed && directional_shadow.cached_depth.is_null() && directional_shadow.size > 0) {
+		// Its contents are undefined until the cascades get rendered, which the cache generation takes care of.
+		directional_shadow.cached_depth = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		Vector<RID> fb_tex;
+		fb_tex.push_back(directional_shadow.cached_depth);
+		directional_shadow.cached_fb = RD::get_singleton()->framebuffer_create(fb_tex);
+	}
 }
+
+void LightStorage::_directional_shadow_free_cached_atlas() {
+	if (directional_shadow.cached_depth.is_valid()) {
+		RD::get_singleton()->free_rid(directional_shadow.cached_depth);
+		directional_shadow.cached_depth = RID();
+		directional_shadow.cached_fb = RID();
+		RendererSceneRenderRD::get_singleton()->base_uniforms_changed();
+	}
+	// Whatever got rendered to it is lost, even if it did not exist yet: this is what makes lights render their cached cascades.
+	directional_shadow.cache_generation++;
+}
+
 void LightStorage::directional_shadow_atlas_set_size(int p_size, bool p_16_bits) {
 	p_size = Math::nearest_power_of_2_templated(p_size);
 
@@ -2817,11 +2838,37 @@ void LightStorage::directional_shadow_atlas_set_size(int p_size, bool p_16_bits)
 		directional_shadow.depth = RID();
 		RendererSceneRenderRD::get_singleton()->base_uniforms_changed();
 	}
+
+	_directional_shadow_free_cached_atlas();
 }
 
 void LightStorage::set_directional_shadow_count(int p_count) {
 	directional_shadow.light_count = p_count;
 	directional_shadow.current_light = 0;
+
+	// Lights tell whether they use cached cascades while they are set up (after this is called). Release the atlas
+	// of the cached cascades when nothing used it for a while, and let the lights know its contents are gone.
+	if (directional_shadow.cached_needed) {
+		directional_shadow.cached_unused_frames = 0;
+	} else if (directional_shadow.cached_depth.is_valid() && ++directional_shadow.cached_unused_frames > CACHED_ATLAS_RELEASE_FRAMES) {
+		_directional_shadow_free_cached_atlas();
+	}
+	directional_shadow.cached_needed = false;
+}
+
+void LightStorage::light_instance_set_directional_shadow_cascade_count(RID p_light_instance, uint32_t p_cascade_count) {
+	LightInstance *light_instance = light_instance_owner.get_or_null(p_light_instance);
+	ERR_FAIL_NULL(light_instance);
+	ERR_FAIL_COND(p_cascade_count > RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES);
+
+	light_instance->directional_cascade_count = p_cascade_count;
+	if (p_cascade_count > RendererSceneRender::DIRECTIONAL_LIGHT_DYNAMIC_CASCADES) {
+		directional_shadow.cached_needed = true;
+	}
+}
+
+uint32_t LightStorage::directional_shadow_cache_get_generation() const {
+	return directional_shadow.cache_generation;
 }
 
 static Rect2i _get_directional_shadow_rect(int p_size, int p_shadow_count, int p_shadow_index) {
@@ -2865,11 +2912,61 @@ int LightStorage::get_directional_light_shadow_size(RID p_light_instance) {
 			r.size.height /= 2;
 			break;
 		case RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_4_SPLITS:
+		case RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS:
 			r.size /= 2;
 			break;
 	}
 
 	return MAX(r.size.width, r.size.height);
+}
+
+int LightStorage::get_directional_light_cached_shadow_size(RID p_light_instance) {
+	ERR_FAIL_COND_V(directional_shadow.light_count == 0, 0);
+
+	// The 4 cached cascades are laid out on a 2x2 grid over the slice of the atlas of the light.
+	Rect2i r = _get_directional_shadow_rect(directional_shadow.size, directional_shadow.light_count, 0);
+	r.size /= 2;
+	return MAX(r.size.width, r.size.height);
+}
+
+void LightStorage::light_instance_setup_directional_shadow_atlas(RID p_light_instance) {
+	LightInstance *light_instance = light_instance_owner.get_or_null(p_light_instance);
+	ERR_FAIL_NULL(light_instance);
+
+	light_instance->directional_rect = get_directional_shadow_rect();
+	directional_shadow.current_light++;
+
+	const float atlas_size = directional_shadow.size;
+	for (uint32_t i = 0; i < light_instance->directional_cascade_count; i++) {
+		Rect2 atlas_rect_norm = light_instance_get_directional_cascade_rect(p_light_instance, i);
+		atlas_rect_norm.position /= atlas_size;
+		atlas_rect_norm.size /= atlas_size;
+		light_instance->shadow_transform[i].atlas_rect = atlas_rect_norm;
+	}
+}
+
+Rect2i LightStorage::light_instance_get_directional_cascade_rect(RID p_light_instance, int p_pass) {
+	LightInstance *light_instance = light_instance_owner.get_or_null(p_light_instance);
+	ERR_FAIL_NULL_V(light_instance, Rect2i());
+
+	Rect2i rect = light_instance->directional_rect;
+
+	if (directional_shadow_cascade_is_cached(p_pass)) {
+		// 2x2 grid, in a different atlas than the dynamic cascades.
+		const int index = p_pass - RendererSceneRender::DIRECTIONAL_LIGHT_DYNAMIC_CASCADES;
+		rect.size /= 2;
+		rect.position.x += (index & 1) * rect.size.width;
+		rect.position.y += (index >> 1) * rect.size.height;
+	} else if (light_instance->directional_cascade_count > 2) {
+		rect.size /= 2;
+		rect.position.x += (p_pass & 1) * rect.size.width;
+		rect.position.y += (p_pass >> 1) * rect.size.height;
+	} else if (light_instance->directional_cascade_count == 2) {
+		rect.size.height /= 2;
+		rect.position.y += p_pass * rect.size.height;
+	}
+
+	return rect;
 }
 
 /* SHADOW CUBEMAPS */

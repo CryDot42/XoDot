@@ -1407,6 +1407,7 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		settings.area_light_buffer = RendererRD::LightStorage::get_singleton()->get_area_light_buffer();
 		settings.area_light_atlas = RendererRD::TextureStorage::get_singleton()->area_light_atlas_get_texture();
 		settings.directional_shadow_depth = RendererRD::LightStorage::get_singleton()->directional_shadow_get_texture();
+		settings.directional_shadow_cached_depth = RendererRD::LightStorage::get_singleton()->directional_shadow_get_cached_texture();
 		settings.directional_light_buffer = RendererRD::LightStorage::get_singleton()->get_directional_light_buffer();
 
 		settings.vfog = fog;
@@ -2748,6 +2749,7 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 	bool finalize_cubemap = false;
 
 	bool flip_y = false;
+	bool clear_region = p_clear_region;
 
 	Projection light_projection;
 	Transform3D light_transform;
@@ -2756,8 +2758,7 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 		//set pssm stuff
 		uint64_t last_scene_shadow_pass = light_storage->light_instance_get_shadow_pass(p_light);
 		if (last_scene_shadow_pass != get_scene_pass()) {
-			light_storage->light_instance_set_directional_rect(p_light, light_storage->get_directional_shadow_rect());
-			light_storage->directional_shadow_increase_current_light();
+			light_storage->light_instance_setup_directional_shadow_atlas(p_light);
 			light_storage->light_instance_set_shadow_pass(p_light, get_scene_pass());
 		}
 
@@ -2765,37 +2766,15 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 		light_projection = light_storage->light_instance_get_shadow_camera(p_light, p_pass);
 		light_transform = light_storage->light_instance_get_shadow_transform(p_light, p_pass);
 
-		atlas_rect = light_storage->light_instance_get_directional_rect(p_light);
-
-		if (light_storage->light_directional_get_shadow_mode(base) == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_4_SPLITS) {
-			atlas_rect.size.width /= 2;
-			atlas_rect.size.height /= 2;
-
-			if (p_pass == 1) {
-				atlas_rect.position.x += atlas_rect.size.width;
-			} else if (p_pass == 2) {
-				atlas_rect.position.y += atlas_rect.size.height;
-			} else if (p_pass == 3) {
-				atlas_rect.position += atlas_rect.size;
-			}
-		} else if (light_storage->light_directional_get_shadow_mode(base) == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS) {
-			atlas_rect.size.height /= 2;
-
-			if (p_pass == 0) {
-			} else {
-				atlas_rect.position.y += atlas_rect.size.height;
-			}
-		}
-
-		float directional_shadow_size = light_storage->directional_shadow_get_size();
-		Rect2 atlas_rect_norm = atlas_rect;
-		atlas_rect_norm.position /= directional_shadow_size;
-		atlas_rect_norm.size /= directional_shadow_size;
-		light_storage->light_instance_set_directional_shadow_atlas_rect(p_light, p_pass, atlas_rect_norm);
+		atlas_rect = light_storage->light_instance_get_directional_cascade_rect(p_light, p_pass);
 
 		zfar = RSG::light_storage->light_get_param(base, RSE::LIGHT_PARAM_RANGE);
 
-		render_fb = light_storage->direction_shadow_get_fb();
+		render_fb = light_storage->directional_shadow_get_cascade_fb(p_pass);
+		if (RendererRD::LightStorage::directional_shadow_cascade_is_cached(p_pass)) {
+			// The atlas of the cached cascades is not cleared as a whole, it has to be done for the region of the cascade being rendered.
+			clear_region = true;
+		}
 		render_texture = RID();
 		flip_y = true;
 
@@ -2911,7 +2890,7 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 
 	} else {
 		//render shadow
-		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_viewport_size, p_main_cam_transform);
+		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, clear_region, p_open_pass, p_close_pass, p_render_info, p_viewport_size, p_main_cam_transform);
 	}
 }
 
@@ -3594,6 +3573,17 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 		if (p_use_directional_shadow_atlas && RendererRD::LightStorage::get_singleton()->directional_shadow_get_texture().is_valid()) {
 			u.append_id(RendererRD::LightStorage::get_singleton()->directional_shadow_get_texture());
+		} else {
+			u.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH));
+		}
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 39;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		if (p_use_directional_shadow_atlas && RendererRD::LightStorage::get_singleton()->directional_shadow_get_cached_texture().is_valid()) {
+			u.append_id(RendererRD::LightStorage::get_singleton()->directional_shadow_get_cached_texture());
 		} else {
 			u.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH));
 		}

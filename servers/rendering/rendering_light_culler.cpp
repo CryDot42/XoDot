@@ -95,7 +95,7 @@ void RenderingLightCuller::prepare_directional_light_begin(const RendererSceneCu
 
 void RenderingLightCuller::prepare_directional_light_cascade(int32_t p_directional_light_id, int32_t p_cascade, const Vector<Plane> &p_receiver_frustum_planes, const Vector3 *p_receiver_frustum_points) {
 	ERR_FAIL_INDEX(p_directional_light_id, (int32_t)data.directional_cull_planes.size());
-	ERR_FAIL_INDEX(p_cascade, 4);
+	ERR_FAIL_INDEX(p_cascade, RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES);
 	ERR_FAIL_COND(p_receiver_frustum_planes.size() != NUM_CAM_PLANES);
 	ERR_FAIL_NULL(p_receiver_frustum_points);
 

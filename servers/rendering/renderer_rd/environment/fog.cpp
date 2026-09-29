@@ -795,7 +795,10 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 		RD::get_singleton()->compute_list_end();
 	}
 
-	bool gi_dependent_sets_valid = fog->sync_gi_dependent_sets_validity();
+	const bool directional_shadow_atlases_changed = fog->directional_shadow_depth != p_settings.directional_shadow_depth || fog->directional_shadow_cached_depth != p_settings.directional_shadow_cached_depth;
+	fog->directional_shadow_depth = p_settings.directional_shadow_depth;
+	fog->directional_shadow_cached_depth = p_settings.directional_shadow_cached_depth;
+	bool gi_dependent_sets_valid = fog->sync_gi_dependent_sets_validity(directional_shadow_atlases_changed);
 	if (!fog->copy_uniform_set.is_null() && !RD::get_singleton()->uniform_set_is_valid(fog->copy_uniform_set)) {
 		fog->copy_uniform_set = RID();
 	}
@@ -1002,6 +1005,19 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 				u.append_id(p_settings.area_light_atlas);
 			}
 
+			uniforms.push_back(u);
+			copy_uniforms.push_back(u);
+		}
+
+		{
+			RD::Uniform u;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			u.binding = 22;
+			if (p_settings.directional_shadow_cached_depth.is_valid()) {
+				u.append_id(p_settings.directional_shadow_cached_depth);
+			} else {
+				u.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK));
+			}
 			uniforms.push_back(u);
 			copy_uniforms.push_back(u);
 		}

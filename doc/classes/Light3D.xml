@@ -213,7 +213,25 @@
 		<constant name="PARAM_CONTACT_SHADOW_BLUR" value="22" enum="Param">
 			Constant for accessing [member shadow_contact_shadows_blur].
 		</constant>
-		<constant name="PARAM_MAX" value="23" enum="Param">
+		<constant name="PARAM_SHADOW_SPLIT_4_OFFSET" value="23" enum="Param">
+			Constant for accessing [member DirectionalLight3D.directional_shadow_split_4].
+		</constant>
+		<constant name="PARAM_SHADOW_SPLIT_5_OFFSET" value="24" enum="Param">
+			Constant for accessing [member DirectionalLight3D.directional_shadow_split_5].
+		</constant>
+		<constant name="PARAM_SHADOW_SPLIT_6_OFFSET" value="25" enum="Param">
+			Constant for accessing [member DirectionalLight3D.directional_shadow_split_6].
+		</constant>
+		<constant name="PARAM_SHADOW_SPLIT_7_OFFSET" value="26" enum="Param">
+			Constant for accessing [member DirectionalLight3D.directional_shadow_split_7].
+		</constant>
+		<constant name="PARAM_SHADOW_CACHE_UPDATE_INTERVAL" value="27" enum="Param">
+			Constant for accessing [member DirectionalLight3D.directional_shadow_cache_update_interval].
+		</constant>
+		<constant name="PARAM_SHADOW_CACHE_MARGIN" value="28" enum="Param">
+			Constant for accessing [member DirectionalLight3D.directional_shadow_cache_margin].
+		</constant>
+		<constant name="PARAM_MAX" value="29" enum="Param">
 			Represents the size of the [enum Param] enum.
 		</constant>
 		<constant name="BAKE_DISABLED" value="0" enum="BakeMode">

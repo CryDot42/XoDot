@@ -475,6 +475,12 @@ void Light3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(PARAM_INTENSITY);
 	BIND_ENUM_CONSTANT(PARAM_CONTACT_SHADOW_OPACITY);
 	BIND_ENUM_CONSTANT(PARAM_CONTACT_SHADOW_BLUR);
+	BIND_ENUM_CONSTANT(PARAM_SHADOW_SPLIT_4_OFFSET);
+	BIND_ENUM_CONSTANT(PARAM_SHADOW_SPLIT_5_OFFSET);
+	BIND_ENUM_CONSTANT(PARAM_SHADOW_SPLIT_6_OFFSET);
+	BIND_ENUM_CONSTANT(PARAM_SHADOW_SPLIT_7_OFFSET);
+	BIND_ENUM_CONSTANT(PARAM_SHADOW_CACHE_UPDATE_INTERVAL);
+	BIND_ENUM_CONSTANT(PARAM_SHADOW_CACHE_MARGIN);
 	BIND_ENUM_CONSTANT(PARAM_MAX);
 
 	BIND_ENUM_CONSTANT(BAKE_DISABLED);
@@ -521,6 +527,12 @@ Light3D::Light3D(RSE::LightType p_type) {
 	set_param(PARAM_SHADOW_SPLIT_1_OFFSET, 0.1);
 	set_param(PARAM_SHADOW_SPLIT_2_OFFSET, 0.2);
 	set_param(PARAM_SHADOW_SPLIT_3_OFFSET, 0.5);
+	set_param(PARAM_SHADOW_SPLIT_4_OFFSET, 0.6);
+	set_param(PARAM_SHADOW_SPLIT_5_OFFSET, 0.7);
+	set_param(PARAM_SHADOW_SPLIT_6_OFFSET, 0.8);
+	set_param(PARAM_SHADOW_SPLIT_7_OFFSET, 0.9);
+	set_param(PARAM_SHADOW_CACHE_UPDATE_INTERVAL, 8);
+	set_param(PARAM_SHADOW_CACHE_MARGIN, 0.25);
 	set_param(PARAM_SHADOW_FADE_START, 0.8);
 	set_param(PARAM_SHADOW_PANCAKE_SIZE, 20.0);
 	set_param(PARAM_SHADOW_OPACITY, 1.0);
@@ -588,7 +600,12 @@ void DirectionalLight3D::_validate_property(PropertyInfo &p_property) const {
 		}
 
 		if ((shadow_mode == SHADOW_ORTHOGONAL || shadow_mode == SHADOW_PARALLEL_2_SPLITS) && (p_property.name == "directional_shadow_split_2" || p_property.name == "directional_shadow_split_3")) {
-			// Splits 3 and 4 are only used with the PSSM 4 Splits shadow mode.
+			// Splits 3 and 4 are only used with the PSSM 4 Splits and PSSM 8 Splits shadow modes.
+			p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+		}
+
+		if (shadow_mode != SHADOW_PARALLEL_8_SPLITS && (p_property.name == "directional_shadow_split_4" || p_property.name == "directional_shadow_split_5" || p_property.name == "directional_shadow_split_6" || p_property.name == "directional_shadow_split_7" || p_property.name == "directional_shadow_cache_update_interval" || p_property.name == "directional_shadow_cache_margin")) {
+			// Splits 5 to 8 and the cache of their shadow maps are only used with the PSSM 8 Splits shadow mode.
 			p_property.usage = PROPERTY_USAGE_NO_EDITOR;
 		}
 	}
@@ -615,18 +632,25 @@ void DirectionalLight3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "sky_mode", PROPERTY_HINT_ENUM, "Light and Sky,Light Only,Sky Only"), "set_sky_mode", "get_sky_mode");
 
 	ADD_GROUP("Directional Shadow", "directional_shadow_");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "directional_shadow_mode", PROPERTY_HINT_ENUM, "Orthogonal (Fast),PSSM 2 Splits (Average),PSSM 4 Splits (Slow)"), "set_shadow_mode", "get_shadow_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "directional_shadow_mode", PROPERTY_HINT_ENUM, "Orthogonal (Fast),PSSM 2 Splits (Average),PSSM 4 Splits (Slow),PSSM 8 Splits (Cached)"), "set_shadow_mode", "get_shadow_mode");
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_split_1", PROPERTY_HINT_RANGE, "0,1,0.001"), "set_param", "get_param", PARAM_SHADOW_SPLIT_1_OFFSET);
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_split_2", PROPERTY_HINT_RANGE, "0,1,0.001"), "set_param", "get_param", PARAM_SHADOW_SPLIT_2_OFFSET);
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_split_3", PROPERTY_HINT_RANGE, "0,1,0.001"), "set_param", "get_param", PARAM_SHADOW_SPLIT_3_OFFSET);
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_split_4", PROPERTY_HINT_RANGE, "0,1,0.001"), "set_param", "get_param", PARAM_SHADOW_SPLIT_4_OFFSET);
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_split_5", PROPERTY_HINT_RANGE, "0,1,0.001"), "set_param", "get_param", PARAM_SHADOW_SPLIT_5_OFFSET);
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_split_6", PROPERTY_HINT_RANGE, "0,1,0.001"), "set_param", "get_param", PARAM_SHADOW_SPLIT_6_OFFSET);
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_split_7", PROPERTY_HINT_RANGE, "0,1,0.001"), "set_param", "get_param", PARAM_SHADOW_SPLIT_7_OFFSET);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "directional_shadow_blend_splits"), "set_blend_splits", "is_blend_splits_enabled");
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_fade_start", PROPERTY_HINT_RANGE, "0,1,0.001"), "set_param", "get_param", PARAM_SHADOW_FADE_START);
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_max_distance", PROPERTY_HINT_RANGE, "0,8192,0.1,or_greater,exp"), "set_param", "get_param", PARAM_SHADOW_MAX_DISTANCE);
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_pancake_size", PROPERTY_HINT_RANGE, "0,1024,0.1,or_greater,exp"), "set_param", "get_param", PARAM_SHADOW_PANCAKE_SIZE);
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_cache_update_interval", PROPERTY_HINT_RANGE, "1,120,1,or_greater,suffix:frames"), "set_param", "get_param", PARAM_SHADOW_CACHE_UPDATE_INTERVAL);
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "directional_shadow_cache_margin", PROPERTY_HINT_RANGE, "0.05,1,0.01,or_greater"), "set_param", "get_param", PARAM_SHADOW_CACHE_MARGIN);
 
 	BIND_ENUM_CONSTANT(SHADOW_ORTHOGONAL);
 	BIND_ENUM_CONSTANT(SHADOW_PARALLEL_2_SPLITS);
 	BIND_ENUM_CONSTANT(SHADOW_PARALLEL_4_SPLITS);
+	BIND_ENUM_CONSTANT(SHADOW_PARALLEL_8_SPLITS);
 
 	BIND_ENUM_CONSTANT(SKY_MODE_LIGHT_AND_SKY);
 	BIND_ENUM_CONSTANT(SKY_MODE_LIGHT_ONLY);

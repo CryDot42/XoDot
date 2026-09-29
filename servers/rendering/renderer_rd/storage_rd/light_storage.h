@@ -37,6 +37,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/forward_id_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
+#include "servers/rendering/renderer_scene_render.h"
 #include "servers/rendering/storage/light_storage.h"
 #include "servers/rendering/storage/utilities.h"
 
@@ -106,7 +107,7 @@ private:
 
 		RSE::LightType light_type = RSE::LIGHT_DIRECTIONAL;
 
-		ShadowTransform shadow_transform[6];
+		ShadowTransform shadow_transform[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES]; // Cube shadows use up to 6.
 
 		AABB aabb;
 		RID self;
@@ -124,7 +125,8 @@ private:
 		uint32_t cull_mask = 0;
 		uint32_t light_directional_index = 0;
 
-		Rect2 directional_rect;
+		Rect2 directional_rect; // Slice of the directional shadow atlases (the cached one has the same layout).
+		uint32_t directional_cascade_count = 0;
 
 		HashSet<RID> shadow_atlases; //shadow atlases where this light is registered
 
@@ -210,20 +212,18 @@ private:
 		float fade_from;
 		float fade_to;
 		uint32_t sscs_index;
-		uint32_t pad;
+		uint32_t shadow_cascade_count;
 		uint32_t bake_mode;
 		float volumetric_fog_energy;
-		float shadow_bias[4];
-		float shadow_normal_bias[4];
-		float shadow_transmittance_bias[4];
-		float shadow_z_range[4];
-		float shadow_range_begin[4];
-		float shadow_split_offsets[4];
-		float shadow_matrices[4][16];
-		float uv_scale1[2];
-		float uv_scale2[2];
-		float uv_scale3[2];
-		float uv_scale4[2];
+		// Per-cascade data, the vec4s are indexed by `cascade >> 2` and then `cascade & 3`.
+		float shadow_bias[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES];
+		float shadow_normal_bias[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES];
+		float shadow_transmittance_bias[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES];
+		float shadow_z_range[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES];
+		float shadow_range_begin[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES];
+		float shadow_split_offsets[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES];
+		float shadow_matrices[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES][16];
+		float uv_scale[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES][2]; // Packed two per vec4.
 	};
 
 	uint32_t max_directional_lights;
@@ -447,11 +447,22 @@ private:
 		RID depth;
 		RID fb; //when renderign direct
 
+		// Persistent atlas of the cached cascades. Unlike the one above it is not cleared every frame.
+		RID cached_depth;
+		RID cached_fb;
+		uint32_t cache_generation = 0;
+		bool cached_needed = false; // Some directional light uses cached cascades in the frame being set up.
+		uint32_t cached_unused_frames = 0;
+
 		int light_count = 0;
 		int size = 0;
 		bool use_16_bits = true;
 		int current_light = 0;
 	} directional_shadow;
+
+	// Number of scene renders without lights using cached cascades after which their atlas is freed.
+	static constexpr uint32_t CACHED_ATLAS_RELEASE_FRAMES = 600;
+	void _directional_shadow_free_cached_atlas();
 
 	/* SHADOW CUBEMAPS */
 
@@ -770,11 +781,6 @@ public:
 		return li->shadow_transform[p_index].uv_scale;
 	}
 
-	_FORCE_INLINE_ void light_instance_set_directional_shadow_atlas_rect(RID p_light_instance, int p_index, const Rect2 p_atlas_rect) {
-		LightInstance *li = light_instance_owner.get_or_null(p_light_instance);
-		li->shadow_transform[p_index].atlas_rect = p_atlas_rect;
-	}
-
 	_FORCE_INLINE_ Rect2 light_instance_get_directional_shadow_atlas_rect(RID p_light_instance, int p_index) {
 		LightInstance *li = light_instance_owner.get_or_null(p_light_instance);
 		return li->shadow_transform[p_index].atlas_rect;
@@ -818,16 +824,6 @@ public:
 	_FORCE_INLINE_ RSE::LightType light_instance_get_type(RID p_light_instance) {
 		LightInstance *li = light_instance_owner.get_or_null(p_light_instance);
 		return li->light_type;
-	}
-
-	_FORCE_INLINE_ void light_instance_set_directional_rect(RID p_light_instance, const Rect2 &p_directional_rect) {
-		LightInstance *li = light_instance_owner.get_or_null(p_light_instance);
-		li->directional_rect = p_directional_rect;
-	}
-
-	_FORCE_INLINE_ Rect2 light_instance_get_directional_rect(RID p_light_instance) {
-		LightInstance *li = light_instance_owner.get_or_null(p_light_instance);
-		return li->directional_rect;
 	}
 
 	/* LIGHT DATA */
@@ -1175,10 +1171,29 @@ public:
 
 	virtual void directional_shadow_atlas_set_size(int p_size, bool p_16_bits = true) override;
 	virtual int get_directional_light_shadow_size(RID p_light_instance) override;
+	virtual int get_directional_light_cached_shadow_size(RID p_light_instance) override;
 	virtual void set_directional_shadow_count(int p_count) override;
+	virtual void light_instance_set_directional_shadow_cascade_count(RID p_light_instance, uint32_t p_cascade_count) override;
+	virtual uint32_t directional_shadow_cache_get_generation() const override;
 
 	Rect2i get_directional_shadow_rect();
 	void update_directional_shadow_atlas();
+
+	// Assigns a light instance its slice of the directional shadow atlases, and the atlas rect of each one of its cascades.
+	// Must be called once per scene render, before the cascades of the light are rendered.
+	void light_instance_setup_directional_shadow_atlas(RID p_light_instance);
+	// Rectangle (in pixels) of a cascade inside the atlas it is rendered to.
+	Rect2i light_instance_get_directional_cascade_rect(RID p_light_instance, int p_pass);
+	_FORCE_INLINE_ static bool directional_shadow_cascade_is_cached(int p_pass) {
+		return p_pass >= (int)RendererSceneRender::DIRECTIONAL_LIGHT_DYNAMIC_CASCADES;
+	}
+	_FORCE_INLINE_ RID directional_shadow_get_cascade_fb(int p_pass) {
+		return directional_shadow_cascade_is_cached(p_pass) ? directional_shadow.cached_fb : directional_shadow.fb;
+	}
+
+	_FORCE_INLINE_ RID directional_shadow_get_cached_texture() {
+		return directional_shadow.cached_depth;
+	}
 
 	_FORCE_INLINE_ RID directional_shadow_get_texture() {
 		return directional_shadow.depth;
@@ -1190,10 +1205,6 @@ public:
 
 	_FORCE_INLINE_ RID direction_shadow_get_fb() {
 		return directional_shadow.fb;
-	}
-
-	_FORCE_INLINE_ void directional_shadow_increase_current_light() {
-		directional_shadow.current_light++;
 	}
 
 	/* SHADOW CUBEMAPS */

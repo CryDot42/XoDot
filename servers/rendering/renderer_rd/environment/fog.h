@@ -329,6 +329,10 @@ public:
 		RID sdfgi_uniform_set;
 		RID sky_uniform_set;
 
+		// Directional shadow atlases the uniform sets were created with, they are created and freed as needed.
+		RID directional_shadow_depth;
+		RID directional_shadow_cached_depth;
+
 		int last_shadow_filter = -1;
 
 		// If the device doesn't support image atomics, use storage buffers instead.
@@ -360,6 +364,7 @@ public:
 		RID area_light_buffer;
 		RID area_light_atlas;
 		RID directional_shadow_depth;
+		RID directional_shadow_cached_depth;
 		RID directional_light_buffer;
 
 		// Objects related to our render buffer
