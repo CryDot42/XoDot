@@ -38,6 +38,7 @@ class AcceptDialog;
 class AspectRatioContainer;
 class ConfirmationDialog;
 class MenuButton;
+class MeshVertexPaintEditor;
 class SpinBox;
 
 class MeshInstance3DEditor : public Control {
@@ -51,6 +52,7 @@ class MeshInstance3DEditor : public Control {
 		MENU_OPTION_CREATE_UV2,
 		MENU_OPTION_DEBUG_UV1,
 		MENU_OPTION_DEBUG_UV2,
+		MENU_OPTION_VERTEX_PAINT,
 	};
 
 	enum ShapePlacement {
@@ -100,6 +102,9 @@ class MeshInstance3DEditor : public Control {
 
 	ConfirmationDialog *navigation_mesh_dialog = nullptr;
 
+	// Opens the Vertex Paint tools for the node (set by the plugin, which owns them).
+	Callable vertex_paint_callback;
+
 	void _shape_dialog_about_to_popup();
 	void _shape_type_selected(int p_option);
 	void _create_collision_shape();
@@ -127,8 +132,15 @@ class MeshInstance3DEditorPlugin : public EditorPlugin {
 	GDCLASS(MeshInstance3DEditorPlugin, EditorPlugin);
 
 	MeshInstance3DEditor *mesh_editor = nullptr;
+	MeshVertexPaintEditor *vertex_paint_editor = nullptr;
+
+	void _open_vertex_paint(Object *p_node);
+
+protected:
+	void _notification(int p_what);
 
 public:
+	virtual EditorPlugin::AfterGUIInput forward_3d_gui_input(Camera3D *p_camera, const Ref<InputEvent> &p_event) override;
 	virtual String get_plugin_name() const override { return "MeshInstance3D"; }
 	virtual void edit(Object *p_object) override;
 	virtual bool handles(Object *p_object) const override;
