@@ -662,11 +662,20 @@ float screen_probe_surface_weight(ivec2 p_probe, vec3 p_position, vec3 p_normal,
 }
 
 vec4 screen_probe_get_irradiance(ivec2 p_probe, vec3 p_normal) {
+	vec4 visibility = texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 3), 0);
+
+	// Probes only trace the hemisphere around their normal (averaged with their neighbors by the filter). For any other
+	// normal, part of the cosine lobe was never traced and would read as black, darkening round shapes towards their
+	// silhouette. Divide by the traced part of the lobe, which the L1 projection of the hemispheres gives exactly.
+	float coverage = max(0.5, 0.5 + 0.5 * dot(p_normal, visibility.yzw));
+
 	vec4 value;
-	value.r = screen_probe_sh_irradiance(texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 0), 0), p_normal);
-	value.g = screen_probe_sh_irradiance(texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 1), 0), p_normal);
-	value.b = screen_probe_sh_irradiance(texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 2), 0), p_normal);
-	value.a = min(1.0, screen_probe_sh_irradiance(texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 3), 0), p_normal));
+	value.r = screen_probe_sh_irradiance(texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 0), 0), p_normal) / coverage;
+	value.g = screen_probe_sh_irradiance(texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 1), 0), p_normal) / coverage;
+	value.b = screen_probe_sh_irradiance(texelFetch(sampler2DArray(probe_sh, linear_sampler), ivec3(p_probe, 2), 0), p_normal) / coverage;
+	// How much of the environment's ambient light the GI replaces. It doesn't depend on the normal: a directional
+	// estimate would read the untraced part of the lobe as transparent, letting the ambient light through at silhouettes.
+	value.a = clamp(visibility.x / SCREEN_PROBE_SH_HEMISPHERE_L0, 0.0, 1.0);
 	return value;
 }
 

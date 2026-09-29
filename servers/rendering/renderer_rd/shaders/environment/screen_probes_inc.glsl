@@ -1,8 +1,13 @@
 // Shared by the screen probe trace pass and the GI pass that integrates the probes.
 
-// Probes store irradiance as L1 spherical harmonics, one texture layer per channel (red, green, blue, visibility),
-// with coefficients in (L0, L1 -1, L1 0, L1 1) order.
+// Probes store irradiance as L1 spherical harmonics, one texture layer per color channel (red, green, blue), with
+// coefficients in (L0, L1 -1, L1 0, L1 1) order. The last layer holds the L0 coefficient of the visibility (the alpha
+// of the rays) followed by the normal the hemisphere of rays was traced around. The spatial filter averages it like
+// the other layers, so it stays consistent with the filtered color.
 #define SCREEN_PROBE_SH_LAYERS 4
+
+// L0 coefficient of a hemisphere of ones (2 * PI * 0.282095): the visibility of a probe whose rays are all opaque.
+#define SCREEN_PROBE_SH_HEMISPHERE_L0 1.772454
 
 uint screen_probe_hash(uvec3 v) {
 	// PCG-style 3D hash.
