@@ -4782,6 +4782,8 @@ void GI::init(SkyRD *p_sky) {
 	}
 	default_voxel_gi_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(VoxelGIData) * MAX_VOXEL_GI_INSTANCES);
 	half_resolution = GLOBAL_GET("rendering/global_illumination/gi/use_half_resolution");
+	temporal_accumulation = GLOBAL_GET("rendering/global_illumination/gi/use_temporal_accumulation");
+	temporal_blend = CLAMP(float(GLOBAL_GET("rendering/global_illumination/gi/temporal_blend")), 0.05, 1.0);
 }
 
 void GI::free() {
@@ -4908,11 +4910,13 @@ void GI::setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBu
 	}
 
 	if (voxel_gi_instances_changed) {
-		for (uint32_t v = 0; v < RendererSceneRender::MAX_RENDER_VIEWS; v++) {
-			if (RD::get_singleton()->uniform_set_is_valid(rbgi->uniform_set[v])) {
-				RD::get_singleton()->free_rid(rbgi->uniform_set[v]);
+		for (uint32_t p = 0; p < 2; p++) {
+			for (uint32_t v = 0; v < RendererSceneRender::MAX_RENDER_VIEWS; v++) {
+				if (RD::get_singleton()->uniform_set_is_valid(rbgi->uniform_set[p][v])) {
+					RD::get_singleton()->free_rid(rbgi->uniform_set[p][v]);
+				}
+				rbgi->uniform_set[p][v] = RID();
 			}
-			rbgi->uniform_set[v] = RID();
 		}
 
 		if (p_render_buffers->has_custom_data(RB_SCOPE_FOG)) {
@@ -4939,11 +4943,13 @@ RID GI::RenderBuffersGI::get_voxel_gi_buffer() {
 }
 
 void GI::RenderBuffersGI::free_data() {
-	for (uint32_t v = 0; v < RendererSceneRender::MAX_RENDER_VIEWS; v++) {
-		if (RD::get_singleton()->uniform_set_is_valid(uniform_set[v])) {
-			RD::get_singleton()->free_rid(uniform_set[v]);
+	for (uint32_t p = 0; p < 2; p++) {
+		for (uint32_t v = 0; v < RendererSceneRender::MAX_RENDER_VIEWS; v++) {
+			if (RD::get_singleton()->uniform_set_is_valid(uniform_set[p][v])) {
+				RD::get_singleton()->free_rid(uniform_set[p][v]);
+			}
+			uniform_set[p][v] = RID();
 		}
-		uniform_set[v] = RID();
 	}
 
 	if (scene_data_ubo.is_valid()) {
@@ -4987,7 +4993,15 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 
 	Size2i internal_size = p_render_buffers->get_internal_size();
 
-	if (rbgi->using_half_size_gi != half_resolution) {
+	// Temporal accumulation needs one reprojection matrix for the whole pass and history it
+	// can sample everywhere it writes. Neither holds for multiview, where each eye has its
+	// own view space, or for VRS, where most pixels are filled by replicating a neighbor
+	// rather than by an invocation that could store history for them. Both fall back to
+	// tracing every pixel every frame.
+	bool has_vrs_texture = p_render_buffers->has_texture(RB_SCOPE_VRS, RB_TEXTURE);
+	const bool use_temporal = temporal_accumulation && p_view_count == 1 && !has_vrs_texture;
+
+	if (rbgi->using_half_size_gi != half_resolution || rbgi->using_temporal_gi != use_temporal) {
 		p_render_buffers->clear_context(RB_SCOPE_GI);
 	}
 
@@ -5003,7 +5017,32 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_AMBIENT, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1, size);
 		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_REFLECTION, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1, size);
 
+		// The history bindings are declared unconditionally by the shader, so they always need
+		// something valid bound. Rather than compile a second set of pipelines without them,
+		// allocate the textures at 1x1 when temporal accumulation is off: the shader is told
+		// so through the push constant and never touches them.
+		{
+			const Size2i history_size = use_temporal ? size : Size2i(1, 1);
+			// texture_clear() below is a copy as far as RenderingDevice is concerned, so these
+			// need CAN_COPY_TO on top of what the buffers above use.
+			const uint32_t history_usage_bits = usage_bits | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+
+			for (uint32_t i = 0; i < 2; i++) {
+				RID ambient = p_render_buffers->create_texture(RB_SCOPE_GI, gi_history_ambient_name(i), RD::DATA_FORMAT_R16G16B16A16_SFLOAT, history_usage_bits, RD::TEXTURE_SAMPLES_1, history_size);
+				RID reflection = p_render_buffers->create_texture(RB_SCOPE_GI, gi_history_reflection_name(i), RD::DATA_FORMAT_R16G16B16A16_SFLOAT, history_usage_bits, RD::TEXTURE_SAMPLES_1, history_size);
+				RID depth = p_render_buffers->create_texture(RB_SCOPE_GI, gi_history_depth_name(i), RD::DATA_FORMAT_R32_SFLOAT, history_usage_bits, RD::TEXTURE_SAMPLES_1, history_size);
+				// A fresh texture holds whatever was in that memory. The pass never reads
+				// history until it has written some, so this is belt and braces, but it keeps a
+				// stray read from turning into stray color.
+				RD::get_singleton()->texture_clear(ambient, Color(0, 0, 0, 0), 0, 1, 0, p_view_count);
+				RD::get_singleton()->texture_clear(reflection, Color(0, 0, 0, 0), 0, 1, 0, p_view_count);
+				RD::get_singleton()->texture_clear(depth, Color(0, 0, 0, 0), 0, 1, 0, p_view_count);
+			}
+		}
+
 		rbgi->using_half_size_gi = half_resolution;
+		rbgi->using_temporal_gi = use_temporal;
+		rbgi->history_valid = false;
 	}
 
 	// Setup our scene data
@@ -5030,11 +5069,23 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 		// Note that we will be ignoring the origin of this transform.
 		RendererRD::MaterialStorage::store_transform(p_cam_transform, scene_data.cam_transform);
 
+		// Reprojection into the previous frame, for the temporal history lookup. Single view
+		// only, so there is no eye offset to fold in: this frame's view space -> world ->
+		// the previous frame's view space, and from there through its projection to clip.
+		Transform3D prev_view_from_view = rbgi->prev_cam_transform.affine_inverse() * p_cam_transform;
+		Projection prev_projection = correction * rbgi->prev_projection;
+		RendererRD::MaterialStorage::store_transform(prev_view_from_view, scene_data.prev_view_from_view);
+		RendererRD::MaterialStorage::store_camera(prev_projection * Projection(prev_view_from_view), scene_data.reprojection);
+
 		scene_data.screen_size[0] = internal_size.x;
 		scene_data.screen_size[1] = internal_size.y;
 
 		RD::get_singleton()->buffer_update(rbgi->scene_data_ubo, 0, sizeof(SceneData), &scene_data);
 	}
+
+	// Remember this frame's camera so the next frame can reproject into it.
+	rbgi->prev_cam_transform = p_cam_transform;
+	rbgi->prev_projection = p_projections[0];
 
 	// Render each eye separately.
 	// We need to look into whether we can make our compute shader use Multiview but not sure that works or makes a difference..
@@ -5072,7 +5123,6 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 	if (p_view_count > 1) {
 		pipeline_specialization |= SHADER_SPECIALIZATION_USE_FULL_PROJECTION_MATRIX;
 	}
-	bool has_vrs_texture = p_render_buffers->has_texture(RB_SCOPE_VRS, RB_TEXTURE);
 	if (has_vrs_texture) {
 		pipeline_specialization |= SHADER_SPECIALIZATION_USE_VRS;
 	}
@@ -5102,6 +5152,23 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 		rbgi->screen_probe_history_valid = false;
 	}
 
+	// VoxelGI's screen probes keep a history of their own, written by every pixel the pass
+	// traces, so they need every pixel traced every frame: the checkerboard is left out while
+	// they are in use. The history buffers stay allocated, and are read again only once a frame
+	// has written them anew.
+	const bool temporal_active = use_temporal && !use_screen_probes;
+
+	// The pass writes history from the first frame after an allocation but only starts reading
+	// it on the second, when there is a real previous frame to reproject.
+	const bool history_valid = temporal_active && rbgi->history_valid;
+
+	push_constant.temporal_enabled = temporal_active;
+	push_constant.trace_slot = rbgi->history_frame % TEMPORAL_SLOT_COUNT;
+	push_constant.temporal_blend = temporal_blend;
+	push_constant.history_valid = history_valid;
+	push_constant.pad2 = 0;
+	push_constant.pad3 = 0;
+
 	// Now compute the contents of our buffers.
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
@@ -5109,7 +5176,8 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 		push_constant.view_index = v;
 
 		// setup our uniform set
-		if (rbgi->uniform_set[v].is_null() || !RD::get_singleton()->uniform_set_is_valid(rbgi->uniform_set[v])) {
+		const uint32_t set_parity = rbgi->history_frame & 1;
+		if (rbgi->uniform_set[set_parity][v].is_null() || !RD::get_singleton()->uniform_set_is_valid(rbgi->uniform_set[set_parity][v])) {
 			Vector<RD::Uniform> uniforms;
 			{
 				RD::Uniform u;
@@ -5287,6 +5355,32 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 				}
 				uniforms.push_back(u);
 			}
+			// Temporal history, ping-ponged: `read` is what the previous frame wrote and is
+			// sampled at reprojected coordinates, `write` is this frame's half and is stored
+			// into at the current pixel. They must be different textures, since a pass cannot
+			// sample a texture it also writes through an image binding.
+			{
+				const uint32_t read = (rbgi->history_frame + 1) & 1;
+				const uint32_t write = rbgi->history_frame & 1;
+
+				const StringName read_names[3] = { gi_history_ambient_name(read), gi_history_reflection_name(read), gi_history_depth_name(read) };
+				for (int i = 0; i < 3; i++) {
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+					u.binding = 26 + i;
+					u.append_id(p_render_buffers->get_texture_slice(RB_SCOPE_GI, read_names[i], v, 0));
+					uniforms.push_back(u);
+				}
+
+				const StringName write_names[3] = { gi_history_ambient_name(write), gi_history_reflection_name(write), gi_history_depth_name(write) };
+				for (int i = 0; i < 3; i++) {
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+					u.binding = 29 + i;
+					u.append_id(p_render_buffers->get_texture_slice(RB_SCOPE_GI, write_names[i], v, 0));
+					uniforms.push_back(u);
+				}
+			}
 			if (RendererSceneRenderRD::get_singleton()->is_vrs_supported()) {
 				RD::Uniform u;
 				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
@@ -5298,7 +5392,7 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 
 			bool vrs_supported = RendererSceneRenderRD::get_singleton()->is_vrs_supported();
 			int variant_base = vrs_supported ? MODE_MAX : 0;
-			rbgi->uniform_set[v] = RD::get_singleton()->uniform_set_create(uniforms, shader.version_get_shader(shader_version, variant_base), 0);
+			rbgi->uniform_set[set_parity][v] = RD::get_singleton()->uniform_set_create(uniforms, shader.version_get_shader(shader_version, variant_base), 0);
 		}
 
 		if (use_screen_probes) {
@@ -5314,7 +5408,7 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 		}
 
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, pipelines[pipeline_specialization][mode].get_rid());
-		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, rbgi->uniform_set[v], 0);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, rbgi->uniform_set[set_parity][v], 0);
 		if (use_screen_probes) {
 			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, screen_probe_gi_set, 1);
 		}
@@ -5329,6 +5423,11 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 
 	RD::get_singleton()->compute_list_end();
 	RD::get_singleton()->draw_command_end_label();
+
+	// Swap the ping-pong for the next frame. Done once per frame rather than per view, so
+	// both eyes of a multiview pass agree on which half they wrote.
+	rbgi->history_frame++;
+	rbgi->history_valid = temporal_active;
 
 	if (use_screen_probes) {
 		rbgi->screen_probe_history_index ^= 1;

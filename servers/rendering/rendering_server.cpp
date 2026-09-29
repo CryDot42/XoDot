@@ -3733,6 +3733,19 @@ void RenderingServer::init() {
 
 	GLOBAL_DEF("rendering/global_illumination/gi/use_half_resolution", false);
 
+	// Voxel cone tracing is the dominant cost of the GI pass and its result is
+	// deterministic, so instead of tracing every pixel every frame the pass traces half of
+	// them in a checkerboard and reprojects the previous frame for the rest. Pixels whose
+	// history is rejected -- a disocclusion, a screen edge, the first frame -- are still
+	// traced, so this halves the tracing work for a frame of latency on lighting changes.
+	// Not applied to multiview or VRS rendering.
+	GLOBAL_DEF_RST("rendering/global_illumination/gi/use_temporal_accumulation", true);
+
+	// How much of a freshly traced pixel replaces its reprojected history. The trace is
+	// exact, so the default takes it outright; lower values fade a lighting change in over
+	// more frames, at the cost of dragging the stale value forward with it.
+	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/gi/temporal_blend", PROPERTY_HINT_RANGE, "0.05,1.0,0.01"), 1.0);
+
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/quality", PROPERTY_HINT_ENUM, "Low (4 Cones - Fast),High (6 Cones - Slow)"), 0);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/dynamic_object_refresh_frames", PROPERTY_HINT_RANGE, "1,60,1"), 4);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/light_update_frames", PROPERTY_HINT_RANGE, "1,16,1"), 1);
