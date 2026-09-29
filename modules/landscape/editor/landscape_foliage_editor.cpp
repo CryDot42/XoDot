@@ -98,17 +98,8 @@ String _format_distance(float p_distance) {
 /* LOD bar */
 
 Color LandscapeFoliageLodBar::get_lod_color(int p_lod) {
-	static const Color colors[LandscapeFoliageType::MAX_LODS] = {
-		Color(0.36, 0.72, 0.36),
-		Color(0.35, 0.6, 0.85),
-		Color(0.9, 0.72, 0.3),
-		Color(0.85, 0.45, 0.35),
-		Color(0.65, 0.45, 0.85),
-		Color(0.35, 0.8, 0.8),
-		Color(0.85, 0.5, 0.7),
-		Color(0.6, 0.6, 0.6),
-	};
-	return colors[CLAMP(p_lod, 0, LandscapeFoliageType::MAX_LODS - 1)];
+	// The colors of the LOD Levels debug view (and of the LOD levels of the landscape).
+	return LandscapeFoliage3D::get_debug_color(p_lod);
 }
 
 void LandscapeFoliageLodBar::set_type(const Ref<LandscapeFoliageType> &p_type) {
@@ -1155,6 +1146,45 @@ void LandscapeFoliagePanel::_brush_size_changed(double p_value) {
 	update_brush_preview();
 }
 
+void LandscapeFoliagePanel::_debug_view_selected(int p_index) {
+	LandscapeFoliage3D *foliage = _get_foliage();
+	if (!foliage || updating) {
+		return;
+	}
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(TTR("Set Foliage Debug View"), UndoRedo::MERGE_DISABLE, foliage);
+	undo_redo->add_do_property(foliage, "debug_view", debug_view->get_item_id(p_index));
+	undo_redo->add_undo_property(foliage, "debug_view", int(foliage->get_debug_view()));
+	undo_redo->add_do_method(this, "_update_debug_controls");
+	undo_redo->add_undo_method(this, "_update_debug_controls");
+	undo_redo->commit_action();
+}
+
+void LandscapeFoliagePanel::_freeze_lod_toggled(bool p_pressed) {
+	if (!_validate_landscape() || updating) {
+		return;
+	}
+	// The foliage follows the frozen LOD of its landscape.
+	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
+	undo_redo->create_action(TTR("Freeze Landscape LOD"), UndoRedo::MERGE_DISABLE, landscape);
+	undo_redo->add_do_property(landscape, "freeze_lod", p_pressed);
+	undo_redo->add_undo_property(landscape, "freeze_lod", landscape->is_lod_frozen());
+	undo_redo->add_do_method(this, "_update_debug_controls");
+	undo_redo->add_undo_method(this, "_update_debug_controls");
+	undo_redo->commit_action();
+}
+
+void LandscapeFoliagePanel::_update_debug_controls() {
+	// Also changed in the inspector and in the Manage tab.
+	const LandscapeFoliage3D *foliage = _get_foliage();
+	updating = true;
+	debug_view->set_disabled(!foliage);
+	debug_view->select(debug_view->get_item_index(foliage ? int(foliage->get_debug_view()) : 0));
+	freeze_lod->set_disabled(!landscape);
+	freeze_lod->set_pressed_no_signal(landscape && landscape->is_lod_frozen());
+	updating = false;
+}
+
 void LandscapeFoliagePanel::_commit_type_data(const String &p_action, const Vector<int> &p_types, const Vector<PackedByteArray> &p_before) {
 	LandscapeFoliage3D *foliage = _get_foliage();
 	ERR_FAIL_NULL(foliage);
@@ -1480,6 +1510,7 @@ void LandscapeFoliagePanel::process(double p_delta) {
 		info->set_text(text);
 		info->set_visible(!text.is_empty());
 		stats->set_text(get_statistics_text());
+		_update_debug_controls();
 	}
 }
 
@@ -1541,6 +1572,7 @@ void LandscapeFoliagePanel::_notification(int p_what) {
 
 void LandscapeFoliagePanel::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_update_palette"), &LandscapeFoliagePanel::_update_palette);
+	ClassDB::bind_method(D_METHOD("_update_debug_controls"), &LandscapeFoliagePanel::_update_debug_controls);
 	ClassDB::bind_method(D_METHOD("_restore_type", "foliage", "index", "type", "data"), &LandscapeFoliagePanel::_restore_type);
 }
 
@@ -1710,6 +1742,26 @@ LandscapeFoliagePanel::LandscapeFoliagePanel() {
 	help->set_custom_minimum_size(Size2(200 * EDSCALE, 0));
 	add_child(help);
 
+	/* Debug */
+	add_child(memnew(HSeparator));
+	Label *debug_title = memnew(Label(TTR("Debug")));
+	debug_title->set_theme_type_variation("HeaderSmall");
+	add_child(debug_title);
+	GridContainer *debug = memnew(GridContainer);
+	debug->set_columns(2);
+	add_child(debug);
+	debug_view = memnew(OptionButton);
+	debug_view->add_item(TTR("Disabled"), LandscapeFoliage3D::DEBUG_VIEW_DISABLED);
+	debug_view->add_item(TTR("LOD Levels"), LandscapeFoliage3D::DEBUG_VIEW_LOD_LEVELS);
+	debug_view->add_item(TTR("Cells"), LandscapeFoliage3D::DEBUG_VIEW_CELLS);
+	debug_view->add_item(TTR("Cell State"), LandscapeFoliage3D::DEBUG_VIEW_CELL_STATE);
+	debug_view->connect(SceneStringName(item_selected), callable_mp(this, &LandscapeFoliagePanel::_debug_view_selected));
+	add_setting(debug, TTR("Debug View"), debug_view, TTR("Colors the instances by level of detail, by cell (chunk), or by how their cell is drawn (blue: as a whole, orange: sorted per instance), and draws the bounds of the drawn cells."));
+	freeze_lod = memnew(CheckBox(TTR("Freeze LOD")));
+	freeze_lod->set_tooltip_text(TTR("Keep the levels of detail of the landscape and its foliage while moving the camera, to inspect them (the Freeze LOD of the landscape)."));
+	freeze_lod->connect(SceneStringName(toggled), callable_mp(this, &LandscapeFoliagePanel::_freeze_lod_toggled));
+	add_child(freeze_lod);
+
 	stats = memnew(Label);
 	stats->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
 	stats->set_custom_minimum_size(Size2(200 * EDSCALE, 0));
@@ -1741,4 +1793,5 @@ LandscapeFoliagePanel::LandscapeFoliagePanel() {
 	add_child(fill_confirm);
 
 	_update_buttons();
+	_update_debug_controls();
 }

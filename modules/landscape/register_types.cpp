@@ -87,6 +87,7 @@ void initialize_landscape_module(ModuleInitializationLevel p_level) {
 void uninitialize_landscape_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
 		Landscape3D::cleanup_shared_resources();
+		LandscapeFoliage3D::cleanup_shared_resources();
 		// Default spline materials first: they use the shared shaders and textures.
 		LandscapeSpline3D::cleanup_shared_resources();
 		LandscapeSplineMaterial::cleanup_shared_resources();

@@ -240,6 +240,8 @@ private:
 	HSlider *brush_size_slider = nullptr;
 	SpinBox *paint_density = nullptr;
 	SpinBox *erase_density = nullptr;
+	OptionButton *debug_view = nullptr;
+	CheckBox *freeze_lod = nullptr;
 	Label *info = nullptr;
 	Label *stats = nullptr;
 	double stats_timer = 0.0;
@@ -274,6 +276,9 @@ private:
 	void _fill_pressed();
 	void _fill_confirmed();
 	void _clear_pressed();
+	void _debug_view_selected(int p_index);
+	void _freeze_lod_toggled(bool p_pressed);
+	void _update_debug_controls();
 	void _commit_type_data(const String &p_action, const Vector<int> &p_types, const Vector<PackedByteArray> &p_before);
 
 	Vector<Ref<Resource>> _get_dropped_resources(const Variant &p_data) const;

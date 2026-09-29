@@ -421,4 +421,58 @@ TEST_CASE("[SceneTree][Landscape][Foliage] Chunked rendering with levels of deta
 	memdelete(landscape);
 }
 
+TEST_CASE("[SceneTree][Landscape][Foliage] Debug views and frozen levels of detail") {
+	LandscapeFoliage3D *foliage = nullptr;
+	Landscape3D *landscape = make_landscape(foliage, 0.0);
+	Camera3D *camera = memnew(Camera3D);
+	landscape->add_child(camera);
+	camera->set_position(Vector3(0, 0, 64));
+	landscape->set_lod_camera_path(landscape->get_path_to(camera));
+	Ref<LandscapeFoliageType> type = make_type();
+	type->set_cull_distance(60.0);
+	type->set_lod_transition(0.0);
+	type->add_lod(Ref<Mesh>(), 20.0, false);
+	foliage->add_foliage_type(type);
+	for (int i = 0; i < 13; i++) {
+		foliage->add_instance(0, Transform3D(Basis(), Vector3(5 + i * 10, 0, 64)));
+	}
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(int64_t(foliage->get_statistics()["debug_bounds"]) == 0);
+
+	// Bounds of the drawn cells.
+	foliage->set_debug_view(LandscapeFoliage3D::DEBUG_VIEW_CELL_STATE);
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	Dictionary stats = foliage->get_statistics();
+	CHECK(int64_t(stats["debug_bounds"]) == 2);
+	CHECK(int64_t(stats["instances_drawn"]) == 6);
+
+	// The colors of the landscape debug views.
+	CHECK(LandscapeFoliage3D::get_debug_color(0).is_equal_approx(Color(1.0, 0.25, 0.25)));
+	CHECK_FALSE(LandscapeFoliage3D::get_debug_color(1).is_equal_approx(LandscapeFoliage3D::get_debug_color(2)));
+	CHECK_FALSE(LandscapeFoliage3D::get_debug_state_color(true).is_equal_approx(LandscapeFoliage3D::get_debug_state_color(false)));
+
+	// With the LOD of the landscape frozen, the foliage keeps its levels when the camera leaves.
+	landscape->set_freeze_lod(true);
+	camera->set_position(Vector3(64, 0, 200));
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	stats = foliage->get_statistics();
+	CHECK(int64_t(stats["cells_rendered"]) == 2);
+	CHECK(int64_t(stats["instances_drawn"]) == 6);
+	landscape->set_freeze_lod(false);
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	stats = foliage->get_statistics();
+	CHECK(int64_t(stats["cells_rendered"]) == 0); // Everything is beyond the cull distance.
+	CHECK(int64_t(stats["debug_bounds"]) == 0);
+
+	camera->set_position(Vector3(0, 0, 64));
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(int64_t(foliage->get_statistics()["debug_bounds"]) == 2);
+	foliage->set_debug_view(LandscapeFoliage3D::DEBUG_VIEW_DISABLED);
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	CHECK(int64_t(foliage->get_statistics()["debug_bounds"]) == 0);
+	CHECK(int64_t(foliage->get_statistics()["instances_drawn"]) == 6);
+
+	memdelete(landscape);
+}
+
 } // namespace TestLandscapeFoliage

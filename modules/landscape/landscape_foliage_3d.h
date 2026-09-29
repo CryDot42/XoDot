@@ -37,6 +37,10 @@
 #include "core/variant/typed_array.h"
 #include "scene/3d/node_3d.h"
 
+class Shader;
+class ShaderMaterial;
+class StandardMaterial3D;
+
 class Landscape3D;
 
 // Foliage painted on a Landscape3D (UE-like foliage): trees, bushes, grass, rocks...
@@ -51,11 +55,19 @@ class Landscape3D;
 //   with hysteresis (`lod_transition`), and only uploaded when an instance changes its level,
 // - cells beyond the cull distance have no rendering resources, the updates are limited to a
 //   time budget per frame (nearest cells first).
-// Instances follow the terrain when it is sculpted (`follow_terrain`).
+// Instances follow the terrain when it is sculpted (`follow_terrain`). The debug views color the
+// instances by level of detail, cell or cell state and draw the bounds of the drawn cells.
 class LandscapeFoliage3D : public Node3D {
 	GDCLASS(LandscapeFoliage3D, Node3D);
 
 public:
+	enum DebugView {
+		DEBUG_VIEW_DISABLED,
+		DEBUG_VIEW_LOD_LEVELS, // Color of the level of detail of the instances.
+		DEBUG_VIEW_CELLS, // Color per cell (chunk).
+		DEBUG_VIEW_CELL_STATE, // Cells drawn as a whole or sorted per instance.
+	};
+
 	// One instance, in the space of the landscape. The transform is stored in the layout of
 	// MultiMesh buffers (3 x 4, row-major), so that it can be copied as is.
 	struct Instance {
@@ -94,6 +106,7 @@ private:
 	};
 
 	struct Cell {
+		Vector2i key;
 		LocalVector<Instance> instances;
 		AABB bounds; // Landscape space, including the meshes.
 		bool bounds_dirty = true;
@@ -142,6 +155,21 @@ private:
 	uint64_t last_update_usec = 0;
 	int last_updated_cells = 0;
 
+	// Debug views.
+	DebugView debug_view = DEBUG_VIEW_DISABLED;
+	RID debug_bounds_mesh;
+	RID debug_bounds_instance;
+	bool debug_bounds_dirty = false;
+	int debug_bounds_count = 0;
+	static Ref<Shader> debug_shader;
+	static Ref<ShaderMaterial> debug_material;
+	static Ref<StandardMaterial3D> debug_bounds_material;
+	static RID _get_debug_material();
+	Color _get_debug_cell_color(const Cell &p_cell, int p_lod) const;
+	void _update_debug_colors(const Cell &p_cell);
+	void _update_debug_bounds();
+	void _free_debug_bounds();
+
 	// Terrain following.
 	LocalVector<Rect2> snap_rects; // Landscape space.
 
@@ -176,7 +204,7 @@ private:
 	void _free_cell_rendering(Cell &r_cell);
 	void _free_all_rendering();
 	void _set_batch(Entry *p_entry, Cell &r_cell, int p_lod, const LocalVector<uint32_t> *p_indices);
-	void _update_batch_settings(Entry *p_entry, int p_lod, Batch &r_batch);
+	void _update_batch_settings(Entry *p_entry, const Cell &p_cell, int p_lod, Batch &r_batch);
 	void _update_all_batch_settings();
 	int _get_uniform_state(const Entry *p_entry, real_t p_min_distance, real_t p_max_distance) const;
 	uint8_t _get_instance_lod(const Entry *p_entry, const Instance &p_instance, real_t p_distance, uint8_t p_current) const;
@@ -262,10 +290,21 @@ public:
 	Vector3 global_to_landscape(const Vector3 &p_global) const;
 	void _terrain_region_changed(const Rect2i &p_texel_rect, int p_flags);
 
+	// Debug.
+	void set_debug_view(DebugView p_view);
+	DebugView get_debug_view() const { return debug_view; }
+	// Colors of the debug views (the same as the debug views of Landscape3D for the same index).
+	static Color get_debug_color(int p_index);
+	static Color get_debug_state_color(bool p_sorted_per_instance);
+
 	Dictionary get_statistics() const;
 	void force_update();
 	PackedStringArray get_configuration_warnings() const override;
 
+	static void cleanup_shared_resources();
+
 	LandscapeFoliage3D();
 	~LandscapeFoliage3D();
 };
+
+VARIANT_ENUM_CAST(LandscapeFoliage3D::DebugView);

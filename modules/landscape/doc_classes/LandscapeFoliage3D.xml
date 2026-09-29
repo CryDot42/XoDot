@@ -132,7 +132,7 @@
 		<method name="get_statistics" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
-				Returns statistics about the instances and their rendering: [code]types[/code], [code]instances[/code], [code]cells[/code], [code]cells_rendered[/code] (cells with rendering resources), [code]cells_mixed[/code] (cells sorted per instance), [code]batches[/code] (drawn multimeshes), [code]instances_drawn[/code], [code]update_usec[/code] and [code]updated_cells[/code] (last update of the levels of detail).
+				Returns statistics about the instances and their rendering: [code]types[/code], [code]instances[/code], [code]cells[/code], [code]cells_rendered[/code] (cells with rendering resources), [code]cells_mixed[/code] (cells sorted per instance), [code]batches[/code] (drawn multimeshes), [code]instances_drawn[/code], [code]update_usec[/code] and [code]updated_cells[/code] (last update of the levels of detail), [code]debug_bounds[/code] (cells whose bounds are drawn by [member debug_view]).
 			</description>
 		</method>
 		<method name="get_type_data" qualifiers="const">
@@ -233,6 +233,9 @@
 		<member name="chunk_size" type="float" setter="set_chunk_size" getter="get_chunk_size" default="32.0">
 			Size in meters of the cells (chunks) the instances are sorted into. Smaller cells are culled more precisely and switch levels of detail as a whole more often, at the cost of more draw calls.
 		</member>
+		<member name="debug_view" type="int" setter="set_debug_view" getter="get_debug_view" enum="LandscapeFoliage3D.DebugView" default="0">
+			Colors the instances for debugging and draws the bounds of the drawn cells (like [member Landscape3D.debug_view]). When the LOD of the landscape is frozen ([member Landscape3D.freeze_lod]), the foliage keeps its levels of detail too, so that they can be inspected from another point of view.
+		</member>
 		<member name="foliage_types" type="LandscapeFoliageType[]" setter="set_foliage_types" getter="get_foliage_types" default="[]">
 			The foliage types of the instances. Use [method add_foliage_type], [method remove_foliage_type] and [method set_foliage_type] to change them while keeping the instances.
 		</member>
@@ -250,6 +253,18 @@
 		</member>
 	</members>
 	<constants>
+		<constant name="DEBUG_VIEW_DISABLED" value="0" enum="DebugView">
+			Normal rendering.
+		</constant>
+		<constant name="DEBUG_VIEW_LOD_LEVELS" value="1" enum="DebugView">
+			Instances are colored by level of detail, with the colors of [constant Landscape3D.DEBUG_VIEW_LOD_LEVELS] (and of the LOD window of the editor). The bounds of the cells drawn as a whole have the color of their level, the bounds of the cells sorted per instance are white.
+		</constant>
+		<constant name="DEBUG_VIEW_CELLS" value="2" enum="DebugView">
+			Instances and bounds are colored by cell (chunk).
+		</constant>
+		<constant name="DEBUG_VIEW_CELL_STATE" value="3" enum="DebugView">
+			Instances and bounds are colored by how their cell is drawn: blue when it is entirely within one level of detail and drawn as a whole, orange when it crosses a level of detail or cull distance and is sorted per instance (the cells whose updates would move to the GPU with indirect drawing).
+		</constant>
 		<constant name="INSTANCE_FLOATS" value="16">
 			Number of floats of an instance in the raw data of [method get_instances_in_rect]: the 3 x 4 transform in the layout of [MultiMesh] buffers, the offset from the ground, the random value and the alignment normal.
 		</constant>

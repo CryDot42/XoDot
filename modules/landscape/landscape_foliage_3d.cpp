@@ -42,6 +42,8 @@
 #include "scene/3d/camera_3d.h"
 #include "scene/main/viewport.h"
 #include "scene/resources/3d/world_3d.h"
+#include "scene/resources/material.h"
+#include "scene/resources/shader.h"
 #include "servers/rendering/rendering_server.h"
 
 // Serialized instances: header, then the zstd-compressed byte planes of the instance floats.
@@ -55,6 +57,10 @@ static constexpr int MIN_PAINT_CANDIDATES = 16;
 static constexpr int MAX_PAINT_CANDIDATES = 65536;
 // Camera move that triggers a new evaluation of the cells.
 static constexpr real_t MIN_CAMERA_STEP = 0.25;
+
+Ref<Shader> LandscapeFoliage3D::debug_shader;
+Ref<ShaderMaterial> LandscapeFoliage3D::debug_material;
+Ref<StandardMaterial3D> LandscapeFoliage3D::debug_bounds_material;
 
 /* Instance */
 
@@ -291,6 +297,7 @@ LandscapeFoliage3D::Cell &LandscapeFoliage3D::_get_or_create_cell(Entry *p_entry
 	Cell *cell = p_entry->cells.getptr(p_key);
 	if (!cell) {
 		cell = &p_entry->cells.insert(p_key, Cell())->value;
+		cell->key = p_key;
 	}
 	return *cell;
 }
@@ -1202,6 +1209,7 @@ void LandscapeFoliage3D::_free_cell_rendering(Cell &r_cell) {
 	r_cell.state = STATE_NONE;
 	r_cell.render_dirty = true;
 	r_cell.instance_lods.clear();
+	debug_bounds_dirty = true;
 }
 
 void LandscapeFoliage3D::_free_all_rendering() {
@@ -1210,10 +1218,11 @@ void LandscapeFoliage3D::_free_all_rendering() {
 			_free_cell_rendering(kv.value);
 		}
 	}
+	_free_debug_bounds();
 	render_pending = true;
 }
 
-void LandscapeFoliage3D::_update_batch_settings(Entry *p_entry, int p_lod, Batch &r_batch) {
+void LandscapeFoliage3D::_update_batch_settings(Entry *p_entry, const Cell &p_cell, int p_lod, Batch &r_batch) {
 	if (r_batch.instance.is_null()) {
 		return;
 	}
@@ -1223,6 +1232,12 @@ void LandscapeFoliage3D::_update_batch_settings(Entry *p_entry, int p_lod, Batch
 	rs->instance_set_visible(r_batch.instance, is_visible_in_tree());
 	const bool shadows = cast_shadows && p_entry->lod_shadows[p_lod];
 	rs->instance_geometry_set_cast_shadows_setting(r_batch.instance, shadows ? RSE::SHADOW_CASTING_SETTING_ON : RSE::SHADOW_CASTING_SETTING_OFF);
+	if (debug_view != DEBUG_VIEW_DISABLED) {
+		// One shared material, the color is an instance uniform of the batch.
+		rs->instance_geometry_set_material_override(r_batch.instance, _get_debug_material());
+		rs->instance_geometry_set_shader_parameter(r_batch.instance, SNAME("foliage_debug_color"), _get_debug_cell_color(p_cell, p_lod));
+		return;
+	}
 	const Ref<Material> material = p_entry->type.is_valid() ? p_entry->type->get_material_override() : Ref<Material>();
 	rs->instance_geometry_set_material_override(r_batch.instance, material.is_valid() ? material->get_rid() : RID());
 }
@@ -1231,10 +1246,181 @@ void LandscapeFoliage3D::_update_all_batch_settings() {
 	for (Entry *entry : entries) {
 		for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
 			for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
-				_update_batch_settings(entry, lod, kv.value.batches[lod]);
+				_update_batch_settings(entry, kv.value, lod, kv.value.batches[lod]);
 			}
 		}
 	}
+	if (debug_bounds_instance.is_valid()) {
+		RenderingServer *rs = RenderingServer::get_singleton();
+		rs->instance_set_transform(debug_bounds_instance, _get_space_transform());
+		rs->instance_set_layer_mask(debug_bounds_instance, render_layers);
+		rs->instance_set_visible(debug_bounds_instance, is_visible_in_tree());
+	}
+}
+
+/* Debug views */
+
+Color LandscapeFoliage3D::get_debug_color(int p_index) {
+	// Same colors as ls_debug_color() of the landscape shader.
+	const float h = Math::fposmod(float(p_index) * 0.61803398875f, 1.0f);
+	const float offsets[3] = { 0.0f, 2.0f / 3.0f, 1.0f / 3.0f };
+	float c[3];
+	for (int i = 0; i < 3; i++) {
+		const float f = Math::fposmod(h + offsets[i], 1.0f);
+		c[i] = CLAMP(Math::abs(f * 6.0f - 3.0f) - 1.0f, 0.0f, 1.0f);
+	}
+	return Color(Math::lerp(1.0f, c[0], 0.75f), Math::lerp(1.0f, c[1], 0.75f), Math::lerp(1.0f, c[2], 0.75f));
+}
+
+Color LandscapeFoliage3D::get_debug_state_color(bool p_sorted_per_instance) {
+	// Orange: sorted per instance (crosses a LOD or cull distance), blue: drawn as a whole.
+	return p_sorted_per_instance ? Color(1.0, 0.55, 0.2) : Color(0.35, 0.65, 1.0);
+}
+
+RID LandscapeFoliage3D::_get_debug_material() {
+	if (debug_material.is_null()) {
+		debug_shader.instantiate();
+		debug_shader->set_code(R"(
+shader_type spatial;
+render_mode cull_disabled;
+
+instance uniform vec3 foliage_debug_color = vec3(1.0);
+
+void fragment() {
+	ALBEDO = foliage_debug_color;
+	ROUGHNESS = 0.9;
+}
+)");
+		debug_material.instantiate();
+		debug_material->set_shader(debug_shader);
+	}
+	return debug_material->get_rid();
+}
+
+Color LandscapeFoliage3D::_get_debug_cell_color(const Cell &p_cell, int p_lod) const {
+	switch (debug_view) {
+		case DEBUG_VIEW_LOD_LEVELS:
+			return get_debug_color(p_lod);
+		case DEBUG_VIEW_CELLS:
+			return get_debug_color(p_cell.key.x * 7919 + p_cell.key.y * 104729);
+		case DEBUG_VIEW_CELL_STATE:
+			return get_debug_state_color(p_cell.state == STATE_MIXED);
+		default:
+			return Color(1, 1, 1);
+	}
+}
+
+void LandscapeFoliage3D::_update_debug_colors(const Cell &p_cell) {
+	RenderingServer *rs = RenderingServer::get_singleton();
+	for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
+		if (p_cell.batches[lod].instance.is_valid()) {
+			rs->instance_geometry_set_shader_parameter(p_cell.batches[lod].instance, SNAME("foliage_debug_color"), _get_debug_cell_color(p_cell, lod));
+		}
+	}
+}
+
+void LandscapeFoliage3D::_free_debug_bounds() {
+	RenderingServer *rs = RenderingServer::get_singleton();
+	if (debug_bounds_instance.is_valid()) {
+		rs->free_rid(debug_bounds_instance);
+		debug_bounds_instance = RID();
+	}
+	if (debug_bounds_mesh.is_valid()) {
+		rs->free_rid(debug_bounds_mesh);
+		debug_bounds_mesh = RID();
+	}
+	debug_bounds_count = 0;
+	debug_bounds_dirty = true;
+}
+
+void LandscapeFoliage3D::_update_debug_bounds() {
+	debug_bounds_dirty = false;
+	if (debug_view == DEBUG_VIEW_DISABLED || !is_inside_tree() || get_world_3d().is_null()) {
+		_free_debug_bounds();
+		debug_bounds_dirty = false;
+		return;
+	}
+	// Bounds of the drawn cells: the color of the cell (Cells, Cell State), of the level of detail
+	// of the cells drawn as a whole (LOD Levels, white when sorted per instance).
+	PackedVector3Array lines;
+	PackedColorArray colors;
+	int count = 0;
+	for (const Entry *entry : entries) {
+		for (const KeyValue<Vector2i, Cell> &kv : entry->cells) {
+			const Cell &cell = kv.value;
+			bool drawn = false;
+			for (const Batch &batch : cell.batches) {
+				drawn = drawn || batch.instance.is_valid();
+			}
+			if (!drawn) {
+				continue;
+			}
+			Color color = _get_debug_cell_color(cell, MAX(cell.state, 0));
+			if (debug_view == DEBUG_VIEW_LOD_LEVELS && cell.state == STATE_MIXED) {
+				color = Color(1, 1, 1);
+			}
+			for (int edge = 0; edge < 12; edge++) {
+				Vector3 from;
+				Vector3 to;
+				cell.bounds.get_edge(edge, from, to);
+				lines.push_back(from);
+				lines.push_back(to);
+				colors.push_back(color);
+				colors.push_back(color);
+			}
+			count++;
+		}
+	}
+	debug_bounds_count = count;
+	RenderingServer *rs = RenderingServer::get_singleton();
+	if (lines.is_empty()) {
+		_free_debug_bounds();
+		debug_bounds_dirty = false;
+		return;
+	}
+	if (debug_bounds_material.is_null()) {
+		debug_bounds_material.instantiate();
+		debug_bounds_material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+		debug_bounds_material->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+	}
+	if (debug_bounds_mesh.is_null()) {
+		debug_bounds_mesh = rs->mesh_create();
+	} else {
+		rs->mesh_clear(debug_bounds_mesh);
+	}
+	Array arrays;
+	arrays.resize(RSE::ARRAY_MAX);
+	arrays[RSE::ARRAY_VERTEX] = lines;
+	arrays[RSE::ARRAY_COLOR] = colors;
+	rs->mesh_add_surface_from_arrays(debug_bounds_mesh, RSE::PRIMITIVE_LINES, arrays);
+	rs->mesh_surface_set_material(debug_bounds_mesh, 0, debug_bounds_material->get_rid());
+	if (debug_bounds_instance.is_null()) {
+		debug_bounds_instance = rs->instance_create2(debug_bounds_mesh, get_world_3d()->get_scenario());
+		rs->instance_attach_object_instance_id(debug_bounds_instance, get_instance_id());
+		rs->instance_geometry_set_cast_shadows_setting(debug_bounds_instance, RSE::SHADOW_CASTING_SETTING_OFF);
+		rs->instance_set_transform(debug_bounds_instance, _get_space_transform());
+		rs->instance_set_layer_mask(debug_bounds_instance, render_layers);
+		rs->instance_set_visible(debug_bounds_instance, is_visible_in_tree());
+	}
+}
+
+void LandscapeFoliage3D::set_debug_view(DebugView p_view) {
+	if (debug_view == p_view) {
+		return;
+	}
+	debug_view = p_view;
+	_update_all_batch_settings();
+	if (debug_view == DEBUG_VIEW_DISABLED) {
+		_free_debug_bounds();
+	}
+	debug_bounds_dirty = true;
+	render_pending = true;
+}
+
+void LandscapeFoliage3D::cleanup_shared_resources() {
+	debug_material.unref();
+	debug_shader.unref();
+	debug_bounds_material.unref();
 }
 
 void LandscapeFoliage3D::_set_batch(Entry *p_entry, Cell &r_cell, int p_lod, const LocalVector<uint32_t> *p_indices) {
@@ -1269,7 +1455,7 @@ void LandscapeFoliage3D::_set_batch(Entry *p_entry, Cell &r_cell, int p_lod, con
 	if (batch.instance.is_null()) {
 		batch.instance = rs->instance_create2(batch.multimesh, get_world_3d()->get_scenario());
 		rs->instance_attach_object_instance_id(batch.instance, get_instance_id());
-		_update_batch_settings(p_entry, p_lod, batch);
+		_update_batch_settings(p_entry, r_cell, p_lod, batch);
 	}
 	batch.count = count;
 }
@@ -1324,6 +1510,7 @@ uint8_t LandscapeFoliage3D::_get_instance_lod(const Entry *p_entry, const Instan
 bool LandscapeFoliage3D::_update_cell(Entry *p_entry, Cell &r_cell, int p_state, const Vector3 &p_camera) {
 	_update_cell_bounds(p_entry, r_cell);
 	const uint32_t count = r_cell.instances.size();
+	debug_bounds_dirty = true;
 	if (p_state == STATE_CULLED) {
 		_free_cell_rendering(r_cell);
 		r_cell.state = STATE_CULLED;
@@ -1331,6 +1518,7 @@ bool LandscapeFoliage3D::_update_cell(Entry *p_entry, Cell &r_cell, int p_state,
 		return true;
 	}
 	if (p_state >= 0) {
+		r_cell.state = p_state; // Colors of the debug views.
 		for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
 			if (lod == p_state) {
 				_set_batch(p_entry, r_cell, lod, nullptr);
@@ -1343,6 +1531,9 @@ bool LandscapeFoliage3D::_update_cell(Entry *p_entry, Cell &r_cell, int p_state,
 		// Known levels, for the hysteresis when the cell becomes mixed.
 		r_cell.instance_lods.resize(count);
 		memset(r_cell.instance_lods.ptr(), p_state, count);
+		if (debug_view == DEBUG_VIEW_CELL_STATE) {
+			_update_debug_colors(r_cell); // The batch of the level may have been sorted per instance.
+		}
 		return true;
 	}
 
@@ -1379,6 +1570,9 @@ bool LandscapeFoliage3D::_update_cell(Entry *p_entry, Cell &r_cell, int p_state,
 			_set_batch(p_entry, r_cell, lod, &indices[lod]);
 		}
 	}
+	if (debug_view == DEBUG_VIEW_CELL_STATE && rebuild) {
+		_update_debug_colors(r_cell);
+	}
 	return true;
 }
 
@@ -1387,7 +1581,12 @@ void LandscapeFoliage3D::_update_rendering() {
 		return;
 	}
 	Vector3 camera;
-	const bool has_camera = _get_camera(camera);
+	bool has_camera = _get_camera(camera);
+	if (landscape && landscape->is_lod_frozen() && has_last_camera) {
+		// The LOD of the landscape is frozen: the foliage keeps its levels too, to inspect them.
+		camera = last_camera;
+		has_camera = true;
+	}
 	if (!has_camera) {
 		camera = Vector3(); // Without camera, everything is drawn at the first level.
 	}
@@ -1443,6 +1642,9 @@ void LandscapeFoliage3D::_update_rendering() {
 		_update_cell(w.entry, *w.cell, w.state, camera);
 	}
 	render_pending = done < work.size();
+	if (debug_bounds_dirty && debug_view != DEBUG_VIEW_DISABLED) {
+		_update_debug_bounds();
+	}
 	last_camera = camera;
 	has_last_camera = has_camera;
 	last_update_usec = OS::get_singleton()->get_ticks_usec() - begin;
@@ -1530,6 +1732,7 @@ Dictionary LandscapeFoliage3D::get_statistics() const {
 	stats["instances_drawn"] = drawn;
 	stats["update_usec"] = int64_t(last_update_usec);
 	stats["updated_cells"] = last_updated_cells;
+	stats["debug_bounds"] = debug_bounds_count;
 	return stats;
 }
 
@@ -1605,6 +1808,9 @@ void LandscapeFoliage3D::_notification(int p_what) {
 					}
 				}
 			}
+			if (debug_bounds_instance.is_valid()) {
+				rs->instance_set_transform(debug_bounds_instance, space);
+			}
 			render_pending = true;
 		} break;
 
@@ -1663,6 +1869,8 @@ void LandscapeFoliage3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_instances_in_rect", "type_index", "rect", "instances"), &LandscapeFoliage3D::set_instances_in_rect);
 	ClassDB::bind_method(D_METHOD("get_type_data", "type_index"), &LandscapeFoliage3D::get_type_data);
 	ClassDB::bind_method(D_METHOD("set_type_data", "type_index", "data"), &LandscapeFoliage3D::set_type_data);
+	ClassDB::bind_method(D_METHOD("set_debug_view", "view"), &LandscapeFoliage3D::set_debug_view);
+	ClassDB::bind_method(D_METHOD("get_debug_view"), &LandscapeFoliage3D::get_debug_view);
 	ClassDB::bind_method(D_METHOD("get_statistics"), &LandscapeFoliage3D::get_statistics);
 	ClassDB::bind_method(D_METHOD("force_update"), &LandscapeFoliage3D::force_update);
 
@@ -1676,6 +1884,14 @@ void LandscapeFoliage3D::_bind_methods() {
 	ADD_GROUP("Rendering", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "render_layers", PROPERTY_HINT_LAYERS_3D_RENDER), "set_render_layers", "get_render_layers");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "cast_shadows"), "set_cast_shadows", "is_casting_shadows");
+
+	ADD_GROUP("Debug", "");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_view", PROPERTY_HINT_ENUM, "Disabled,LOD Levels,Cells,Cell State"), "set_debug_view", "get_debug_view");
+
+	BIND_ENUM_CONSTANT(DEBUG_VIEW_DISABLED);
+	BIND_ENUM_CONSTANT(DEBUG_VIEW_LOD_LEVELS);
+	BIND_ENUM_CONSTANT(DEBUG_VIEW_CELLS);
+	BIND_ENUM_CONSTANT(DEBUG_VIEW_CELL_STATE);
 
 	BIND_CONSTANT(INSTANCE_FLOATS);
 }
@@ -1694,4 +1910,5 @@ LandscapeFoliage3D::~LandscapeFoliage3D() {
 		memdelete(entry);
 	}
 	entries.clear();
+	_free_debug_bounds();
 }
