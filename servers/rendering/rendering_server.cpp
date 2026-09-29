@@ -3740,6 +3740,19 @@ void RenderingServer::init() {
 
 	GLOBAL_DEF("rendering/global_illumination/gi/use_half_resolution", false);
 
+	// Voxel cone tracing is the dominant cost of the GI pass and its result is
+	// deterministic, so instead of tracing every pixel every frame the pass traces half of
+	// them in a checkerboard and reprojects the previous frame for the rest. Pixels whose
+	// history is rejected -- a disocclusion, a screen edge, the first frame -- are still
+	// traced, so this halves the tracing work for a frame of latency on lighting changes.
+	// Not applied to multiview or VRS rendering.
+	GLOBAL_DEF_RST("rendering/global_illumination/gi/use_temporal_accumulation", true);
+
+	// How much of a freshly traced pixel replaces its reprojected history. The trace is
+	// exact, so the default takes it outright; lower values fade a lighting change in over
+	// more frames, at the cost of dragging the stale value forward with it.
+	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/gi/temporal_blend", PROPERTY_HINT_RANGE, "0.05,1.0,0.01"), 1.0);
+
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/quality", PROPERTY_HINT_ENUM, "Low (4 Cones - Fast),High (6 Cones - Slow)"), 0);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/dynamic_object_refresh_frames", PROPERTY_HINT_RANGE, "1,60,1"), 4);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/voxel_gi/light_update_frames", PROPERTY_HINT_RANGE, "1,16,1"), 1);
@@ -3831,9 +3844,18 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/lightmapping/primitive_meshes/texel_size", PROPERTY_HINT_RANGE, "0.001,100,0.001"), 0.2);
 	GLOBAL_DEF("rendering/lightmapping/lightmap_gi/use_bicubic_filter", true);
 
-	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/probe_ray_count", PROPERTY_HINT_ENUM, "8 (Fastest),16,32,64,96,128 (Slowest)"), 1);
+	// One label per RSE::EnvironmentSDFGIRayCount value, which starts at 4 rays.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/probe_ray_count", PROPERTY_HINT_ENUM, "4 (Fastest),8,16,32,64,96,128 (Slowest)"), 1);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/frames_to_converge", PROPERTY_HINT_ENUM, "5 (Less Latency but Lower Quality),10,15,20,25,30 (More Latency but Higher Quality)"), 5);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/frames_to_update_lights", PROPERTY_HINT_ENUM, "1 (Slower),2,4,8,16 (Faster)"), 2);
+	GLOBAL_DEF_RST("rendering/global_illumination/sdfgi/adaptive_history", true);
+	GLOBAL_DEF_RST("rendering/global_illumination/sdfgi/probe_relocation", true);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/sdfgi/view_bias", PROPERTY_HINT_RANGE, "0,4,0.01,suffix:cells"), 1.0);
+	GLOBAL_DEF_RST("rendering/global_illumination/sdfgi/per_pixel_visibility", false);
+	GLOBAL_DEF_RST("rendering/global_illumination/sdfgi/dynamic_objects", true);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/dynamic_object_updates_per_frame", PROPERTY_HINT_RANGE, "1,8,1"), 1);
+	GLOBAL_DEF_RST("rendering/global_illumination/sdfgi/screen_probes", false);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/screen_probe_history_frames", PROPERTY_HINT_RANGE, "4,64,1"), 24);
 
 	GLOBAL_DEF_RST("rendering/environment/fog/use_legacy_blending", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/volume_size", PROPERTY_HINT_RANGE, "16,512,1"), 64);

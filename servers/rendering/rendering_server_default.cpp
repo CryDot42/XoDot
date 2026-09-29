@@ -46,6 +46,7 @@
 // careful, these may run in different threads than the rendering server
 
 int RenderingServerDefault::changes = 0;
+int RenderingServerDefault::drawn_frame_changes = 0;
 
 /* FREE */
 
@@ -73,7 +74,9 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 	frame_drawn_callbacks.push_back(p_callable);
 }
 
-void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
+void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, int p_changes) {
+	drawn_frame_changes = p_changes;
+
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
 	RSG::rasterizer->begin_frame(frame_step);
 
@@ -448,11 +451,12 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 	ERR_FAIL_COND_MSG(!Thread::is_main_thread(), "Manually triggering the draw function from the RenderingServer can only be done on the main thread. Call this function from the main thread or use call_deferred().");
 	// Needs to be done before changes is reset to 0, to not force the editor to redraw.
 	RS::get_singleton()->emit_signal(SNAME("frame_pre_draw"));
+	const int frame_changes = changes;
 	changes = 0;
 	if (create_thread) {
-		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step);
+		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step, frame_changes);
 	} else {
-		_draw(p_present, frame_step);
+		_draw(p_present, frame_step, frame_changes);
 	}
 }
 

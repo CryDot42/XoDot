@@ -147,6 +147,73 @@ layout(set = 1, binding = 1) uniform texture2DArray sdfgi_ambient_texture;
 
 layout(set = 1, binding = 2) uniform texture3D sdfgi_occlusion_texture;
 
+// Where each probe was placed (see MODE_PROBE_PLACEMENT in sdfgi_preprocess.glsl): w is whether it is usable.
+layout(set = 1, binding = 3) uniform texture2DArray sdfgi_probe_state;
+
+// Ambient light of one cascade's probes around p_cascade_pos, a point in that cascade's probe
+// grid (see the loop in main()).
+vec3 sdfgi_cascade_ambient(uint p_cascade, vec3 p_cascade_pos) {
+	vec3 base_pos = floor(p_cascade_pos);
+	ivec3 probe_base_pos = ivec3(base_pos);
+
+	vec4 ambient_accum = vec4(0.0);
+
+	ivec3 tex_pos = ivec3(probe_base_pos.xy, int(p_cascade));
+	tex_pos.x += probe_base_pos.z * sdfgi.probe_axis_size;
+
+	for (uint j = 0; j < 8; j++) {
+		ivec3 offset = (ivec3(j) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1);
+		ivec3 probe_posi = probe_base_pos;
+		probe_posi += offset;
+
+		// Compute weight
+
+		vec3 probe_pos = vec3(probe_posi);
+		vec3 probe_to_pos = p_cascade_pos - probe_pos;
+
+		vec3 trilinear = vec3(1.0) - abs(probe_to_pos);
+		float weight = trilinear.x * trilinear.y * trilinear.z;
+
+		// A probe stuck in geometry saw nothing but the inside of it.
+		weight *= texelFetch(sampler2DArray(sdfgi_probe_state, linear_sampler), ivec3(probe_posi.x + probe_posi.z * sdfgi.probe_axis_size, probe_posi.y, int(p_cascade)), 0).w;
+
+		// Compute lightprobe occlusion
+
+		if (sdfgi.use_occlusion) {
+			ivec3 occ_indexv = abs((sdfgi.cascades[p_cascade].probe_world_offset + probe_posi) & ivec3(1, 1, 1)) * ivec3(1, 2, 4);
+			vec4 occ_mask = mix(vec4(0.0), vec4(1.0), equal(ivec4(occ_indexv.x | occ_indexv.y), ivec4(0, 1, 2, 3)));
+
+			vec3 occ_pos = clamp(p_cascade_pos, probe_pos - sdfgi.occlusion_clamp, probe_pos + sdfgi.occlusion_clamp) * sdfgi.probe_to_uvw;
+			occ_pos.z += float(p_cascade);
+			if (occ_indexv.z != 0) { //z bit is on, means index is >=4, so make it switch to the other half of textures
+				occ_pos.x += 1.0;
+			}
+
+			occ_pos *= sdfgi.occlusion_renormalize;
+			float occlusion = dot(textureLod(sampler3D(sdfgi_occlusion_texture, linear_sampler), occ_pos, 0.0), occ_mask);
+			occlusion = occlusion < 0.2 ? occlusion * occlusion * occlusion * 25.0 : occlusion; // See sdfvoxel_gi_process() in gi.glsl.
+
+			weight *= max(occlusion, 0.0001); // See sdfvoxel_gi_process() in gi.glsl.
+		}
+
+		// Compute ambient texture position
+
+		ivec3 uvw = tex_pos;
+		uvw.xy += offset.xy;
+		uvw.x += offset.z * sdfgi.probe_axis_size;
+
+		vec3 ambient = texelFetch(sampler2DArray(sdfgi_ambient_texture, linear_sampler), uvw, 0).rgb;
+
+		ambient_accum.rgb += ambient * weight * sdfgi.cascades[p_cascade].exposure_normalization;
+		ambient_accum.a += weight;
+	}
+
+	if (ambient_accum.a > 0) {
+		ambient_accum.rgb /= ambient_accum.a;
+	}
+	return ambient_accum.rgb;
+}
+
 #endif //SDFGI
 
 layout(set = 0, binding = 15, std140) uniform Params {
@@ -718,71 +785,39 @@ void main() {
 #ifdef ENABLE_SDFGI
 
 		{
-			float blend = -1.0;
+			// SDFGI lives in a space whose Y axis is stretched by y_mult, which the cascade
+			// positions are already in; the point has to be taken there too, as gi.glsl and the
+			// forward pass do, or the fog would sample probes from the wrong height.
+			vec3 sdfgi_pos = world_pos;
+			sdfgi_pos.y *= sdfgi.y_mult;
+
 			vec3 ambient_total = vec3(0.0);
 
 			for (uint i = 0; i < sdfgi.max_cascades; i++) {
-				vec3 cascade_pos = (world_pos - sdfgi.cascades[i].position) * sdfgi.cascades[i].to_probe;
+				vec3 cascade_pos = (sdfgi_pos - sdfgi.cascades[i].position) * sdfgi.cascades[i].to_probe;
 
 				if (any(lessThan(cascade_pos, vec3(0.0))) || any(greaterThanEqual(cascade_pos, sdfgi.cascade_probe_size))) {
 					continue; //skip cascade
 				}
 
-				vec3 base_pos = floor(cascade_pos);
-				ivec3 probe_base_pos = ivec3(base_pos);
+				ambient_total = sdfgi_cascade_ambient(i, cascade_pos);
 
-				vec4 ambient_accum = vec4(0.0);
+				// Fade into the next cascade over the same band as the surfaces do (see
+				// sdfgi_process() in gi.glsl), rather than switching at the cascade boundary,
+				// which in fog shows as a shell around the camera that jumps when a cascade scrolls.
+				float blend_from = (float(sdfgi.probe_axis_size - 1) / 2.0) - 2.5;
+				float blend_to = blend_from + 2.0;
+				vec3 inner_pos = abs(sdfgi_pos * sdfgi.cascades[i].to_probe);
+				float blend = smoothstep(blend_from, blend_to, max(inner_pos.x, max(inner_pos.y, inner_pos.z)));
 
-				ivec3 tex_pos = ivec3(probe_base_pos.xy, int(i));
-				tex_pos.x += probe_base_pos.z * sdfgi.probe_axis_size;
-
-				for (uint j = 0; j < 8; j++) {
-					ivec3 offset = (ivec3(j) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1);
-					ivec3 probe_posi = probe_base_pos;
-					probe_posi += offset;
-
-					// Compute weight
-
-					vec3 probe_pos = vec3(probe_posi);
-					vec3 probe_to_pos = cascade_pos - probe_pos;
-
-					vec3 trilinear = vec3(1.0) - abs(probe_to_pos);
-					float weight = trilinear.x * trilinear.y * trilinear.z;
-
-					// Compute lightprobe occlusion
-
-					if (sdfgi.use_occlusion) {
-						ivec3 occ_indexv = abs((sdfgi.cascades[i].probe_world_offset + probe_posi) & ivec3(1, 1, 1)) * ivec3(1, 2, 4);
-						vec4 occ_mask = mix(vec4(0.0), vec4(1.0), equal(ivec4(occ_indexv.x | occ_indexv.y), ivec4(0, 1, 2, 3)));
-
-						vec3 occ_pos = clamp(cascade_pos, probe_pos - sdfgi.occlusion_clamp, probe_pos + sdfgi.occlusion_clamp) * sdfgi.probe_to_uvw;
-						occ_pos.z += float(i);
-						if (occ_indexv.z != 0) { //z bit is on, means index is >=4, so make it switch to the other half of textures
-							occ_pos.x += 1.0;
-						}
-
-						occ_pos *= sdfgi.occlusion_renormalize;
-						float occlusion = dot(textureLod(sampler3D(sdfgi_occlusion_texture, linear_sampler), occ_pos, 0.0), occ_mask);
-
-						weight *= max(occlusion, 0.01);
+				if (blend > 0.0) {
+					if (i < sdfgi.max_cascades - 1) {
+						vec3 cascade_pos_next = (sdfgi_pos - sdfgi.cascades[i + 1].position) * sdfgi.cascades[i + 1].to_probe;
+						ambient_total = mix(ambient_total, sdfgi_cascade_ambient(i + 1, cascade_pos_next), blend);
+					} else {
+						ambient_total *= 1.0 - blend;
 					}
-
-					// Compute ambient texture position
-
-					ivec3 uvw = tex_pos;
-					uvw.xy += offset.xy;
-					uvw.x += offset.z * sdfgi.probe_axis_size;
-
-					vec3 ambient = texelFetch(sampler2DArray(sdfgi_ambient_texture, linear_sampler), uvw, 0).rgb;
-
-					ambient_accum.rgb += ambient * weight * sdfgi.cascades[i].exposure_normalization;
-					ambient_accum.a += weight;
 				}
-
-				if (ambient_accum.a > 0) {
-					ambient_accum.rgb /= ambient_accum.a;
-				}
-				ambient_total = ambient_accum.rgb;
 				break;
 			}
 

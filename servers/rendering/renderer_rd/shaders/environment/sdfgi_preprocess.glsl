@@ -57,25 +57,54 @@ layout(r16ui, set = 0, binding = 1) uniform restrict readonly uimage3D src_color
 layout(r8, set = 0, binding = 2) uniform restrict image3D dst_occlusion[8];
 layout(r32ui, set = 0, binding = 3) uniform restrict readonly uimage3D src_facing;
 
-const uvec2 group_size_offset[11] = uvec2[](uvec2(1, 0), uvec2(3, 1), uvec2(6, 4), uvec2(10, 10), uvec2(15, 20), uvec2(21, 35), uvec2(28, 56), uvec2(36, 84), uvec2(42, 120), uvec2(46, 162), uvec2(48, 208));
-const uint group_pos[256] = uint[](0,
-		65536, 256, 1,
-		131072, 65792, 512, 65537, 257, 2,
-		196608, 131328, 66048, 768, 131073, 65793, 513, 65538, 258, 3,
-		262144, 196864, 131584, 66304, 1024, 196609, 131329, 66049, 769, 131074, 65794, 514, 65539, 259, 4,
-		327680, 262400, 197120, 131840, 66560, 1280, 262145, 196865, 131585, 66305, 1025, 196610, 131330, 66050, 770, 131075, 65795, 515, 65540, 260, 5,
-		393216, 327936, 262656, 197376, 132096, 66816, 1536, 327681, 262401, 197121, 131841, 66561, 1281, 262146, 196866, 131586, 66306, 1026, 196611, 131331, 66051, 771, 131076, 65796, 516, 65541, 261, 6,
-		458752, 393472, 328192, 262912, 197632, 132352, 67072, 1792, 393217, 327937, 262657, 197377, 132097, 66817, 1537, 327682, 262402, 197122, 131842, 66562, 1282, 262147, 196867, 131587, 66307, 1027, 196612, 131332, 66052, 772, 131077, 65797, 517, 65542, 262, 7,
-		459008, 393728, 328448, 263168, 197888, 132608, 67328, 458753, 393473, 328193, 262913, 197633, 132353, 67073, 1793, 393218, 327938, 262658, 197378, 132098, 66818, 1538, 327683, 262403, 197123, 131843, 66563, 1283, 262148, 196868, 131588, 66308, 1028, 196613, 131333, 66053, 773, 131078, 65798, 518, 65543, 263,
-		459264, 393984, 328704, 263424, 198144, 132864, 459009, 393729, 328449, 263169, 197889, 132609, 67329, 458754, 393474, 328194, 262914, 197634, 132354, 67074, 1794, 393219, 327939, 262659, 197379, 132099, 66819, 1539, 327684, 262404, 197124, 131844, 66564, 1284, 262149, 196869, 131589, 66309, 1029, 196614, 131334, 66054, 774, 131079, 65799, 519,
-		459520, 394240, 328960, 263680, 198400, 459265, 393985, 328705, 263425, 198145, 132865, 459010, 393730, 328450, 263170, 197890, 132610, 67330, 458755, 393475, 328195, 262915, 197635, 132355, 67075, 1795, 393220, 327940, 262660, 197380, 132100, 66820, 1540, 327685, 262405, 197125, 131845, 66565, 1285, 262150, 196870, 131590, 66310, 1030, 196615, 131335, 66055, 775);
+#define OCC_REGION_SIZE (OCCLUSION_SIZE * 2)
 
-shared uint occlusion_facing[((OCCLUSION_SIZE * 2) * (OCCLUSION_SIZE * 2) * (OCCLUSION_SIZE * 2)) / 4];
+// Where each probe was placed (see MODE_PROBE_PLACEMENT): xyz its offset from the grid in voxels,
+// w whether it is usable at all.
+layout(rgba16f, set = 0, binding = 4) uniform restrict readonly image2DArray probe_state;
+
+shared uint occlusion_facing[(OCC_REGION_SIZE * OCC_REGION_SIZE * OCC_REGION_SIZE) / 4];
 
 uint get_facing(ivec3 p_pos) {
-	uint ofs = uint(p_pos.z * OCCLUSION_SIZE * 2 * OCCLUSION_SIZE * 2 + p_pos.y * OCCLUSION_SIZE * 2 + p_pos.x);
+	uint ofs = uint(p_pos.z * OCC_REGION_SIZE * OCC_REGION_SIZE + p_pos.y * OCC_REGION_SIZE + p_pos.x);
 	uint v = occlusion_facing[ofs / 4];
 	return (v >> ((ofs % 4) * 8)) & 0xFF;
+}
+
+// Whether the probe at p_to (region voxel coordinates, where voxel v spans [v, v + 1)) can see
+// the point p_from, walking the voxels in between (Amanatides & Woo) and stopping at the first
+// solid one. The voxel p_from lies in is not tested, the one the probe is reached through is: a
+// probe hidden in geometry on that side cannot see past it.
+float occlusion_trace(vec3 p_from, vec3 p_to) {
+	vec3 ray = p_to - p_from;
+	ivec3 cell = ivec3(floor(p_from));
+	ivec3 cell_step = ivec3(sign(ray));
+	vec3 t_delta = 1.0 / max(abs(ray), vec3(1e-6));
+	vec3 t_max = abs(vec3(cell) + max(vec3(cell_step), vec3(0.0)) - p_from) * t_delta;
+
+	// A segment between two points of the region can cross at most this many voxel boundaries.
+	for (int i = 0; i < OCC_REGION_SIZE * 3; i++) {
+		if (min(t_max.x, min(t_max.y, t_max.z)) >= 1.0 - 1e-4) {
+			return 1.0; // Reached the probe without meeting anything solid.
+		}
+		if (t_max.x <= t_max.y && t_max.x <= t_max.z) {
+			cell.x += cell_step.x;
+			t_max.x += t_delta.x;
+		} else if (t_max.y <= t_max.z) {
+			cell.y += cell_step.y;
+			t_max.y += t_delta.y;
+		} else {
+			cell.z += cell_step.z;
+			t_max.z += t_delta.z;
+		}
+		if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, ivec3(OCC_REGION_SIZE)))) {
+			return 1.0;
+		}
+		if (get_facing(cell) != 0) {
+			return 0.0;
+		}
+	}
+	return 1.0;
 }
 
 #endif
@@ -166,9 +195,145 @@ layout(push_constant, std430) uniform Params {
 	bool half_size;
 	uint occlusion_index;
 	int cascade;
+	float min_distance; // MODE_PROBE_PLACEMENT: clearance to keep probes at, in voxels.
+
+	// Cells voxelized again this frame for dynamic objects (empty when box_from == box_to).
+	ivec3 box_from;
 	uint pad;
+	ivec3 box_to;
+	uint pad2;
 }
 params;
+
+#ifdef MODE_PROBE_PLACEMENT
+
+layout(r32ui, set = 0, binding = 1) uniform restrict readonly uimage3D src_facing;
+layout(rgba16f, set = 0, binding = 2) uniform restrict writeonly image2DArray dst_probe_state;
+
+// A probe whose rays mostly hit the back of surfaces is inside geometry (DDGI uses the same test).
+#define PLACEMENT_INSIDE_RATIO 0.25
+#define PLACEMENT_RAYS 64
+#define PLACEMENT_CANDIDATE_RAYS 16
+// How far a probe may be moved, as a fraction of the probe spacing (per axis).
+#define PLACEMENT_MAX_OFFSET 0.45
+
+const float PI = 3.14159265f;
+const float GOLDEN_ANGLE = PI * (3.0 - sqrt(5.0));
+
+const ivec3 facing_dirs[6] = ivec3[](ivec3(1, 0, 0), ivec3(0, 1, 0), ivec3(0, 0, 1), ivec3(-1, 0, 0), ivec3(0, -1, 0), ivec3(0, 0, -1));
+
+vec3 spherical_fibonacci(uint p_index, uint p_count) {
+	float z = 1.0 - (2.0 * float(p_index) + 1.0) / float(p_count);
+	float r = sqrt(max(0.0, 1.0 - z * z));
+	float phi = float(p_index) * GOLDEN_ANGLE;
+	return vec3(r * cos(phi), r * sin(phi), z);
+}
+
+uint placement_facing(ivec3 p_cell) {
+	if (any(lessThan(p_cell, ivec3(0))) || any(greaterThanEqual(p_cell, ivec3(params.grid_size)))) {
+		return 0; // Nothing is known outside the cascade.
+	}
+	return imageLoad(src_facing, p_cell).r;
+}
+
+// Walks the voxels along p_dir from p_from (Amanatides & Woo) until p_max_dist, returning the
+// distance at which the first solid voxel is entered (-1 when there is none), and its facing bits.
+float placement_trace(vec3 p_from, vec3 p_dir, float p_max_dist, out uint r_facing) {
+	r_facing = 0;
+	ivec3 cell = ivec3(floor(p_from));
+	ivec3 cell_step = ivec3(sign(p_dir));
+	vec3 t_delta = 1.0 / max(abs(p_dir), vec3(1e-6));
+	vec3 t_max = abs(vec3(cell) + max(vec3(cell_step), vec3(0.0)) - p_from) * t_delta;
+
+	for (int i = 0; i < OCCLUSION_SIZE * 8; i++) {
+		float t = min(t_max.x, min(t_max.y, t_max.z));
+		if (t >= p_max_dist) {
+			return -1.0;
+		}
+		if (t_max.x <= t_max.y && t_max.x <= t_max.z) {
+			cell.x += cell_step.x;
+			t_max.x += t_delta.x;
+		} else if (t_max.y <= t_max.z) {
+			cell.y += cell_step.y;
+			t_max.y += t_delta.y;
+		} else {
+			cell.z += cell_step.z;
+			t_max.z += t_delta.z;
+		}
+		uint facing = placement_facing(cell);
+		if (facing != 0) {
+			r_facing = facing;
+			return t;
+		}
+	}
+	return -1.0;
+}
+
+struct PlacementSample {
+	float backface_ratio; // Share of the rays whose first hit is the back of a surface.
+	float clearance; // How close the nearest hit is, measured the way the probe rays are biased (L-infinity).
+};
+
+// What a probe at p_pos would see of the geometry around it, within the probe's occlusion
+// region: rays stop at its boundary (p_region_min, p_region_max), so the result only depends on
+// geometry that the occlusion pass also looks at for this probe.
+PlacementSample placement_evaluate(vec3 p_pos, vec3 p_region_min, vec3 p_region_max, uint p_ray_count) {
+	PlacementSample s;
+	if (placement_facing(ivec3(floor(p_pos))) != 0) {
+		s.backface_ratio = 1.0; // In a solid voxel: as inside as it gets.
+		s.clearance = 0.0;
+		return s;
+	}
+
+	float backfaces = 0.0;
+	s.clearance = 1e10;
+	for (uint i = 0; i < p_ray_count; i++) {
+		vec3 dir = spherical_fibonacci(i, p_ray_count);
+		vec3 exit = max((p_region_min - p_pos) / dir, (p_region_max - p_pos) / dir);
+		float max_dist = min(exit.x, min(exit.y, exit.z));
+
+		uint facing;
+		float t = placement_trace(p_pos, dir, max_dist, facing);
+		if (t < 0.0) {
+			continue;
+		}
+
+		// A front face has a normal pointing back towards the ray. Thin geometry is marked as
+		// facing both ways, and counts as front from either side.
+		bool front = false;
+		for (int k = 0; k < 6; k++) {
+			if (bool(facing & (1 << k)) && dot(vec3(facing_dirs[k]), dir) < 0.0) {
+				front = true;
+			}
+		}
+		if (!front) {
+			backfaces += 1.0;
+		}
+		s.clearance = min(s.clearance, t * max(abs(dir.x), max(abs(dir.y), abs(dir.z))));
+	}
+	s.backface_ratio = backfaces / float(p_ray_count);
+	return s;
+}
+
+// Whether nothing solid lies on the segment between two points (the voxel p_from is in excluded).
+bool placement_segment_clear(vec3 p_from, vec3 p_to) {
+	vec3 ray = p_to - p_from;
+	float len = length(ray);
+	if (len < 1e-4) {
+		return true;
+	}
+	uint facing;
+	return placement_trace(p_from, ray / len, len, facing) < 0.0 && placement_facing(ivec3(floor(p_to))) == 0;
+}
+
+// Lower is better: never inside, then as few backfaces and as much clearance as possible,
+// and among equals, the least movement.
+float placement_score(PlacementSample p_sample, float p_offset_length) {
+	float inside = p_sample.backface_ratio > PLACEMENT_INSIDE_RATIO ? 100.0 : 0.0;
+	return inside + p_sample.backface_ratio * 4.0 + max(0.0, params.min_distance - p_sample.clearance) * 2.0 + p_offset_length * 0.05;
+}
+
+#endif
 
 void main() {
 #ifdef MODE_SCROLL
@@ -184,6 +349,10 @@ void main() {
 
 	if (any(lessThan(write_pos, ivec3(0))) || any(greaterThanEqual(write_pos, ivec3(params.grid_size)))) {
 		return; // Fits outside the 3D texture, don't do anything.
+	}
+
+	if (all(greaterThanEqual(write_pos, params.box_from)) && all(lessThan(write_pos, params.box_to))) {
+		return; // Voxelized again this frame (a dynamic object moved there): what it held is out of date.
 	}
 
 	uint albedo = ((src_process_voxels.data[index].albedo & 0x7FFF) << 1) | 1; //add solid bit
@@ -215,7 +384,7 @@ void main() {
 	read_pos.x += params.grid_size;
 	occlusion |= imageLoad(src_occlusion, read_pos).r << 16;
 
-	const uint occlusion_shift[8] = uint[](12, 8, 4, 0, 28, 24, 20, 16);
+	const uint occlusion_shift[8] = uint[](4, 8, 12, 0, 20, 24, 28, 16); // Channel i lands in r, g, b, a of B4G4R4A4 (see create()).
 
 	for (uint i = 0; i < 8; i++) {
 		float o = float((occlusion >> occlusion_shift[i]) & 0xF) / 15.0;
@@ -483,6 +652,16 @@ void main() {
 
 #ifdef MODE_OCCLUSION
 
+	// One group per probe, working on the (2 * OCCLUSION_SIZE)^3 voxels around it: the eight probe
+	// cells the probe is a corner of. Each voxel stores, in the channel for this probe's index
+	// parity, whether the probe can see it (see sdfvoxel_gi_process() in gi.glsl for the lookup).
+	//
+	// This used to propagate visibility outwards from the probe as a wavefront, each voxel taking
+	// the average of its three neighbors towards the probe. That behaves like diffusion: it seeps
+	// around corners and fans out through doorways, so the probe was partly "visible" well into
+	// places it has no line of sight to. Walking the actual line from each voxel to the probe does
+	// not, and costs about the same, from the same shared-memory copy of the geometry.
+
 	uint invocation_idx = uint(gl_LocalInvocationID.x);
 	ivec3 region = ivec3(gl_WorkGroupID);
 
@@ -492,15 +671,26 @@ void main() {
 
 	bool region_out_of_bounds = false;
 
-	if (params.scroll != ivec3(0)) {
-		//validate scroll region
+	// Only probes whose region holds newly voxelized cells need their occlusion computed again (the
+	// rest was scrolled in by MODE_SCROLL_OCCLUSION), unless the whole cascade is new.
+	bool has_box = any(lessThan(params.box_from, params.box_to));
+	if (params.scroll != ivec3(0) || has_box) {
 		ivec3 region_offset_to = region_offset + ivec3(OCCLUSION_SIZE * 2);
-		uvec3 scroll_mask = uvec3(notEqual(params.scroll, ivec3(0))); //save which axes acre scrolling
-		ivec3 scroll_from = mix(ivec3(0), ivec3(params.grid_size) + params.scroll, lessThan(params.scroll, ivec3(0)));
-		ivec3 scroll_to = mix(ivec3(params.grid_size), params.scroll, greaterThan(params.scroll, ivec3(0)));
+		region_out_of_bounds = true;
 
-		if ((uvec3(lessThanEqual(region_offset_to, scroll_from)) | uvec3(greaterThanEqual(region_offset, scroll_to))) * scroll_mask == scroll_mask) { //all axes that scroll are out, exit
-			region_out_of_bounds = true; //region outside scroll bounds, quit
+		if (params.scroll != ivec3(0)) {
+			//validate scroll region
+			uvec3 scroll_mask = uvec3(notEqual(params.scroll, ivec3(0))); //save which axes acre scrolling
+			ivec3 scroll_from = mix(ivec3(0), ivec3(params.grid_size) + params.scroll, lessThan(params.scroll, ivec3(0)));
+			ivec3 scroll_to = mix(ivec3(params.grid_size), params.scroll, greaterThan(params.scroll, ivec3(0)));
+
+			if ((uvec3(lessThanEqual(region_offset_to, scroll_from)) | uvec3(greaterThanEqual(region_offset, scroll_to))) * scroll_mask != scroll_mask) { //not all axes that scroll are out
+				region_out_of_bounds = false;
+			}
+		}
+
+		if (has_box && all(lessThan(region_offset, params.box_to)) && all(greaterThan(region_offset_to, params.box_from))) {
+			region_out_of_bounds = false; // Around cells voxelized again for dynamic objects.
 		}
 	}
 
@@ -530,418 +720,134 @@ void main() {
 	groupMemoryBarrier();
 	barrier();
 
-	//process occlusion
-
-#define OCC_STEPS (OCCLUSION_SIZE * 3 - 2)
-#define OCC_HALF_STEPS (OCC_STEPS / 2)
-
-	for (int step = 0; step < OCC_STEPS; step++) {
-		if (!region_out_of_bounds) {
-			bool shrink = step >= OCC_HALF_STEPS;
-			int occ_step = shrink ? OCC_HALF_STEPS - (step - OCC_HALF_STEPS) - 1 : step;
-
-			if (invocation_idx < group_size_offset[occ_step].x) {
-				uint pv = group_pos[group_size_offset[occ_step].y + invocation_idx];
-				ivec3 proc_abs = (ivec3(int(pv)) >> ivec3(0, 8, 16)) & ivec3(0xFF);
-
-				if (shrink) {
-					proc_abs = ivec3(OCCLUSION_SIZE) - proc_abs - ivec3(1);
-				}
-
-				for (int i = 0; i < 8; i++) {
-					ivec3 bits = ((ivec3(i) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1));
-					ivec3 proc_sign = bits * 2 - 1;
-					ivec3 local_offset = ivec3(OCCLUSION_SIZE) + proc_abs * proc_sign - (ivec3(1) - bits);
-					ivec3 offset = local_offset + region_offset;
-					if (all(greaterThanEqual(offset, ivec3(0))) && all(lessThan(offset, ivec3(params.grid_size)))) {
-						float occ;
-
-						uint facing = get_facing(local_offset);
-
-						if (facing != 0) { //solid
-							occ = 0.0;
-						} else if (step == 0) {
-#if 0
-						occ = 0.0;
-						if (get_facing(local_offset - ivec3(proc_sign.x,0,0))==0) {
-							occ+=1.0;
-						}
-						if (get_facing(local_offset - ivec3(0,proc_sign.y,0))==0) {
-							occ+=1.0;
-						}
-						if (get_facing(local_offset - ivec3(0,0,proc_sign.z))==0) {
-							occ+=1.0;
-						}
-						/*
-						if (get_facing(local_offset - proc_sign)==0) {
-							occ+=1.0;
-						}*/
-
-						occ/=3.0;
-#endif
-							occ = 1.0;
-
-						} else {
-							ivec3 read_dir = -proc_sign;
-
-							ivec3 major_axis;
-							if (proc_abs.x < proc_abs.y) {
-								if (proc_abs.z < proc_abs.y) {
-									major_axis = ivec3(0, 1, 0);
-								} else {
-									major_axis = ivec3(0, 0, 1);
-								}
-							} else {
-								if (proc_abs.z < proc_abs.x) {
-									major_axis = ivec3(1, 0, 0);
-								} else {
-									major_axis = ivec3(0, 0, 1);
-								}
-							}
-
-							float avg = 0.0;
-							occ = 0.0;
-
-							ivec3 read_x = offset + ivec3(read_dir.x, 0, 0) + (proc_abs.x == 0 ? major_axis * read_dir : ivec3(0));
-							ivec3 read_y = offset + ivec3(0, read_dir.y, 0) + (proc_abs.y == 0 ? major_axis * read_dir : ivec3(0));
-							ivec3 read_z = offset + ivec3(0, 0, read_dir.z) + (proc_abs.z == 0 ? major_axis * read_dir : ivec3(0));
-
-							uint facing_x = get_facing(read_x - region_offset);
-							if (facing_x == 0) {
-								if (all(greaterThanEqual(read_x, ivec3(0))) && all(lessThan(read_x, ivec3(params.grid_size)))) {
-									occ += imageLoad(dst_occlusion[params.occlusion_index], read_x).r;
-									avg += 1.0;
-								}
-							} else {
-								if (proc_abs.x != 0) { //do not occlude from voxels in the opposite octant
-									avg += 1.0;
-								}
-							}
-
-							uint facing_y = get_facing(read_y - region_offset);
-							if (facing_y == 0) {
-								if (all(greaterThanEqual(read_y, ivec3(0))) && all(lessThan(read_y, ivec3(params.grid_size)))) {
-									occ += imageLoad(dst_occlusion[params.occlusion_index], read_y).r;
-									avg += 1.0;
-								}
-							} else {
-								if (proc_abs.y != 0) {
-									avg += 1.0;
-								}
-							}
-
-							uint facing_z = get_facing(read_z - region_offset);
-							if (facing_z == 0) {
-								if (all(greaterThanEqual(read_z, ivec3(0))) && all(lessThan(read_z, ivec3(params.grid_size)))) {
-									occ += imageLoad(dst_occlusion[params.occlusion_index], read_z).r;
-									avg += 1.0;
-								}
-							} else {
-								if (proc_abs.z != 0) {
-									avg += 1.0;
-								}
-							}
-
-							if (avg > 0.0) {
-								occ /= avg;
-							}
-						}
-
-						imageStore(dst_occlusion[params.occlusion_index], offset, vec4(occ));
-					}
-				}
-			}
-		}
-
-		groupMemoryBarrier();
-		barrier();
-	}
-#if 1
-	//bias solid voxels away
-
-	if (!region_out_of_bounds) {
-		for (int i = 0; i < 64; i++) {
-			ivec3 local_offset = local_ofs + ((ivec3(i) >> ivec3(0, 2, 4)) & ivec3(3, 3, 3));
-			ivec3 offset = region_offset + local_offset;
-
-			if (all(greaterThanEqual(offset, ivec3(0))) && all(lessThan(offset, ivec3(params.grid_size)))) {
-				uint facing = get_facing(local_offset);
-
-				if (facing != 0) {
-					//only work on solids
-
-					ivec3 proc_pos = local_offset - ivec3(OCCLUSION_SIZE);
-					proc_pos += mix(ivec3(0), ivec3(1), greaterThanEqual(proc_pos, ivec3(0)));
-
-					float avg = 0.0;
-					float occ = 0.0;
-
-					ivec3 read_dir = -sign(proc_pos);
-					ivec3 read_dir_x = ivec3(read_dir.x, 0, 0);
-					ivec3 read_dir_y = ivec3(0, read_dir.y, 0);
-					ivec3 read_dir_z = ivec3(0, 0, read_dir.z);
-					//solid
-#if 0
-
-				uvec3 facing_pos_base = (uvec3(facing) >> uvec3(0,1,2)) & uvec3(1,1,1);
-				uvec3 facing_neg_base = (uvec3(facing) >> uvec3(3,4,5)) & uvec3(1,1,1);
-				uvec3 facing_pos=  facing_pos_base &((~facing_neg_base)&uvec3(1,1,1));
-				uvec3 facing_neg=  facing_neg_base &((~facing_pos_base)&uvec3(1,1,1));
-#else
-					uvec3 facing_pos = (uvec3(facing) >> uvec3(0, 1, 2)) & uvec3(1, 1, 1);
-					uvec3 facing_neg = (uvec3(facing) >> uvec3(3, 4, 5)) & uvec3(1, 1, 1);
-#endif
-					bvec3 read_valid = bvec3(mix(facing_neg, facing_pos, greaterThan(read_dir, ivec3(0))));
-
-					//sides
-					if (read_valid.x) {
-						ivec3 read_offset = local_offset + read_dir_x;
-						uint f = get_facing(read_offset);
-						if (f == 0) {
-							read_offset += region_offset;
-							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
-								avg += 1.0;
-							}
-						}
-					}
-
-					if (read_valid.y) {
-						ivec3 read_offset = local_offset + read_dir_y;
-						uint f = get_facing(read_offset);
-						if (f == 0) {
-							read_offset += region_offset;
-							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
-								avg += 1.0;
-							}
-						}
-					}
-
-					if (read_valid.z) {
-						ivec3 read_offset = local_offset + read_dir_z;
-						uint f = get_facing(read_offset);
-						if (f == 0) {
-							read_offset += region_offset;
-							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
-								avg += 1.0;
-							}
-						}
-					}
-
-					//adjacents
-
-					if (all(read_valid.yz)) {
-						ivec3 read_offset = local_offset + read_dir_y + read_dir_z;
-						uint f = get_facing(read_offset);
-						if (f == 0) {
-							read_offset += region_offset;
-							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
-								avg += 1.0;
-							}
-						}
-					}
-
-					if (all(read_valid.xz)) {
-						ivec3 read_offset = local_offset + read_dir_x + read_dir_z;
-						uint f = get_facing(read_offset);
-						if (f == 0) {
-							read_offset += region_offset;
-							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
-								avg += 1.0;
-							}
-						}
-					}
-
-					if (all(read_valid.xy)) {
-						ivec3 read_offset = local_offset + read_dir_x + read_dir_y;
-						uint f = get_facing(read_offset);
-						if (f == 0) {
-							read_offset += region_offset;
-							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
-								avg += 1.0;
-							}
-						}
-					}
-
-					//diagonal
-
-					if (all(read_valid)) {
-						ivec3 read_offset = local_offset + read_dir;
-						uint f = get_facing(read_offset);
-						if (f == 0) {
-							read_offset += region_offset;
-							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
-								avg += 1.0;
-							}
-						}
-					}
-
-					if (avg > 0.0) {
-						occ /= avg;
-					}
-
-					imageStore(dst_occlusion[params.occlusion_index], offset, vec4(occ));
-				}
-			}
-		}
-	}
-
-#endif
-
-#if 1
-	groupMemoryBarrier();
-	barrier();
-
 	// There are no more barriers after this, so we can early return.
 	if (region_out_of_bounds) {
 		return;
 	}
 
+	// The probe sits on the corner shared by the region's eight middle voxels, unless the
+	// placement pass moved it. One that could not be placed anywhere usable is seen by nothing.
+	ivec3 probe_cell = region * 2 + params.probe_offset;
+	int probe_axis = params.grid_size / OCCLUSION_SIZE + 1;
+	vec4 state = imageLoad(probe_state, ivec3(probe_cell.x + probe_cell.z * probe_axis, probe_cell.y, params.cascade));
+	vec3 probe_pos = vec3(OCCLUSION_SIZE) + state.xyz;
+	bool probe_valid = state.w > 0.5;
+
+	const ivec3 facing_dirs[6] = ivec3[](ivec3(1, 0, 0), ivec3(0, 1, 0), ivec3(0, 0, 1), ivec3(-1, 0, 0), ivec3(0, -1, 0), ivec3(0, 0, -1));
+
 	for (int i = 0; i < 64; i++) {
 		ivec3 local_offset = local_ofs + ((ivec3(i) >> ivec3(0, 2, 4)) & ivec3(3, 3, 3));
 		ivec3 offset = region_offset + local_offset;
 
-		if (all(greaterThanEqual(offset, ivec3(0))) && all(lessThan(offset, ivec3(params.grid_size)))) {
-			uint facing = get_facing(local_offset);
+		if (any(lessThan(offset, ivec3(0))) || any(greaterThanEqual(offset, ivec3(params.grid_size)))) {
+			continue;
+		}
 
-			if (facing == 0) {
-				ivec3 proc_pos = local_offset - ivec3(OCCLUSION_SIZE);
-				proc_pos += mix(ivec3(0), ivec3(1), greaterThanEqual(proc_pos, ivec3(0)));
+		float occ = 0.0;
+		uint facing = get_facing(local_offset);
 
-				ivec3 proc_abs = abs(proc_pos);
-
-				ivec3 read_dir = sign(proc_pos); //opposite direction
-				ivec3 read_dir_x = ivec3(read_dir.x, 0, 0);
-				ivec3 read_dir_y = ivec3(0, read_dir.y, 0);
-				ivec3 read_dir_z = ivec3(0, 0, read_dir.z);
-				//solid
-				uvec3 read_mask = mix(uvec3(1, 2, 4), uvec3(8, 16, 32), greaterThan(read_dir, ivec3(0))); //match positive with negative normals
-				uvec3 block_mask = mix(uvec3(1, 2, 4), uvec3(8, 16, 32), lessThan(read_dir, ivec3(0))); //match positive with negative normals
-
-				block_mask = uvec3(0);
-
-				float visible = 0.0;
-				float occlude_total = 0.0;
-
-				if (proc_abs.x < OCCLUSION_SIZE) {
-					ivec3 read_offset = local_offset + read_dir_x;
-					uint x_mask = get_facing(read_offset);
-					if (x_mask != 0) {
-						read_offset += region_offset;
-						if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-							occlude_total += 1.0;
-							if (bool(x_mask & read_mask.x) && !bool(x_mask & block_mask.x)) {
-								visible += 1.0;
-							}
-						}
-					}
+		if (!probe_valid) {
+			// Nothing sees a probe stuck in geometry.
+		} else if (facing == 0) {
+			occ = occlusion_trace(vec3(local_offset) + vec3(0.5), probe_pos);
+		} else {
+			// A surface voxel. Shading points on it look it up (after their normal bias) mostly
+			// from its open side, so give it what the probe looks like from the free voxels it
+			// faces, rather than from inside the geometry, where nothing is visible. Take the
+			// least visible of them: geometry thinner than a voxel faces both ways, and the
+			// average of its two sides would leave every probe half visible through it, which
+			// points near the wall pick up through filtering (the light that used to seep in
+			// along the edges of thin walls, floors and ceilings).
+			occ = 1.0;
+			bool any_side = false;
+			for (int k = 0; k < 6; k++) {
+				if (!bool(facing & (1 << k))) {
+					continue;
 				}
-
-				if (proc_abs.y < OCCLUSION_SIZE) {
-					ivec3 read_offset = local_offset + read_dir_y;
-					uint y_mask = get_facing(read_offset);
-					if (y_mask != 0) {
-						read_offset += region_offset;
-						if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-							occlude_total += 1.0;
-							if (bool(y_mask & read_mask.y) && !bool(y_mask & block_mask.y)) {
-								visible += 1.0;
-							}
-						}
-					}
+				ivec3 side = local_offset + facing_dirs[k];
+				if (any(lessThan(side, ivec3(0))) || any(greaterThanEqual(side, ivec3(OCC_REGION_SIZE))) || get_facing(side) != 0) {
+					continue;
 				}
-
-				if (proc_abs.z < OCCLUSION_SIZE) {
-					ivec3 read_offset = local_offset + read_dir_z;
-					uint z_mask = get_facing(read_offset);
-					if (z_mask != 0) {
-						read_offset += region_offset;
-						if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-							occlude_total += 1.0;
-							if (bool(z_mask & read_mask.z) && !bool(z_mask & block_mask.z)) {
-								visible += 1.0;
-							}
-						}
-					}
-				}
-
-				//if near the cartesian plane, test in opposite direction too
-
-				read_mask = mix(uvec3(1, 2, 4), uvec3(8, 16, 32), lessThan(read_dir, ivec3(0))); //match negative with positive normals
-				block_mask = mix(uvec3(1, 2, 4), uvec3(8, 16, 32), greaterThan(read_dir, ivec3(0))); //match negative with positive normals
-				block_mask = uvec3(0);
-
-				if (proc_abs.x == 1) {
-					ivec3 read_offset = local_offset - read_dir_x;
-					uint x_mask = get_facing(read_offset);
-					if (x_mask != 0) {
-						read_offset += region_offset;
-						if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-							occlude_total += 1.0;
-							if (bool(x_mask & read_mask.x) && !bool(x_mask & block_mask.x)) {
-								visible += 1.0;
-							}
-						}
-					}
-				}
-
-				if (proc_abs.y == 1) {
-					ivec3 read_offset = local_offset - read_dir_y;
-					uint y_mask = get_facing(read_offset);
-					if (y_mask != 0) {
-						read_offset += region_offset;
-						if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-							occlude_total += 1.0;
-							if (bool(y_mask & read_mask.y) && !bool(y_mask & block_mask.y)) {
-								visible += 1.0;
-							}
-						}
-					}
-				}
-
-				if (proc_abs.z == 1) {
-					ivec3 read_offset = local_offset - read_dir_z;
-					uint z_mask = get_facing(read_offset);
-					if (z_mask != 0) {
-						read_offset += region_offset;
-						if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-							occlude_total += 1.0;
-							if (bool(z_mask & read_mask.z) && !bool(z_mask & block_mask.z)) {
-								visible += 1.0;
-							}
-						}
-					}
-				}
-
-				if (occlude_total > 0.0) {
-					float occ = imageLoad(dst_occlusion[params.occlusion_index], offset).r;
-					occ *= visible / occlude_total;
-					imageStore(dst_occlusion[params.occlusion_index], offset, vec4(occ));
-				}
+				occ = min(occ, occlusion_trace(vec3(side) + vec3(0.5), probe_pos));
+				any_side = true;
+			}
+			if (!any_side) {
+				occ = 0.0;
 			}
 		}
+
+		imageStore(dst_occlusion[params.occlusion_index], offset, vec4(occ));
 	}
 
 #endif
 
-	/*
-	for(int i=0;i<8;i++) {
-		ivec3 local_offset = local_pos + ((ivec3(i) >> ivec3(2,1,0)) & ivec3(1,1,1)) * OCCLUSION_SIZE;
-		ivec3 offset = local_offset - ivec3(OCCLUSION_SIZE); //looking around probe, so starts negative
-		offset += region * OCCLUSION_SIZE * 2; //offset by region
-		offset += params.probe_offset * OCCLUSION_SIZE; // offset by probe offset
-		if (all(greaterThanEqual(offset,ivec3(0))) && all(lessThan(offset,ivec3(params.grid_size)))) {
-			imageStore(dst_occlusion[params.occlusion_index],offset,vec4( occlusion_data[ to_linear(local_offset) ]  ));
-			//imageStore(dst_occlusion[params.occlusion_index],offset,vec4( occlusion_solid[ to_linear(local_offset) ] ));
+#ifdef MODE_PROBE_PLACEMENT
+
+	// Probe relocation and classification. The probe grid knows nothing of the geometry, so plenty
+	// of probes end up inside walls, floors or terrain, or so close to a surface that the bias
+	// their rays start with carries those rays past it. Such probes see the wrong side of the
+	// wall and spread that light onto everything around them. Here each probe is moved, within a
+	// fraction of the grid spacing, to a nearby spot that is outside geometry and clear of it, or
+	// marked unusable when there is none; the probe rays, the occlusion pass and every place that
+	// samples the probes then use the result. SDFGI geometry only changes when a cascade is
+	// revoxelized, so this runs then rather than every frame, and a probe stays where it was put.
+
+	int probe_axis = params.grid_size / OCCLUSION_SIZE + 1;
+	ivec3 probe_cell = ivec3(gl_GlobalInvocationID.xyz);
+	if (any(greaterThanEqual(probe_cell, ivec3(probe_axis)))) {
+		return;
+	}
+
+	vec3 grid_pos = vec3(probe_cell * OCCLUSION_SIZE);
+	vec3 region_min = grid_pos - vec3(OCCLUSION_SIZE);
+	vec3 region_max = grid_pos + vec3(OCCLUSION_SIZE);
+
+	vec3 best_offset = vec3(0.0);
+	bool valid = true;
+
+	PlacementSample here = placement_evaluate(grid_pos, region_min, region_max, PLACEMENT_RAYS);
+	bool inside = here.backface_ratio > PLACEMENT_INSIDE_RATIO;
+
+	if (inside || here.clearance < params.min_distance) {
+		float max_offset = PLACEMENT_MAX_OFFSET * float(OCCLUSION_SIZE);
+		float best_score = inside ? 1e10 : placement_score(here, 0.0);
+
+		for (int m = 0; m < 2; m++) {
+			float magnitude = m == 0 ? max_offset * 0.5 : max_offset;
+			for (int i = 0; i < 27; i++) {
+				ivec3 dir = ivec3(i % 3, (i / 3) % 3, i / 9) - ivec3(1);
+				if (dir == ivec3(0)) {
+					continue;
+				}
+				vec3 offset = vec3(dir) * magnitude;
+				vec3 candidate = grid_pos + offset;
+				// A probe outside geometry may only move where it can see from where it was,
+				// or it could hop through a wall into the next room.
+				if (!inside && !placement_segment_clear(grid_pos, candidate)) {
+					continue;
+				}
+				PlacementSample s = placement_evaluate(candidate, region_min, region_max, PLACEMENT_CANDIDATE_RAYS);
+				float score = placement_score(s, length(offset));
+				if (score < best_score) {
+					best_score = score;
+					best_offset = offset;
+				}
+			}
+		}
+
+		if (best_offset != vec3(0.0)) {
+			// Confirm with the full ray count what the candidate rays only estimated.
+			PlacementSample chosen = placement_evaluate(grid_pos + best_offset, region_min, region_max, PLACEMENT_RAYS);
+			if (chosen.backface_ratio > PLACEMENT_INSIDE_RATIO) {
+				best_offset = vec3(0.0);
+				valid = !inside;
+			}
+		} else if (inside) {
+			valid = false; // Nowhere nearby to go.
 		}
 	}
-*/
+
+	imageStore(dst_probe_state, ivec3(probe_cell.x + probe_cell.z * probe_axis, probe_cell.y, params.cascade), vec4(best_offset, valid ? 1.0 : 0.0));
 
 #endif
 
@@ -970,7 +876,7 @@ void main() {
 	// STORE OCCLUSION
 
 	uint occlusion = 0;
-	const uint occlusion_shift[8] = uint[](12, 8, 4, 0, 28, 24, 20, 16);
+	const uint occlusion_shift[8] = uint[](4, 8, 12, 0, 20, 24, 28, 16); // Channel i lands in r, g, b, a of B4G4R4A4 (see create()).
 	for (int i = 0; i < 8; i++) {
 		float occ = imageLoad(src_occlusion[i], pos).r;
 		occlusion |= uint(clamp(occ * 15.0, 0.0, 15.0)) << occlusion_shift[i];

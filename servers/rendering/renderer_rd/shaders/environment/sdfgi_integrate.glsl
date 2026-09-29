@@ -31,6 +31,12 @@ layout(set = 0, binding = 7, std140) uniform Cascades {
 cascades;
 
 layout(r32ui, set = 0, binding = 8) uniform restrict uimage2DArray lightprobe_texture_data;
+
+// Probe history. Each probe owns a column of SH_SIZE texels, one per spherical harmonic
+// coefficient, at (x, y * SH_SIZE + i). The history texture keeps the last history_size frames of
+// every coefficient, one frame per layer, and the average texture their sum (fixed point, see
+// HISTORY_BITS) in rgb. The alpha channels of the first few average texels hold the probe's
+// history state instead, as float bits (see STATE_*).
 layout(rgba16i, set = 0, binding = 9) uniform restrict iimage2DArray lightprobe_history_texture;
 layout(rgba32i, set = 0, binding = 10) uniform restrict iimage2D lightprobe_average_texture;
 
@@ -41,6 +47,47 @@ layout(rgba32i, set = 0, binding = 12) uniform restrict iimage2D lightprobe_aver
 layout(rgba32i, set = 0, binding = 13) uniform restrict iimage2D lightprobe_average_parent_texture;
 
 layout(rgba16f, set = 0, binding = 14) uniform restrict writeonly image2DArray lightprobe_ambient_texture;
+
+// Where each probe was placed (see MODE_PROBE_PLACEMENT in sdfgi_preprocess.glsl), one layer per
+// cascade: xyz its offset from the grid in voxels, w whether it is usable at all.
+layout(set = 0, binding = 15) uniform texture2DArray probe_state_texture;
+
+// Which coefficient texel's alpha holds each piece of a probe's history state.
+#define STATE_AGE 0 // How many of the history frames are the probe's own, up to history_size.
+#define STATE_SUSPECT 1 // Consecutive frames whose light disagreed with the history's.
+#define STATE_PLACEMENT 2 // Where the probe was placed when its history was traced, to notice it moving.
+#define STATE_CHANGE_RATE 3 // How much its light has been changing lately, from one history turn to the next.
+
+// A probe that starts from a guess (seeded from the cascade above when it scrolls in) counts
+// that guess as this many history frames: enough to hide its first noisy traces (new probes
+// scroll in all the time while the camera moves, and should not sparkle at the edges of the
+// cascades), few enough that its own light takes over well before a whole convergence period.
+#define PRIOR_AGE 6
+
+// Marks, in the alpha channel of a history texel, a frame that is no good for telling whether
+// the light changed since (see the adaptive history in MODE_PROCESS): a seeded one, which traced
+// nothing, and those traced while the probe was settling, in its first ADAPT_SETTLE_FRAMES
+// frames of history or right after it dropped the rest. What those saw was often still on its
+// way to what the probe settled at (lights are updated over several frames, and every bounce
+// takes a probe update of its own), so comparing against them would drop the history again
+// for no reason, throwing the probe back to a handful of noisy frames.
+#define HISTORY_FLAG_UNSETTLED 1
+
+// Adaptive history. A probe whose light differs from what the very same rays saw one history
+// turn earlier by more than ADAPT_RELATIVE, and by ADAPT_RATE_MARGIN times as much as it has
+// lately been changing (and by more than a couple of fixed point steps, ADAPT_ABSOLUTE),
+// ADAPT_CONFIRM_FRAMES frames in a row, has seen the light change suddenly: it drops as much of
+// its history as the change calls for (see MODE_PROCESS) and catches up. A single differing
+// frame is averaged in as usual, and so is light that keeps changing at a steady pace (a light
+// moving, the sun turning), which the probe follows the way it would without this, smoothly, a
+// little behind.
+#define ADAPT_RELATIVE 0.15
+#define ADAPT_RATE_MARGIN 3.0
+#define ADAPT_ABSOLUTE (2.0 / float(1 << HISTORY_BITS))
+#define ADAPT_CONFIRM_FRAMES 3
+#define ADAPT_SETTLE_FRAMES 4
+// How many frames the pace of change (STATE_CHANGE_RATE) is averaged over.
+#define ADAPT_RATE_FRAMES 8.0
 
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 layout(set = 1, binding = 0) uniform texture2DArray sky_irradiance;
@@ -79,19 +126,30 @@ layout(push_constant, std430) uniform Params {
 
 	vec2 sky_irradiance_border_size;
 	bool store_ambient_texture;
-	uint pad;
+	uint flags;
 }
 params;
+
+// MODE_SCROLL: probes that cannot be seeded from a parent cascade start from zero instead of
+// keeping what their texel held, which after a full rebuild belongs somewhere else entirely.
+#define INTEGRATE_FLAG_RESET 1
+// MODE_PROCESS: let probes drop their history when the light they see changes.
+#define INTEGRATE_FLAG_ADAPTIVE 2
 
 const float PI = 3.14159265f;
 const float GOLDEN_ANGLE = PI * (3.0 - sqrt(5.0));
 
-vec3 vogel_hemisphere(uint p_index, uint p_count, float p_offset) {
-	float r = sqrt(float(p_index) + 0.5f) / sqrt(float(p_count));
-	float theta = float(p_index) * GOLDEN_ANGLE + p_offset;
-	float y = cos(r * PI * 0.5);
-	float l = sin(r * PI * 0.5);
-	return vec3(l * cos(theta), l * sin(theta), y * (float(p_index & 1) * 2.0 - 1.0));
+// Point p_index of a p_count point spherical Fibonacci set, turned by p_offset around the pole.
+// z falls linearly with the index, so the set is equal-area, and so is any strided subset of it:
+// each frame traces indices history_index + i * history_size, which spread over the whole sphere.
+// (The Vogel disk this replaces was bent onto a hemisphere, which crowded the samples towards
+// its rim, and picked the hemisphere from the index parity, so with an even history size every
+// ray of a frame went into the same half of the sphere, alternating from frame to frame.)
+vec3 spherical_fibonacci(uint p_index, uint p_count, float p_offset) {
+	float z = 1.0 - (2.0 * float(p_index) + 1.0) / float(p_count);
+	float r = sqrt(max(0.0, 1.0 - z * z));
+	float phi = float(p_index) * GOLDEN_ANGLE + p_offset;
+	return vec3(r * cos(phi), r * sin(phi), z);
 }
 
 uvec3 hash3(uvec3 x) {
@@ -103,6 +161,20 @@ uvec3 hash3(uvec3 x) {
 
 float hashf3(vec3 co) {
 	return fract(sin(dot(co, vec3(12.9898, 78.233, 137.13451))) * 43758.5453);
+}
+
+float get_luminance(vec3 p_color) {
+	return dot(p_color, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// The history state of the probe whose first coefficient texel is at p_probe_pos.
+float get_probe_state(ivec2 p_probe_pos, int p_state) {
+	return intBitsToFloat(imageLoad(lightprobe_average_texture, p_probe_pos + ivec2(0, p_state)).a);
+}
+
+// The probe's average: the sum of its own history frames over how many there are.
+vec3 get_probe_coefficient(ivec4 p_sum, float p_age) {
+	return p_age > 0.0 ? vec3(p_sum.rgb) / (p_age * float(1 << HISTORY_BITS)) : vec3(0.0);
 }
 
 vec3 octahedron_encode(vec2 f) {
@@ -173,21 +245,34 @@ void main() {
 	vec3 probe_pos = cascades.data[params.cascade].offset + vec3(probe_cell) * probe_cell_size;
 	vec3 pos_to_uvw = 1.0 / params.grid_size;
 
+	vec4 probe_state = texelFetch(sampler2DArray(probe_state_texture, linear_sampler), ivec3(pos, int(params.cascade)), 0);
+	bool probe_valid = probe_state.w > 0.5;
+	probe_pos += probe_state.xyz / cascades.data[params.cascade].to_cell;
+
+	// Identifies the placement to within half a voxel, with 0 standing for "none": a probe stuck
+	// in geometry, or one only just seeded, whose history was not traced from anywhere yet.
+	ivec3 placement_q = clamp(ivec3(round(probe_state.xyz * 2.0)) + ivec3(8), ivec3(0), ivec3(16));
+	float placement_code = probe_valid ? float(1 + placement_q.x + placement_q.y * 17 + placement_q.z * 289) : 0.0;
+
 	for (uint i = 0; i < SH_SIZE * 3; i++) {
 		sh_accum[probe_index].c[i] = 0.0;
 	}
 
-	// quickly ensure each probe has a different "offset" for the vogel function, based on integer world position
+	// quickly ensure each probe has a different "offset" for the ray set, based on integer world position
 	uvec3 h3 = hash3(uvec3(params.world_offset + probe_cell));
 	float offset = hashf3(vec3(h3 & uvec3(0xFFFFF)));
 
-	//for a more homogeneous hemisphere, alternate based on history frames
+	// Each frame traces a different strided subset of one set spanning all history frames, so the
+	// frames the history averages together cover the sphere evenly between them.
 	uint ray_offset = params.history_index;
 	uint ray_mult = params.history_size;
 	uint ray_total = ray_mult * params.ray_count;
 
-	for (uint i = 0; i < params.ray_count; i++) {
-		vec3 ray_dir = vogel_hemisphere(ray_offset + i * ray_mult, ray_total, offset);
+	// A probe stuck in geometry is never sampled, so there is no point tracing it.
+	uint ray_count = probe_valid ? params.ray_count : 0;
+
+	for (uint i = 0; i < ray_count; i++) {
+		vec3 ray_dir = spherical_fibonacci(ray_offset + i * ray_mult, ray_total, offset * 2.0 * PI);
 		ray_dir.y *= params.y_mult;
 		ray_dir = normalize(ray_dir);
 
@@ -320,28 +405,130 @@ void main() {
 #endif
 	}
 
-	for (uint i = 0; i < SH_SIZE; i++) {
-		// store in history texture
-		ivec3 prev_pos = ivec3(pos.x, pos.y * SH_SIZE + i, int(params.history_index));
-		ivec2 average_pos = prev_pos.xy;
+	// Fold this frame's trace into the probe's history.
+	//
+	// The history is a box filter over the last history_size frames, which, with each frame
+	// tracing its own strided subset of one fixed ray set, turns over to exactly the same average
+	// every history_size frames: a converged probe in a static scene does not flicker at all.
+	// On top of that each probe counts how many of those frames are its own (its age), and
+	// averages over just those. A probe starting afresh is then usable from its first frame
+	// rather than fading in from black over a whole convergence period, one seeded with a guess
+	// only counts it as a couple of frames, and one that sees the light change can drop the
+	// frames from before the change and catch up at once.
+	int history_size = int(params.history_size);
+	int history_index = int(params.history_index);
+	ivec2 average_pos = ivec2(pos.x, pos.y * SH_SIZE);
+	float sample_scale = 4.0 / float(params.ray_count);
 
-		vec4 value = vec4(sh_accum[probe_index].c[i * 3 + 0], sh_accum[probe_index].c[i * 3 + 1], sh_accum[probe_index].c[i * 3 + 2], 1.0) * 4.0 / float(params.ray_count);
+	int age = int(get_probe_state(average_pos, STATE_AGE));
+	float suspect = get_probe_state(average_pos, STATE_SUSPECT);
+	float change_rate = get_probe_state(average_pos, STATE_CHANGE_RATE);
 
-		ivec4 ivalue = clamp(ivec4(value * float(1 << HISTORY_BITS)), -32768, 32767); //clamp to 16 bits, so higher values don't break average
+	// How many of the most recent history frames to keep, when not all of them, and whether those
+	// are to be marked unsettled (see HISTORY_FLAG_UNSETTLED): they are when what the probe saw
+	// changed altogether, and the frames it keeps were traced as that happened.
+	int keep = age;
+	bool unsettle_kept = true;
 
-		ivec4 prev_value = imageLoad(lightprobe_history_texture, prev_pos);
-		ivec4 average = imageLoad(lightprobe_average_texture, average_pos);
+	// The frame about to leave the history traced exactly these rays one full turn ago, so unless
+	// the light changed since, it saw exactly the same. Comparing against it rather than the
+	// average spots a change at once: the average mixes in all the other ray sets, which differ
+	// from this one by far more than a light switching off does, with only a handful of rays each.
+	// Frames marked unsettled are skipped (see HISTORY_FLAG_UNSETTLED).
+	ivec4 previous = imageLoad(lightprobe_history_texture, ivec3(average_pos, history_index));
 
-		average -= prev_value;
-		average += ivalue;
+	if (bool(params.flags & INTEGRATE_FLAG_ADAPTIVE) && age >= history_size && !bool(previous.a & HISTORY_FLAG_UNSETTLED)) {
+		vec3 l0 = vec3(sh_accum[probe_index].c[0], sh_accum[probe_index].c[1], sh_accum[probe_index].c[2]) * sample_scale;
+		l0 = vec3(clamp(ivec3(l0 * float(1 << HISTORY_BITS)), ivec3(-32768), ivec3(32767))) / float(1 << HISTORY_BITS); // As it will be stored.
+		vec3 previous_l0 = vec3(previous.rgb) / float(1 << HISTORY_BITS);
 
-		imageStore(lightprobe_history_texture, prev_pos, ivalue);
-		imageStore(lightprobe_average_texture, average_pos, average);
+		float lum = max(0.0, get_luminance(l0));
+		float previous_lum = max(0.0, get_luminance(previous_l0));
+		float change = abs(lum - previous_lum);
+		float relative = change / max(max(lum, previous_lum), ADAPT_ABSOLUTE);
+
+		// Only a change that stands out from how the light has been changing lately counts: light
+		// that keeps moving on (a lamp carried around, the sun turning) changes every turn, and
+		// dropping the history over and over for it left probes with a handful of rays each,
+		// flickering out of step with their neighbors for as long as the light moved. Each frame
+		// compares a different handful of rays, so while the light moves, how much one of them
+		// changed swings well above and below the pace: the margin is a factor, not an offset.
+		if (relative > max(ADAPT_RELATIVE, change_rate * ADAPT_RATE_MARGIN) && change > ADAPT_ABSOLUTE) {
+			suspect += 1.0;
+			if (suspect >= float(ADAPT_CONFIRM_FRAMES)) {
+				// It keeps disagreeing: the light changed. Drop as much of the history as the change
+				// calls for, going by how much of the light is new: all but the frames since when
+				// it all is (a light switched on or off, a door shut), less when only part of it
+				// is. The frames kept still carry some of the light from before, so the probe gets
+				// there over some frames rather than at once, but it does not flicker for it.
+				float kept = float(history_size) * (1.0 - relative) * (1.0 - relative);
+				keep = clamp(int(kept), ADAPT_CONFIRM_FRAMES - 1, age - 1);
+				unsettle_kept = keep < ADAPT_SETTLE_FRAMES;
+				suspect = 0.0;
+			}
+		} else {
+			suspect = 0.0;
+		}
+		change_rate += (relative - change_rate) / ADAPT_RATE_FRAMES;
+	}
+
+	if (!probe_valid) {
+		keep = 0; // Traces nothing, holds nothing: whatever it becomes once usable, it starts afresh.
+	} else if (get_probe_state(average_pos, STATE_PLACEMENT) != placement_code) {
+		// The probe was moved (its cascade was revoxelized with new geometry in reach) or only
+		// just seeded, so its history was traced from elsewhere: keep a little of it as a guess.
+		keep = min(keep, PRIOR_AGE);
+		unsettle_kept = true;
+		suspect = 0.0;
+	}
+
+	// A frame only leaves the sum when a full history of the probe's own frames is there to
+	// drop it from: while the probe is younger than that, the texel about to be overwritten was
+	// never counted.
+	bool rebuild_sum = keep < age;
+	int new_age = probe_valid ? min(keep + 1, history_size) : 0;
+	int history_flags = new_age <= ADAPT_SETTLE_FRAMES ? HISTORY_FLAG_UNSETTLED : 0;
+
+	for (int i = 0; i < SH_SIZE; i++) {
+		ivec3 slot_pos = ivec3(pos.x, pos.y * SH_SIZE + i, history_index);
+		ivec2 coef_pos = average_pos + ivec2(0, i);
+
+		vec3 value = vec3(sh_accum[probe_index].c[i * 3 + 0], sh_accum[probe_index].c[i * 3 + 1], sh_accum[probe_index].c[i * 3 + 2]) * sample_scale;
+		ivec3 ivalue = clamp(ivec3(value * float(1 << HISTORY_BITS)), ivec3(-32768), ivec3(32767)); //clamp to 16 bits, so higher values don't break average
+
+		ivec4 average = imageLoad(lightprobe_average_texture, coef_pos);
+
+		if (rebuild_sum) {
+			average.rgb = ivec3(0);
+			for (int j = 1; j <= keep; j++) {
+				ivec3 kept_pos = ivec3(slot_pos.xy, (history_index - j + history_size) % history_size);
+				ivec4 kept = imageLoad(lightprobe_history_texture, kept_pos);
+				average.rgb += kept.rgb;
+				if (unsettle_kept) {
+					imageStore(lightprobe_history_texture, kept_pos, ivec4(kept.rgb, HISTORY_FLAG_UNSETTLED));
+				}
+			}
+		} else if (age >= history_size) {
+			average.rgb -= imageLoad(lightprobe_history_texture, slot_pos).rgb;
+		}
+		average.rgb += ivalue;
+
+		if (i == STATE_AGE) {
+			average.a = floatBitsToInt(float(new_age));
+		} else if (i == STATE_SUSPECT) {
+			average.a = floatBitsToInt(suspect);
+		} else if (i == STATE_PLACEMENT) {
+			average.a = floatBitsToInt(placement_code);
+		} else if (i == STATE_CHANGE_RATE) {
+			average.a = floatBitsToInt(change_rate);
+		}
+
+		imageStore(lightprobe_history_texture, slot_pos, ivec4(ivalue, history_flags));
+		imageStore(lightprobe_average_texture, coef_pos, average);
 
 		if (params.store_ambient_texture && i == 0) {
 			ivec3 ambient_pos = ivec3(pos, int(params.cascade));
-			vec4 ambient_light = (vec4(average) / float(params.history_size)) / float(1 << HISTORY_BITS);
-			ambient_light *= 0.88622; // SHL0
+			vec4 ambient_light = vec4(get_probe_coefficient(average, float(new_age)) * 0.88622, 1.0); // SHL0
 			imageStore(lightprobe_ambient_texture, ambient_pos, ambient_light);
 		}
 	}
@@ -412,14 +599,14 @@ void main() {
 	vec3 irradiance = vec3(0.0);
 	vec3 radiance = vec3(0.0);
 
+	float age = get_probe_state(sh_pos, STATE_AGE);
+
 	for (uint i = 0; i < SH_SIZE; i++) {
-		// store in history texture
+		// read the probe's average
 		ivec2 average_pos = sh_pos + ivec2(0, i);
-		ivec4 average = imageLoad(lightprobe_average_texture, average_pos);
+		vec3 sh = get_probe_coefficient(imageLoad(lightprobe_average_texture, average_pos), age);
 
-		vec4 sh = (vec4(average) / float(params.history_size)) / float(1 << HISTORY_BITS);
-
-		vec3 m = sh.rgb * c[i] * 4.0;
+		vec3 m = sh * c[i] * 4.0;
 
 		irradiance += m * l_mult[i];
 		radiance += m;
@@ -499,99 +686,110 @@ void main() {
 		}
 
 		for (int i = 0; i < SH_SIZE; i++) {
-			// copy from average texture
+			// copy from average texture (which carries the history state along)
 			ivec2 src_pos = ivec2(tex_pos.x, tex_pos.y * SH_SIZE + i);
 			ivec2 dst_pos = ivec2(pos.x, pos.y * SH_SIZE + i);
 			ivec4 value = imageLoad(lightprobe_average_texture, src_pos);
 			imageStore(lightprobe_average_scroll_texture, dst_pos, value);
 		}
-	} else if (params.cascade < params.max_cascades - 1) {
-		//can't scroll, must look for position in parent cascade
-
-		//to global coords
-		float cell_to_probe = float(params.grid_size.x / float(params.probe_axis_size - 1));
-
-		float probe_cell_size = cell_to_probe / cascades.data[params.cascade].to_cell;
-		vec3 probe_pos = cascades.data[params.cascade].offset + vec3(probe_cell) * probe_cell_size;
-
-		//to parent local coords
-		float probe_cell_size_next = cell_to_probe / cascades.data[params.cascade + 1].to_cell;
-		probe_pos -= cascades.data[params.cascade + 1].offset;
-		probe_pos /= probe_cell_size_next;
-
-		ivec3 probe_posi = ivec3(probe_pos);
-		//add up all light, no need to use occlusion here, since occlusion will do its work afterwards
-
-		vec4 average_light[SH_SIZE] = vec4[](vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0)
-#if (SH_SIZE == 16)
-																															 ,
-				vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0), vec4(0)
-#endif
-		);
-		float total_weight = 0.0;
-
-		for (int i = 0; i < 8; i++) {
-			ivec3 offset = probe_posi + ((ivec3(i) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1));
-
-			vec3 trilinear = vec3(1.0) - abs(probe_pos - vec3(offset));
-			float weight = trilinear.x * trilinear.y * trilinear.z;
-
-			ivec2 tex_pos;
-			tex_pos = offset.xy;
-			tex_pos.x += offset.z * int(params.probe_axis_size);
-
-			for (int j = 0; j < SH_SIZE; j++) {
-				// copy from history texture
-				ivec2 src_pos = ivec2(tex_pos.x, tex_pos.y * SH_SIZE + j);
-				ivec4 average = imageLoad(lightprobe_average_parent_texture, src_pos);
-				vec4 value = (vec4(average) / float(params.history_size)) / float(1 << HISTORY_BITS);
-				average_light[j] += value * weight;
-			}
-
-			total_weight += weight;
-		}
-
-		if (total_weight > 0.0) {
-			total_weight = 1.0 / total_weight;
-		}
-		//store the averaged values everywhere
-
-		for (int i = 0; i < SH_SIZE; i++) {
-			ivec4 ivalue = clamp(ivec4(average_light[i] * total_weight * float(1 << HISTORY_BITS)), ivec4(-32768), ivec4(32767)); //clamp to 16 bits, so higher values don't break average
-			// copy from history texture
-			ivec3 dst_pos = ivec3(pos.x, pos.y * SH_SIZE + i, 0);
-			for (uint j = 0; j < params.history_size; j++) {
-				dst_pos.z = int(j);
-				imageStore(lightprobe_history_scroll_texture, dst_pos, ivalue);
-			}
-
-			ivalue *= int(params.history_size); //average needs to have all history added up
-			imageStore(lightprobe_average_scroll_texture, dst_pos.xy, ivalue);
-		}
-
 	} else {
-		//scroll at the edge of the highest cascade, just copy what is there,
-		//since its the closest we have anyway
+		// A probe that is new to the cascade, or that belongs to a cascade rebuilt from scratch.
+		// It starts from a guess that only counts as PRIOR_AGE frames of history (see the history
+		// update in MODE_PROCESS), so its own traces take over within a few frames. It used to be
+		// written into every history frame, which made the guess look fully converged, and the
+		// probe then spent a whole convergence period drifting away from it.
+		vec3 seed[SH_SIZE];
+		for (int i = 0; i < SH_SIZE; i++) {
+			seed[i] = vec3(0.0);
+		}
+		int seed_age = 0; // Nothing to go on: the probe starts empty, and from its first trace.
 
-		for (uint j = 0; j < params.history_size; j++) {
-			ivec2 tex_pos;
-			tex_pos = probe_cell.xy;
-			tex_pos.x += probe_cell.z * int(params.probe_axis_size);
+		if (params.cascade < params.max_cascades - 1) {
+			//can't scroll, must look for position in parent cascade
 
-			for (int i = 0; i < SH_SIZE; i++) {
-				// copy from history texture
-				ivec3 src_pos = ivec3(tex_pos.x, tex_pos.y * SH_SIZE + i, int(j));
-				ivec3 dst_pos = ivec3(pos.x, pos.y * SH_SIZE + i, int(j));
-				ivec4 value = imageLoad(lightprobe_history_texture, dst_pos);
-				imageStore(lightprobe_history_scroll_texture, dst_pos, value);
+			//to global coords
+			float cell_to_probe = float(params.grid_size.x / float(params.probe_axis_size - 1));
+
+			// Not from cascades.data[params.cascade].offset: region updates, which scroll probes, run
+			// before the cascade UBO is refreshed for the frame, so that offset is still the one from
+			// before this very scroll, one step off the grid being written. world_offset, the
+			// cascade's center in probes, already has the new position. The parent's UBO offset is
+			// right as it is: when it scrolls this frame too, that happens later in the same loop,
+			// so for now its probes still sit where the old offset puts them.
+			float probe_cell_size = cell_to_probe / cascades.data[params.cascade].to_cell;
+			vec3 probe_pos = (vec3(params.world_offset) - vec3(float(params.probe_axis_size - 1) * 0.5) + vec3(probe_cell)) * probe_cell_size;
+
+			//to parent local coords
+			float probe_cell_size_next = cell_to_probe / cascades.data[params.cascade + 1].to_cell;
+			probe_pos -= cascades.data[params.cascade + 1].offset;
+			probe_pos /= probe_cell_size_next;
+
+			ivec3 probe_posi = ivec3(probe_pos);
+			//add up all light, no need to use occlusion here, since occlusion will do its work afterwards
+
+			float total_weight = 0.0;
+
+			for (int i = 0; i < 8; i++) {
+				ivec3 offset = probe_posi + ((ivec3(i) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1));
+
+				vec3 trilinear = vec3(1.0) - abs(probe_pos - vec3(offset));
+				float weight = trilinear.x * trilinear.y * trilinear.z;
+
+				offset = clamp(offset, ivec3(0), ivec3(params.probe_axis_size - 1));
+				ivec2 tex_pos;
+				tex_pos = offset.xy;
+				tex_pos.x += offset.z * int(params.probe_axis_size);
+
+				ivec2 parent_pos = ivec2(tex_pos.x, tex_pos.y * SH_SIZE);
+				float parent_age = intBitsToFloat(imageLoad(lightprobe_average_parent_texture, parent_pos + ivec2(0, STATE_AGE)).a);
+				if (parent_age <= 0.0) {
+					continue; // Never traced (or stuck in geometry): nothing to pass on.
+				}
+
+				for (int j = 0; j < SH_SIZE; j++) {
+					ivec4 average = imageLoad(lightprobe_average_parent_texture, parent_pos + ivec2(0, j));
+					seed[j] += vec3(average.rgb) / (parent_age * float(1 << HISTORY_BITS)) * weight;
+				}
+
+				total_weight += weight;
+			}
+
+			if (total_weight > 0.0) {
+				for (int i = 0; i < SH_SIZE; i++) {
+					seed[i] /= total_weight;
+				}
+				seed_age = min(PRIOR_AGE, int(params.history_size) - 1);
+			}
+
+		} else if (!bool(params.flags & INTEGRATE_FLAG_RESET)) {
+			// Scrolling at the edge of the largest cascade, with nothing above it to ask: start from
+			// what this texel held, the probe one step behind, as the closest guess available.
+			// (A cascade rebuilt from scratch starts from nothing instead, since what it held then
+			// belongs somewhere else entirely.)
+			ivec2 own_pos = ivec2(pos.x, pos.y * SH_SIZE);
+			float own_age = get_probe_state(own_pos, STATE_AGE);
+			if (own_age > 0.0) {
+				for (int i = 0; i < SH_SIZE; i++) {
+					seed[i] = get_probe_coefficient(imageLoad(lightprobe_average_texture, own_pos + ivec2(0, i)), own_age);
+				}
+				seed_age = min(PRIOR_AGE, int(params.history_size) - 1);
 			}
 		}
 
+		// The seed goes into the history frames the next trace will be followed by, so that it
+		// leaves the history last, after a full turn, while its weight shrinks as the probe's own
+		// frames pile up.
+		int history_size = int(params.history_size);
 		for (int i = 0; i < SH_SIZE; i++) {
-			// copy from average texture
-			ivec2 spos = ivec2(pos.x, pos.y * SH_SIZE + i);
-			ivec4 average = imageLoad(lightprobe_average_texture, spos);
-			imageStore(lightprobe_average_scroll_texture, spos, average);
+			ivec3 ivalue = clamp(ivec3(seed[i] * float(1 << HISTORY_BITS)), ivec3(-32768), ivec3(32767));
+			for (int j = 0; j < history_size; j++) {
+				int frames_back = (int(params.history_index) - 1 - j + history_size) % history_size;
+				ivec3 dst_pos = ivec3(pos.x, pos.y * SH_SIZE + i, j);
+				imageStore(lightprobe_history_scroll_texture, dst_pos, frames_back < seed_age ? ivec4(ivalue, HISTORY_FLAG_UNSETTLED) : ivec4(0));
+			}
+
+			ivec4 average = ivec4(ivalue * seed_age, floatBitsToInt(i == STATE_AGE ? float(seed_age) : 0.0));
+			imageStore(lightprobe_average_scroll_texture, ivec2(pos.x, pos.y * SH_SIZE + i), average);
 		}
 	}
 

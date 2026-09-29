@@ -60,6 +60,8 @@ class RenderingServerDefault : public RenderingServer {
 	};
 
 	static int changes;
+	// How many changes the frame being drawn was drawn for (see get_drawn_frame_changes()).
+	static int drawn_frame_changes;
 	RID test_cube;
 
 	List<Callable> frame_drawn_callbacks;
@@ -88,7 +90,7 @@ class RenderingServerDefault : public RenderingServer {
 	void _thread_exit();
 	void _thread_loop();
 
-	void _draw(bool p_swap_buffers, double frame_step);
+	void _draw(bool p_swap_buffers, double frame_step, int p_changes);
 	void _run_post_draw_steps();
 	void _init();
 	void _finish();
@@ -112,6 +114,15 @@ public:
 		changes++;
 	}
 #endif
+
+	// How many changes (API calls and redraw requests) there were since the frame before the one
+	// being drawn now. When the engine only draws on changes, as the editor does, effects that
+	// take several frames to settle request frames of their own until they have (see
+	// GI::process_gi()); comparing this with how many they requested tells a frame drawn just
+	// for them from one drawn because something changed.
+	_FORCE_INLINE_ static int get_drawn_frame_changes() {
+		return drawn_frame_changes;
+	}
 
 #define WRITE_ACTION redraw_request();
 #define ASYNC_COND_PUSH (Thread::get_caller_id() != server_thread)

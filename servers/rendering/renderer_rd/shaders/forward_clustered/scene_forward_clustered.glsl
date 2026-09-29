@@ -2021,9 +2021,13 @@ void fragment_shader(in SceneData scene_data) {
 			bool use_specular = true;
 			float blend;
 			vec3 diffuse, specular;
-			sdfgi_process(cascade, cascade_pos, cam_pos, cam_normal, cam_reflection, use_specular, roughness, diffuse, specular, blend);
+			float visibility;
+			sdfgi_process(cascade, cascade_pos, cam_pos, cam_normal, cam_reflection, use_specular, roughness, diffuse, specular, blend, visibility);
 
-			if (blend > 0.0) {
+			// Lean on the next cascade where this one's probes are all hidden (see sdfgi_process() in gi.glsl).
+			float fallback = 1.0 - smoothstep(0.01, 0.05, visibility);
+
+			if (blend > 0.0 || fallback > 0.0) {
 				//blend
 				if (cascade == sdfgi.max_cascades - 1) {
 					diffuse = mix(diffuse, ambient_light, blend);
@@ -2033,11 +2037,13 @@ void fragment_shader(in SceneData scene_data) {
 				} else {
 					vec3 diffuse2, specular2;
 					float blend2;
+					float visibility2;
 					cascade_pos = (cam_pos - sdfgi.cascades[cascade + 1].position) * sdfgi.cascades[cascade + 1].to_probe;
-					sdfgi_process(cascade + 1, cascade_pos, cam_pos, cam_normal, cam_reflection, use_specular, roughness, diffuse2, specular2, blend2);
-					diffuse = mix(diffuse, diffuse2, blend);
+					sdfgi_process(cascade + 1, cascade_pos, cam_pos, cam_normal, cam_reflection, use_specular, roughness, diffuse2, specular2, blend2, visibility2);
+					float mix_weight = max(blend, fallback * clamp((visibility2 - visibility) * 5.0, 0.0, 1.0));
+					diffuse = mix(diffuse, diffuse2, mix_weight);
 					if (use_specular) {
-						specular = mix(specular, specular2, blend);
+						specular = mix(specular, specular2, mix_weight);
 					}
 				}
 			}

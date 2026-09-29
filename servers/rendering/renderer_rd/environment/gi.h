@@ -58,6 +58,43 @@
 #define RB_TEX_AMBIENT SNAME("ambient")
 #define RB_TEX_REFLECTION SNAME("reflection")
 
+// Ping-ponged copies of the two buffers above plus the linear depth they were traced
+// at, so a frame can reproject the previous frame's result. Two of each: the pass
+// samples one set at reprojected coordinates while writing the other at the current
+// pixel, which cannot be the same texture.
+#define RB_TEX_GI_HISTORY_AMBIENT_0 SNAME("gi_history_ambient_0")
+#define RB_TEX_GI_HISTORY_AMBIENT_1 SNAME("gi_history_ambient_1")
+#define RB_TEX_GI_HISTORY_REFLECTION_0 SNAME("gi_history_reflection_0")
+#define RB_TEX_GI_HISTORY_REFLECTION_1 SNAME("gi_history_reflection_1")
+#define RB_TEX_GI_HISTORY_DEPTH_0 SNAME("gi_history_depth_0")
+#define RB_TEX_GI_HISTORY_DEPTH_1 SNAME("gi_history_depth_1")
+
+// Screen probes (rendering/global_illumination/sdfgi/screen_probes): where each probe sits,
+// the normal of the surface it sits on, and the irradiance its rays found, as traced and as
+// filtered with its neighbors. See MODE_SCREEN_PROBE_TRACE in gi.glsl.
+#define RB_TEX_SCREEN_PROBE_POSITION SNAME("screen_probe_position")
+#define RB_TEX_SCREEN_PROBE_NORMAL SNAME("screen_probe_normal")
+#define RB_TEX_SCREEN_PROBE_SH SNAME("screen_probe_sh")
+#define RB_TEX_SCREEN_PROBE_SH_FILTERED SNAME("screen_probe_sh_filtered")
+// The adaptive probe of each tile of half (1) and a quarter (2) of the uniform probes' tile size, as
+// an index, or -1 for none.
+#define RB_TEX_SCREEN_PROBE_ADAPTIVE_INDEX_1 SNAME("screen_probe_adaptive_index_1")
+#define RB_TEX_SCREEN_PROBE_ADAPTIVE_INDEX_2 SNAME("screen_probe_adaptive_index_2")
+
+// SNAME caches per call site, so the pair cannot live in an array; these pick between the
+// two names for a ping-pong index instead.
+static _FORCE_INLINE_ StringName gi_history_ambient_name(uint32_t p_index) {
+	return p_index ? RB_TEX_GI_HISTORY_AMBIENT_1 : RB_TEX_GI_HISTORY_AMBIENT_0;
+}
+
+static _FORCE_INLINE_ StringName gi_history_reflection_name(uint32_t p_index) {
+	return p_index ? RB_TEX_GI_HISTORY_REFLECTION_1 : RB_TEX_GI_HISTORY_REFLECTION_0;
+}
+
+static _FORCE_INLINE_ StringName gi_history_depth_name(uint32_t p_index) {
+	return p_index ? RB_TEX_GI_HISTORY_DEPTH_1 : RB_TEX_GI_HISTORY_DEPTH_0;
+}
+
 // Forward declare RenderDataRD and RendererSceneRenderRD so we can pass it into some of our methods, these classes are pretty tightly bound
 class RenderDataRD;
 class RendererSceneRenderRD;
@@ -396,6 +433,7 @@ private:
 			PRE_PROCESS_JUMP_FLOOD_UPSCALE,
 			PRE_PROCESS_OCCLUSION,
 			PRE_PROCESS_STORE,
+			PRE_PROCESS_PROBE_PLACEMENT,
 			PRE_PROCESS_MAX
 		};
 
@@ -409,7 +447,14 @@ private:
 			int32_t half_size;
 			uint32_t occlusion_index;
 			int32_t cascade;
+			float min_distance; // PRE_PROCESS_PROBE_PLACEMENT: clearance to keep probes at, in voxels.
+
+			// Cells of the cascade revoxelized this frame for dynamic objects (empty when none): the
+			// scroll leaves the old voxels out of them, and occlusion is recomputed around them.
+			int32_t box_from[3];
 			uint32_t pad;
+			int32_t box_to[3];
+			uint32_t pad2;
 		};
 
 		SdfgiPreprocessShaderRD preprocess;
@@ -501,6 +546,12 @@ private:
 			float bounce_feedback;
 			float y_mult;
 			uint32_t use_occlusion;
+
+			// Only voxels in these cells are lit (the ones just voxelized, for static lights).
+			int32_t process_from[3];
+			uint32_t pad;
+			int32_t process_to[3];
+			uint32_t pad2;
 		};
 
 		enum {
@@ -526,6 +577,11 @@ private:
 				SKY_FLAGS_ORIENTATION_SIGN = 0x04,
 			};
 
+			enum { // INTEGRATE_FLAG_* in sdfgi_integrate.glsl.
+				FLAG_RESET = 0x01,
+				FLAG_ADAPTIVE = 0x02,
+			};
+
 			float grid_size[3];
 			uint32_t max_cascades;
 
@@ -549,7 +605,7 @@ private:
 
 			float sky_irradiance_border_size[2];
 			uint32_t store_ambient_texture;
-			uint32_t pad;
+			uint32_t flags;
 		};
 
 		SdfgiIntegrateShaderRD integrate;
@@ -586,8 +642,37 @@ public:
 
 		/* GI buffers */
 		bool using_half_size_gi = false;
+		bool using_temporal_gi = false;
+		// Whether the SDFGI screen probe buffers were allocated at full size, and which frame of
+		// their placement jitter comes next.
+		bool using_sdfgi_screen_probes = false;
+		Size2i sdfgi_screen_probe_grid;
+		uint32_t sdfgi_screen_probe_frame = 0;
+		// The previous frame's image the uniform sets bind for the SDFGI screen probes' screen
+		// traces, null while there is none.
+		RID sdfgi_screen_probe_last_frame[RendererSceneRender::MAX_RENDER_VIEWS];
+		// How many adaptive SDFGI screen probes there are, written on the GPU as the arguments of
+		// the indirect dispatches that trace and filter them, and the copy those read it from.
+		RID sdfgi_screen_probe_count_buffer;
+		RID sdfgi_screen_probe_dispatch_buffer;
+		RID get_sdfgi_screen_probe_count_buffer();
 
-		/* Screen probes */
+		// Alternates every frame: index 0 of the pair is sampled and index 1 written, or the
+		// other way round. The uniform sets bind those textures, so there is one set per
+		// parity per view rather than one per view.
+		uint32_t history_frame = 0;
+		// False until a frame has actually written history. Reset on every (re)allocation, so
+		// a fresh texture is never read back: relying on a clear alone would make correctness
+		// depend on the clear succeeding, and a failed one is silent at render time.
+		bool history_valid = false;
+		Transform3D prev_cam_transform;
+		Projection prev_projection;
+
+		// How many more frames this view's GI takes to settle after the last change, and requests
+		// of its own when the engine only draws on changes (see GI::_request_settle_frames()).
+		uint32_t settle_frames_left = 0;
+
+		/* VoxelGI screen probes */
 		uint32_t screen_probe_frame = 0;
 		uint32_t screen_probe_history_index = 0;
 		bool screen_probe_history_valid = false;
@@ -597,7 +682,7 @@ public:
 		RID screen_probe_trace_ubo;
 		RID screen_probe_gi_ubo;
 
-		RID uniform_set[RendererSceneRender::MAX_RENDER_VIEWS];
+		RID uniform_set[2][RendererSceneRender::MAX_RENDER_VIEWS];
 		RID scene_data_ubo;
 
 		RID get_voxel_gi_buffer();
@@ -691,6 +776,7 @@ public:
 	public:
 		enum {
 			MAX_CASCADES = 8,
+			DYNAMIC_OBJECT_CASCADE_DELAY = 4, // Frames; see update().
 			CASCADE_SIZE = 128,
 			PROBE_DIVISOR = 16,
 			ANISOTROPY_SIZE = 6,
@@ -751,6 +837,18 @@ public:
 			float baked_exposure_normalization = 1.0;
 
 			bool all_dynamic_lights_dirty = true;
+
+			// Where dynamic objects moved, appeared or went away since the cascade last voxelized
+			// that part of the world (in world space), still waiting to be voxelized again, and
+			// since when (the cascades waiting longest go first; see update()).
+			AABB dirty_box;
+			bool has_dirty_box = false;
+			uint64_t dirty_box_since = 0;
+
+			// The cells being voxelized again this frame for it, as one more pending region.
+			bool updating_box = false;
+			Vector3i box_from;
+			Vector3i box_to;
 		};
 
 		// access to our containers
@@ -784,6 +882,12 @@ public:
 		RID occlusion_texture;
 		RID occlusion_data;
 		RID ambient_texture; //integrates with volumetric fog
+
+		// Where each probe ended up after relocation, one layer per cascade (see
+		// MODE_PROBE_PLACEMENT in sdfgi_preprocess.glsl): xyz its offset from the grid in voxels,
+		// w whether it is usable at all.
+		RID probe_state_texture;
+		RID probe_placement_uniform_set;
 
 		RID lightprobe_history_scroll; //used for scrolling lightprobes
 		RID lightprobe_average_scroll; //used for scrolling lightprobes
@@ -826,8 +930,15 @@ public:
 		void update_light();
 		void update_probes(RID p_env, RendererRD::SkyRD::Sky *p_sky);
 		void store_probes();
+		// Marks the world-space boxes as needing to be voxelized again (dynamic objects moved there).
+		void mark_dirty(const LocalVector<AABB> &p_aabbs);
+		void _get_box_cells(const Cascade &p_cascade, const AABB &p_box, Vector3i &r_from, Vector3i &r_to) const;
+		int get_pending_region_count() const;
 		int get_pending_region_data(int p_region, Vector3i &r_local_offset, Vector3i &r_local_size, AABB &r_bounds) const;
 		void update_cascades();
+		// Call after this frame's render_region() calls: re-seeds the probes of cascades those rebuilt from scratch.
+		void reinit_rebuilt_probes();
+		void _scroll_probes(RD::ComputeListID p_compute_list, uint32_t p_cascade, const Vector3i &p_probe_scroll, uint32_t p_flags);
 
 		void debug_draw(uint32_t p_view_count, const Projection *p_projections, const Transform3D &p_transform, int p_width, int p_height, RID p_render_target, RID p_texture, const Vector<RID> &p_texture_views);
 		void debug_probes(RID p_framebuffer, const uint32_t p_view_count, const Projection *p_camera_with_transforms);
@@ -840,6 +951,13 @@ public:
 	RSE::EnvironmentSDFGIRayCount sdfgi_ray_count = RSE::ENV_SDFGI_RAY_COUNT_16;
 	RSE::EnvironmentSDFGIFramesToConverge sdfgi_frames_to_converge = RSE::ENV_SDFGI_CONVERGE_IN_30_FRAMES;
 	RSE::EnvironmentSDFGIFramesToUpdateLight sdfgi_frames_to_update_light = RSE::ENV_SDFGI_UPDATE_LIGHT_IN_4_FRAMES;
+	bool sdfgi_adaptive_history = true;
+	bool sdfgi_probe_relocation = true;
+	float sdfgi_view_bias = 1.0;
+	bool sdfgi_per_pixel_visibility = false;
+	uint32_t sdfgi_dynamic_object_updates_per_frame = 1;
+	bool sdfgi_screen_probes = false;
+	uint32_t sdfgi_screen_probe_history_frames = 24;
 
 	float sdfgi_solid_cell_ratio = 0.25;
 	Vector3 sdfgi_debug_probe_pos;
@@ -855,6 +973,10 @@ public:
 	virtual void sdfgi_reset() override;
 
 	struct SDFGIData {
+		enum { // SDFGI_FLAG_* in gi.glsl.
+			FLAG_PER_PIXEL_VISIBILITY = 0x01,
+		};
+
 		float grid_size[3];
 		uint32_t max_cascades;
 
@@ -870,10 +992,10 @@ public:
 		float y_mult;
 
 		float occlusion_clamp[3];
-		uint32_t pad3;
+		float view_bias;
 
 		float occlusion_renormalize[3];
-		uint32_t pad4;
+		uint32_t flags;
 
 		float cascade_probe_size[3];
 		uint32_t pad5;
@@ -912,6 +1034,13 @@ public:
 		float cam_transform[16];
 		float eye_offset[2][4];
 
+		// Maps a point from this frame's view space into the previous frame's clip space, to
+		// find where it was on screen, and into the previous frame's view space, to compare
+		// its depth against what was stored there. Only filled for single-view rendering,
+		// which is the only case temporal accumulation runs in.
+		float reprojection[16];
+		float prev_view_from_view[16];
+
 		int32_t screen_size[2];
 		float pad1;
 		float pad2;
@@ -927,8 +1056,21 @@ public:
 
 		float z_near;
 		float z_far;
-		float pad2;
-		float pad3;
+		uint32_t temporal_enabled;
+		uint32_t trace_slot; // Which of the TEMPORAL_SLOT_COUNT checkerboard slots traces.
+
+		float temporal_blend; // Weight of a fresh trace against valid history.
+		uint32_t history_valid; // Whether the textures hold a previous frame worth reading.
+		uint32_t screen_probe_frame; // Seeds the directions screen probes trace this frame.
+		float screen_probe_blend; // The least weight this frame's screen probe light takes against valid history.
+
+		int32_t screen_probe_grid[2]; // How many screen probes across and down, 0 when they are off.
+		int32_t screen_probe_offset[2]; // Where in its tile each probe goes this frame.
+
+		uint32_t screen_probe_flags; // SCREEN_PROBE_FLAG_*
+		uint32_t screen_probe_pass; // Which probes a screen probe pass works on (see gi.glsl).
+		uint32_t pad3;
+		uint32_t pad4;
 	};
 
 	RID sdfgi_ubo;
@@ -946,6 +1088,10 @@ public:
 		MODE_COMBINED_WITHOUT_SAMPLER,
 		MODE_VOXEL_GI_SCREEN_PROBES,
 		MODE_VOXEL_GI_SCREEN_PROBES_WITHOUT_SAMPLER,
+		MODE_SCREEN_PROBE_PLACE,
+		MODE_SCREEN_PROBE_ADAPT,
+		MODE_SCREEN_PROBE_TRACE,
+		MODE_SCREEN_PROBE_FILTER,
 		MODE_MAX
 	};
 
@@ -1009,6 +1155,44 @@ public:
 	RID default_voxel_gi_buffer;
 
 	bool half_resolution = false;
+
+	// Temporal accumulation: each frame only traces the pixels of one checkerboard phase and
+	// reprojects the previous frame's result for the rest, so the cone tracing cost is spread
+	// over TEMPORAL_SLOT_COUNT frames. Pixels whose history is missing or rejected are always
+	// traced, so the result is correct on disocclusion, just more expensive there.
+	//
+	// Two phases, not more: reuse chains, and each link resamples the value at a fractional
+	// offset, so the longer a value can go without being retraced the further a sharp feature
+	// creeps along the direction of travel. See the note beside the slot test in gi.glsl.
+	enum { TEMPORAL_SLOT_COUNT = 2 };
+	bool temporal_accumulation = true;
+	float temporal_blend = 1.0;
+
+	// Redraws requested by _request_settle_frames(): how many, and in which frame, so that the
+	// next frame can tell whether it was drawn only for them.
+	uint64_t settle_request_frame = UINT64_MAX;
+	int settle_requests = 0;
+	uint64_t settle_checked_frame = UINT64_MAX;
+	bool settle_external_change = false;
+	uint32_t _get_settle_frames(const Ref<SDFGI> &p_sdfgi, bool p_voxel_gi, bool p_temporal, bool p_sdfgi_screen_probes, bool p_voxel_gi_screen_probes) const;
+	void _request_settle_frames(Ref<RenderBuffersGI> p_rbgi, uint32_t p_frames);
+
+	// SDFGI screen probes: one per SCREEN_PROBE_TILE pixels square, placed at a different pixel of
+	// their tile every frame over SCREEN_PROBE_JITTER_FRAMES frames, plus one more for a second
+	// surface in the tile, where there is one, and adaptive ones on tiles of half and a quarter of
+	// the size (SCREEN_PROBE_ADAPTIVE_LEVELS) where pixels are still left without one. What they
+	// gather is noisy from one frame to the next, and each pixel averages it over up to
+	// sdfgi_screen_probe_history_frames frames.
+	enum {
+		SCREEN_PROBE_TILE = 16,
+		SCREEN_PROBES_PER_TILE = 2,
+		SCREEN_PROBE_ADAPTIVE_LEVELS = 2,
+		SCREEN_PROBE_JITTER_FRAMES = 16,
+	};
+	enum { // SCREEN_PROBE_FLAG_* in gi.glsl.
+		SCREEN_PROBE_FLAG_SCREEN_TRACES = 1, // The previous frame's image is there to trace rays against.
+	};
+
 	GiShaderRD shader;
 	RID shader_version;
 	PipelineDeferredRD pipelines[SHADER_SPECIALIZATION_VARIATIONS][MODE_MAX];

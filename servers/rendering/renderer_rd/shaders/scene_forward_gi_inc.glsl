@@ -123,8 +123,10 @@ vec2 octahedron_encode(vec3 n) {
 	return n.xy;
 }
 
-void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal, vec3 cam_specular_normal, bool use_specular, float roughness, out vec3 diffuse_light, out vec3 specular_light, out float blend) {
+// r_visibility: see sdfvoxel_gi_process() in gi.glsl.
+void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal, vec3 cam_specular_normal, bool use_specular, float roughness, out vec3 diffuse_light, out vec3 specular_light, out float blend, out float r_visibility) {
 	cascade_pos += cam_normal * sdfgi.normal_bias;
+	cascade_pos += normalize(-cam_pos) * sdfgi.view_bias; // See view_bias in gi.glsl.
 
 	vec3 base_pos = floor(cascade_pos);
 	//cascade_pos += mix(vec3(0.0),vec3(0.01),lessThan(abs(cascade_pos-base_pos),vec3(0.01))) * cam_normal;
@@ -149,6 +151,11 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 	vec4 light_accum = vec4(0.0);
 	float weight_accum = 0.0;
 
+	float visible_weight = 0.0;
+	float total_weight = 0.0;
+
+	float voxels_to_probes = sdfgi.cascade_probe_size.x / sdfgi.grid_size.x;
+
 	for (uint j = 0; j < 8; j++) {
 		ivec3 offset = (ivec3(j) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1);
 		ivec3 probe_posi = probe_base_pos;
@@ -156,12 +163,18 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 
 		// Compute weight
 
+		// Interpolate on the grid, but judge whether the probe is in front of the surface from
+		// where it was placed, and ignore probes stuck in geometry (see sdfvoxel_gi_process() in gi.glsl).
+		vec4 probe_state = texelFetch(sampler2DArray(sdfgi_probe_state, SAMPLER_NEAREST_CLAMP), ivec3(probe_posi.x + probe_posi.z * sdfgi.probe_axis_size, probe_posi.y, int(cascade)), 0);
+
 		vec3 probe_pos = vec3(probe_posi);
 		vec3 probe_to_pos = cascade_pos - probe_pos;
-		vec3 probe_dir = normalize(-probe_to_pos);
+		vec3 probe_dir = normalize(probe_pos + probe_state.xyz * voxels_to_probes - cascade_pos);
 
 		vec3 trilinear = vec3(1.0) - abs(probe_to_pos);
 		float weight = trilinear.x * trilinear.y * trilinear.z * max(0.005, dot(cam_normal, probe_dir));
+		total_weight += weight;
+		weight *= probe_state.w;
 
 		// Compute lightprobe occlusion
 
@@ -177,8 +190,12 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 
 			occ_pos *= sdfgi.occlusion_renormalize;
 			float occlusion = dot(textureLod(sampler3D(sdfgi_occlusion_cascades, SAMPLER_LINEAR_CLAMP), occ_pos, 0.0), occ_mask);
+			occlusion = occlusion < 0.2 ? occlusion * occlusion * occlusion * 25.0 : occlusion; // See sdfvoxel_gi_process() in gi.glsl.
 
-			weight *= max(occlusion, 0.01);
+			visible_weight += weight * occlusion;
+			weight *= max(occlusion, 0.0001); // See sdfvoxel_gi_process() in gi.glsl.
+		} else {
+			visible_weight += weight;
 		}
 
 		// Compute lightprobe texture position
@@ -220,6 +237,8 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 
 		specular_light = specular_accum;
 	}
+
+	r_visibility = total_weight > 0.0 ? visible_weight / total_weight : 1.0;
 
 	{
 		//process blend

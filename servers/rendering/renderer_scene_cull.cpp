@@ -1770,6 +1770,15 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 		return;
 	}
 
+	if (sdfgi_dynamic_objects && p_instance->dynamic_gi && ((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK)) {
+		// SDFGI voxelizes dynamic GI objects too, so it has to voxelize again wherever one now is
+		// and, if it moved, wherever it was.
+		_sdfgi_mark_dirty(p_instance->scenario, p_instance->transformed_aabb);
+		if (p_instance->indexer_id.is_valid() && p_instance->prev_transformed_aabb != p_instance->transformed_aabb) {
+			_sdfgi_mark_dirty(p_instance->scenario, p_instance->prev_transformed_aabb);
+		}
+	}
+
 	//quantize to improve moving object performance
 	AABB bvh_aabb = p_instance->transformed_aabb;
 
@@ -1862,6 +1871,9 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 		if (p_instance->baked_light) {
 			idata.flags |= InstanceData::FLAG_USES_BAKED_LIGHT;
 		}
+		if (p_instance->dynamic_gi) {
+			idata.flags |= InstanceData::FLAG_USES_DYNAMIC_GI;
+		}
 		if (p_instance->mesh_instance.is_valid()) {
 			idata.flags |= InstanceData::FLAG_USES_MESH_INSTANCE;
 		}
@@ -1942,6 +1954,17 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 	p_instance->prev_transformed_aabb = p_instance->transformed_aabb;
 }
 
+void RendererSceneCull::_sdfgi_mark_dirty(Scenario *p_scenario, const AABB &p_aabb) const {
+	// Kept for the frame being drawn only: every viewport drawn in it passes the list on to its
+	// SDFGI (see _render_scene()), which keeps what it cannot voxelize right away for later.
+	uint64_t frame = RSG::rasterizer->get_frame_number();
+	if (p_scenario->sdfgi_dirty_frame != frame) {
+		p_scenario->sdfgi_dirty_aabbs.clear();
+		p_scenario->sdfgi_dirty_frame = frame;
+	}
+	p_scenario->sdfgi_dirty_aabbs.push_back(p_aabb);
+}
+
 void RendererSceneCull::_unpair_instance(Instance *p_instance) {
 	if (!p_instance->indexer_id.is_valid()) {
 		return; //nothing to do
@@ -1949,6 +1972,10 @@ void RendererSceneCull::_unpair_instance(Instance *p_instance) {
 
 	// The instance is being hidden or removed, depth buffers rendered before can't be trusted where it was.
 	_hzb_occlusion_record_change(p_instance);
+
+	if (sdfgi_dynamic_objects && p_instance->dynamic_gi && p_instance->scenario && ((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK)) {
+		_sdfgi_mark_dirty(p_instance->scenario, p_instance->transformed_aabb); // Gone from where it was.
+	}
 
 	while (p_instance->pairs.first()) {
 		InstancePair *pair = p_instance->pairs.first()->self();
@@ -3549,7 +3576,8 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 						}
 					}
 				} else if ((1 << base_type) & RSE::INSTANCE_GEOMETRY_MASK) {
-					if ((idata.flags & InstanceData::FLAG_USES_BAKED_LIGHT) && (cull_data.visible_layers & idata.layer_mask)) {
+					bool voxelized = (idata.flags & InstanceData::FLAG_USES_BAKED_LIGHT) || (sdfgi_dynamic_objects && (idata.flags & InstanceData::FLAG_USES_DYNAMIC_GI));
+					if (voxelized && (cull_data.visible_layers & idata.layer_mask)) {
 						cull_result.sdfgi_region_geometry_instances[j].push_back(idata.instance_geometry);
 						mesh_visible = true;
 					}
@@ -3583,6 +3611,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	scene_render->set_scene_pass(render_pass);
 
 	if (p_reflection_probe.is_null()) {
+		// Where dynamic GI objects moved this frame, before the update picks the areas to voxelize again.
+		if (scenario->sdfgi_dirty_frame == RSG::rasterizer->get_frame_number() && !scenario->sdfgi_dirty_aabbs.is_empty()) {
+			scene_render->sdfgi_mark_dirty(p_render_buffers, scenario->sdfgi_dirty_aabbs);
+		}
 		//no rendering code here, this is only to set up what needs to be done, request regions, etc.
 		scene_render->sdfgi_update(p_render_buffers, p_environment, camera_position); //update conditions for SDFGI (whether its used or not)
 	}
@@ -4789,6 +4821,7 @@ RendererSceneCull::RendererSceneCull() {
 	}
 
 	indexer_update_iterations = GLOBAL_GET("rendering/limits/spatial_indexer/update_iterations_per_frame");
+	sdfgi_dynamic_objects = GLOBAL_GET("rendering/global_illumination/sdfgi/dynamic_objects");
 	thread_cull_threshold = GLOBAL_GET("rendering/limits/spatial_indexer/threaded_cull_minimum_instances");
 	thread_cull_threshold = MAX(thread_cull_threshold, (uint32_t)WorkerThreadPool::get_singleton()->get_thread_count()); //make sure there is at least one thread per CPU
 	RendererSceneOcclusionCull::HZBuffer::occlusion_jitter_enabled = GLOBAL_GET("rendering/occlusion_culling/jitter_projection");

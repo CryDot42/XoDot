@@ -296,7 +296,7 @@ layout(set = 0, binding = 14, std140) uniform SDFGI {
 	float y_mult;
 
 	vec3 occlusion_clamp;
-	uint pad3;
+	float view_bias; // See gi.glsl.
 
 	vec3 occlusion_renormalize;
 	uint pad4;
@@ -461,6 +461,8 @@ layout(set = 1, binding = 29) uniform texture2D reflection_buffer;
 #endif
 layout(set = 1, binding = 30) uniform texture2DArray sdfgi_lightprobe_texture;
 layout(set = 1, binding = 31) uniform texture3D sdfgi_occlusion_cascades;
+// Where each SDFGI probe was placed (see MODE_PROBE_PLACEMENT in sdfgi_preprocess.glsl).
+layout(set = 1, binding = 41) uniform texture2DArray sdfgi_probe_state;
 
 struct VoxelGIData {
 	mat4 xform; // 64 - 64

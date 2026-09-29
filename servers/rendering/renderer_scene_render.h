@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/math/projection.h"
+#include "core/templates/local_vector.h"
 #include "core/templates/paged_array.h"
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_scene_occlusion_cull.h"
@@ -71,6 +72,8 @@ public:
 	/* SDFGI UPDATE */
 
 	virtual void sdfgi_update(const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, const Vector3 &p_world_position) = 0;
+	// World-space boxes where dynamic objects moved, appeared or went away: SDFGI voxelizes them again.
+	virtual void sdfgi_mark_dirty(const Ref<RenderSceneBuffers> &p_render_buffers, const LocalVector<AABB> &p_aabbs) = 0;
 	virtual int sdfgi_get_pending_region_count(const Ref<RenderSceneBuffers> &p_render_buffers) const = 0;
 	virtual AABB sdfgi_get_pending_region_bounds(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const = 0;
 	virtual uint32_t sdfgi_get_pending_region_cascade(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const = 0;
