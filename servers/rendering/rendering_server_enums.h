@@ -269,6 +269,14 @@ enum LightParam {
 	LIGHT_PARAM_INTENSITY,
 	LIGHT_PARAM_CONTACT_SHADOW_OPACITY,
 	LIGHT_PARAM_CONTACT_SHADOW_BLUR,
+	// The parameters of the cached cascades are appended here instead of next to the ones of the dynamic cascades
+	// so the values of the existing parameters remain stable.
+	LIGHT_PARAM_SHADOW_CACHED_MAX_DISTANCE,
+	LIGHT_PARAM_SHADOW_CACHED_SPLIT_1_OFFSET,
+	LIGHT_PARAM_SHADOW_CACHED_SPLIT_2_OFFSET,
+	LIGHT_PARAM_SHADOW_CACHED_SPLIT_3_OFFSET,
+	LIGHT_PARAM_SHADOW_CACHE_UPDATE_INTERVAL,
+	LIGHT_PARAM_SHADOW_CACHE_MARGIN,
 	LIGHT_PARAM_MAX,
 };
 
@@ -287,6 +295,8 @@ enum LightDirectionalShadowMode {
 	LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL,
 	LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS,
 	LIGHT_DIRECTIONAL_SHADOW_PARALLEL_4_SPLITS,
+	// 4 dynamic cascades (rendered every frame) followed by 4 cached cascades (rendered once in a while).
+	LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS,
 };
 
 enum LightDirectionalSkyMode {

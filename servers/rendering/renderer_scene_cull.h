@@ -764,6 +764,31 @@ public:
 		// or closely culled to the camera frustum.
 		bool is_shadow_update_full() const { return shadow_dirty_count == 0; }
 
+		// State of the cached cascades of a directional light. Their shadow maps are rendered once in a while into an atlas
+		// that is left untouched otherwise, so everything needed to keep using them is remembered here.
+		struct CachedCascade {
+			bool valid = false;
+			RID viewport; // The view it was rendered for. Only one view can use the cache at a time.
+			uint32_t atlas_generation = 0;
+			uint32_t layout_key = 0; // Everything (but the camera) the shadow map depends on, see `_light_instance_setup_cached_directional_cascade()`.
+			int64_t last_update_frame = 0;
+
+			// Region of the world the shadow map covers: a sphere.
+			Vector3 center;
+			real_t radius = 0.0;
+			real_t reach = 0.0; // How far from the camera the cascade needs to cover.
+			Vector3 light_z; // Direction to the light it was rendered for.
+
+			// Shadow map camera.
+			Projection projection;
+			Transform3D transform;
+			real_t zfar = 0.0;
+			real_t z_max = 0.0;
+			real_t shadow_texel_size = 0.0;
+			real_t bias_scale = 0.0;
+			Vector2 uv_scale;
+		} cached_cascades[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES - RendererSceneRender::DIRECTIONAL_LIGHT_DYNAMIC_CASCADES];
+
 		InstanceLightData() {
 			bake_mode = RSE::LIGHT_BAKE_DISABLED;
 			D = nullptr;
@@ -1095,7 +1120,8 @@ public:
 	_FORCE_INLINE_ void _update_instance_lightmap_captures(Instance *p_instance) const;
 	void _unpair_instance(Instance *p_instance);
 
-	void _light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect);
+	void _light_instance_setup_directional_shadow(int p_shadow_index, int p_shadow_count, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_viewport, bool p_allow_shadow_cache);
+	void _light_instance_setup_cached_directional_cascade(int p_shadow_index, int p_shadow_count, int p_cascade, Instance *p_instance, const Transform3D &p_light_transform, const Transform3D &p_cam_transform, real_t p_split, real_t p_reach_scale, real_t p_texture_size, RID p_viewport);
 
 	_FORCE_INLINE_ bool _light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers = 0xFFFFFF);
 
@@ -1118,7 +1144,10 @@ public:
 				real_t range_begin;
 				Vector2 uv_scale;
 
-			} cascades[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES]; //max 4 cascades
+				// Cached cascades keep their shadow map from previous frames, and are not culled nor rendered until they need to.
+				bool update = true;
+
+			} cascades[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES]; //max 8 cascades, the first ones are dynamic
 			uint32_t cascade_count;
 
 		} shadows[RendererSceneRender::MAX_DIRECTIONAL_LIGHTS];

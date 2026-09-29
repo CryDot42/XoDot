@@ -5178,7 +5178,25 @@
 		<constant name="LIGHT_PARAM_CONTACT_SHADOW_BLUR" value="22" enum="LightParam">
 			Blurs the edges of the contact shadow. [code]0.0[/code] produces sharp shadows; higher values increase the noise magnitude.
 		</constant>
-		<constant name="LIGHT_PARAM_MAX" value="23" enum="LightParam">
+		<constant name="LIGHT_PARAM_SHADOW_CACHED_MAX_DISTANCE" value="23" enum="LightParam">
+			Maximum distance of the cached splits of a directional light when using [constant LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS]. They cover the range between [constant LIGHT_PARAM_SHADOW_MAX_DISTANCE] (where the splits rendered every frame end) and this distance.
+		</constant>
+		<constant name="LIGHT_PARAM_SHADOW_CACHED_SPLIT_1_OFFSET" value="24" enum="LightParam">
+			Proportion of the range covered by the cached splits (between [constant LIGHT_PARAM_SHADOW_MAX_DISTANCE] and [constant LIGHT_PARAM_SHADOW_CACHED_MAX_DISTANCE]) occupied by the first one of them (the fifth split). The other ones occupy the rest.
+		</constant>
+		<constant name="LIGHT_PARAM_SHADOW_CACHED_SPLIT_2_OFFSET" value="25" enum="LightParam">
+			Proportion of the range covered by the cached splits occupied by the first two of them.
+		</constant>
+		<constant name="LIGHT_PARAM_SHADOW_CACHED_SPLIT_3_OFFSET" value="26" enum="LightParam">
+			Proportion of the range covered by the cached splits occupied by the first three of them. The fourth one occupies the rest.
+		</constant>
+		<constant name="LIGHT_PARAM_SHADOW_CACHE_UPDATE_INTERVAL" value="27" enum="LightParam">
+			Number of frames after which the cached splits of a directional light are rendered again when using [constant LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS].
+		</constant>
+		<constant name="LIGHT_PARAM_SHADOW_CACHE_MARGIN" value="28" enum="LightParam">
+			How much farther than needed the cached splits of a directional light reach around the camera when using [constant LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS].
+		</constant>
+		<constant name="LIGHT_PARAM_MAX" value="29" enum="LightParam">
 			Represents the size of the [enum LightParam] enum.
 		</constant>
 		<constant name="LIGHT_BAKE_DISABLED" value="0" enum="LightBakeMode">
@@ -5204,6 +5222,9 @@
 		</constant>
 		<constant name="LIGHT_DIRECTIONAL_SHADOW_PARALLEL_4_SPLITS" value="2" enum="LightDirectionalShadowMode">
 			Use 4 splits for shadow projection when using directional light.
+		</constant>
+		<constant name="LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS" value="3" enum="LightDirectionalShadowMode">
+			Use 8 splits for shadow projection when using directional light. The first 4 splits are rendered every frame, the other 4 are cached and only rendered again once in a while.
 		</constant>
 		<constant name="LIGHT_DIRECTIONAL_SKY_MODE_LIGHT_AND_SKY" value="0" enum="LightDirectionalSkyMode">
 			Use DirectionalLight3D in both sky rendering and scene lighting.

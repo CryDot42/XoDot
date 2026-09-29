@@ -47,7 +47,9 @@ private:
 public:
 	enum {
 		MAX_DIRECTIONAL_LIGHTS = 8,
-		MAX_DIRECTIONAL_LIGHT_CASCADES = 4,
+		MAX_DIRECTIONAL_LIGHT_CASCADES = 8,
+		// Cascades below this index are rendered every frame, the others are cached.
+		DIRECTIONAL_LIGHT_DYNAMIC_CASCADES = 4,
 		MAX_RENDER_VIEWS = 2
 	};
 

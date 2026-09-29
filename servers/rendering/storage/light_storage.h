@@ -214,4 +214,17 @@ public:
 	virtual void directional_shadow_atlas_set_size(int p_size, bool p_16_bits = true) = 0;
 	virtual int get_directional_light_shadow_size(RID p_light_instance) = 0;
 	virtual void set_directional_shadow_count(int p_count) = 0;
+
+	/* DIRECTIONAL SHADOW CASCADE CACHE */
+
+	// The cascades past the first `RendererSceneRender::DIRECTIONAL_LIGHT_DYNAMIC_CASCADES` are cached: they are rendered into
+	// their own persistent atlas and only refreshed once in a while (see `RendererSceneCull`). Renderers without support for it
+	// simply never report more dynamic cascades.
+
+	// Number of cascades used by a directional light instance in the frame being rendered.
+	virtual void light_instance_set_directional_shadow_cascade_count(RID p_light_instance, uint32_t p_cascade_count) {}
+	// Size (in pixels) of the square each cached cascade of a directional light instance is rendered into.
+	virtual int get_directional_light_cached_shadow_size(RID p_light_instance) { return 0; }
+	// Changes every time the contents of the cached atlas get lost (resize, free). Cached cascades must be rendered again then.
+	virtual uint32_t directional_shadow_cache_get_generation() const { return 0; }
 };

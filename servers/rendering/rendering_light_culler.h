@@ -175,7 +175,7 @@ private:
 
 	struct DirectionalLightCullData {
 		LightSource light_source;
-		LightCullPlanes planes[4]; // One set of cull planes per cascade.
+		LightCullPlanes planes[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES]; // One set of cull planes per cascade.
 	};
 
 	bool _prepare_light(const RendererSceneCull::Instance &p_instance);

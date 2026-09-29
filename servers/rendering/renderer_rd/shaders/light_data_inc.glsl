@@ -59,6 +59,9 @@ struct ReflectionData {
 	// notes: for ambientblend, use distance to edge to blend between already existing global environment
 };
 
+// Cascades below this index are rendered into `directional_shadow_atlas`, the others into `directional_shadow_atlas_cached`.
+#define DIRECTIONAL_LIGHT_DYNAMIC_CASCADES 4u
+
 struct DirectionalLightData {
 	vec3 direction;
 	float energy; // needs to be highp to avoid NaNs being created with high energy values (i.e. when using physical light units and over-exposing the image)
@@ -73,21 +76,41 @@ struct DirectionalLightData {
 	float fade_from;
 	float fade_to;
 	uint sscs_index;
-	uint pad;
+	uint shadow_cascade_count;
 	uint bake_mode;
 	float volumetric_fog_energy;
-	vec4 shadow_bias;
-	vec4 shadow_normal_bias;
-	vec4 shadow_transmittance_bias;
-	vec4 shadow_z_range;
-	vec4 shadow_range_begin;
-	vec4 shadow_split_offsets;
-	mat4 shadow_matrix1;
-	mat4 shadow_matrix2;
-	mat4 shadow_matrix3;
-	mat4 shadow_matrix4;
-	vec2 uv_scale1;
-	vec2 uv_scale2;
-	vec2 uv_scale3;
-	vec2 uv_scale4;
+	// The values of each cascade are packed 4 per vec4, use DIRECTIONAL_LIGHT_CASCADE_VALUE() to get one.
+	vec4 shadow_bias[2];
+	vec4 shadow_normal_bias[2];
+	vec4 shadow_transmittance_bias[2];
+	vec4 shadow_z_range[2];
+	vec4 shadow_range_begin[2];
+	vec4 shadow_split_offsets[2]; // Distance from the camera to the end of each cascade, 0 for the cascades that are not used.
+	mat4 shadow_matrix[8];
+	vec4 uv_scale[4]; // Packed 2 per vec4, use DIRECTIONAL_LIGHT_CASCADE_UV_SCALE().
 };
+
+#define DIRECTIONAL_LIGHT_CASCADE_VALUE(m_array, m_cascade) m_array[(m_cascade) >> 2u][(m_cascade) & 3u]
+#define DIRECTIONAL_LIGHT_CASCADE_UV_SCALE(m_array, m_cascade) (((m_cascade) & 1u) == 0u ? m_array[(m_cascade) >> 1u].xy : m_array[(m_cascade) >> 1u].zw)
+
+// Index of the cascade that covers a given view depth: the first one that ends beyond it, or the last one used if there is none.
+uint directional_light_cascade_from_depth(vec4 p_split_offsets0, vec4 p_split_offsets1, uint p_cascade_count, float p_depth) {
+	uvec4 passed0 = uvec4(greaterThanEqual(vec4(p_depth), p_split_offsets0)) & uvec4(greaterThan(p_split_offsets0, vec4(0.0)));
+	uvec4 passed1 = uvec4(greaterThanEqual(vec4(p_depth), p_split_offsets1)) & uvec4(greaterThan(p_split_offsets1, vec4(0.0)));
+	uint passed = passed0.x + passed0.y + passed0.z + passed0.w + passed1.x + passed1.y + passed1.z + passed1.w;
+	return min(passed, max(p_cascade_count, 1u) - 1u);
+}
+
+// Colors used to visualize the cascades.
+vec3 directional_light_cascade_tint(uint p_cascade) {
+	const vec3 tints[8] = vec3[](
+			vec3(1.0, 0.0, 0.0),
+			vec3(0.0, 1.0, 0.0),
+			vec3(0.0, 0.0, 1.0),
+			vec3(1.0, 1.0, 0.0),
+			vec3(1.0, 0.0, 1.0),
+			vec3(0.0, 1.0, 1.0),
+			vec3(1.0, 0.5, 0.0),
+			vec3(0.5, 0.5, 0.5));
+	return tints[p_cascade & 7u];
+}
