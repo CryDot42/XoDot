@@ -269,23 +269,16 @@ enum LightParam {
 	LIGHT_PARAM_INTENSITY,
 	LIGHT_PARAM_CONTACT_SHADOW_OPACITY,
 	LIGHT_PARAM_CONTACT_SHADOW_BLUR,
-	// Splits 4 to 7 (and the shadow cache parameters) are appended here instead of next to the other split
-	// offsets so the values of the existing parameters remain stable. Use `light_param_shadow_split_offset()`
-	// to convert a split index to its parameter.
-	LIGHT_PARAM_SHADOW_SPLIT_4_OFFSET,
-	LIGHT_PARAM_SHADOW_SPLIT_5_OFFSET,
-	LIGHT_PARAM_SHADOW_SPLIT_6_OFFSET,
-	LIGHT_PARAM_SHADOW_SPLIT_7_OFFSET,
+	// The parameters of the cached cascades are appended here instead of next to the ones of the dynamic cascades
+	// so the values of the existing parameters remain stable.
+	LIGHT_PARAM_SHADOW_CACHED_MAX_DISTANCE,
+	LIGHT_PARAM_SHADOW_CACHED_SPLIT_1_OFFSET,
+	LIGHT_PARAM_SHADOW_CACHED_SPLIT_2_OFFSET,
+	LIGHT_PARAM_SHADOW_CACHED_SPLIT_3_OFFSET,
 	LIGHT_PARAM_SHADOW_CACHE_UPDATE_INTERVAL,
 	LIGHT_PARAM_SHADOW_CACHE_MARGIN,
 	LIGHT_PARAM_MAX,
 };
-
-// Returns the parameter holding the offset of the split between cascade `p_split` and cascade `p_split + 1`,
-// with `p_split` in the range [0, 6].
-constexpr LightParam light_param_shadow_split_offset(int p_split) {
-	return p_split < 3 ? LightParam(LIGHT_PARAM_SHADOW_SPLIT_1_OFFSET + p_split) : LightParam(LIGHT_PARAM_SHADOW_SPLIT_4_OFFSET + (p_split - 3));
-}
 
 enum LightBakeMode {
 	LIGHT_BAKE_DISABLED,

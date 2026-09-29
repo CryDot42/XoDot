@@ -81,10 +81,10 @@ void LightStorage::_light_initialize(RID p_light, RSE::LightType p_type) {
 	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_1_OFFSET] = 0.1;
 	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_2_OFFSET] = 0.3;
 	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_3_OFFSET] = 0.6;
-	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_4_OFFSET] = 0.7;
-	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_5_OFFSET] = 0.8;
-	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_6_OFFSET] = 0.9;
-	light.param[RSE::LIGHT_PARAM_SHADOW_SPLIT_7_OFFSET] = 0.95;
+	light.param[RSE::LIGHT_PARAM_SHADOW_CACHED_MAX_DISTANCE] = 1000.0;
+	light.param[RSE::LIGHT_PARAM_SHADOW_CACHED_SPLIT_1_OFFSET] = 0.1;
+	light.param[RSE::LIGHT_PARAM_SHADOW_CACHED_SPLIT_2_OFFSET] = 0.3;
+	light.param[RSE::LIGHT_PARAM_SHADOW_CACHED_SPLIT_3_OFFSET] = 0.6;
 	light.param[RSE::LIGHT_PARAM_SHADOW_CACHE_UPDATE_INTERVAL] = 8.0;
 	light.param[RSE::LIGHT_PARAM_SHADOW_CACHE_MARGIN] = 0.25;
 	light.param[RSE::LIGHT_PARAM_SHADOW_FADE_START] = 0.8;
@@ -1820,6 +1820,7 @@ int LightStorage::get_directional_light_shadow_size(RID p_light_instance) {
 			r.size.height /= 2;
 			break;
 		case RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_4_SPLITS:
+		case RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS:
 			r.size /= 2;
 			break;
 	}

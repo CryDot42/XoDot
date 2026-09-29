@@ -21,11 +21,24 @@
 		<member name="directional_shadow_cache_update_interval" type="float" setter="set_param" getter="get_param" default="8.0">
 			Number of frames after which the shadow maps of the cached splits are rendered again, even if the camera stays where it is. This is what makes moving objects (and changes to the scene) show up in the shadows of the cached splits, so lower values make them follow more closely and higher values are cheaper. The 4 cached splits are updated in different frames to spread the cost. Set it to [code]1[/code] to render them every frame. Only used when [member directional_shadow_mode] is [constant SHADOW_PARALLEL_8_SPLITS].
 		</member>
+		<member name="directional_shadow_cached_max_distance" type="float" setter="set_param" getter="get_param" default="1000.0">
+			The maximum distance for the cached shadow splits (splits 5 to 8), which cover the range between [member directional_shadow_max_distance] and this distance. Directional shadows are visible up to this distance. It is independent from [member directional_shadow_max_distance], so it can be increased to see shadows from farther away without spreading the splits that are close to the camera. Only used when [member directional_shadow_mode] is [constant SHADOW_PARALLEL_8_SPLITS]. If it is not greater than [member directional_shadow_max_distance] there are no cached splits, and only the first 4 are used. If [code]0[/code], the far plane of the camera is used.
+		</member>
+		<member name="directional_shadow_cached_split_1" type="float" setter="set_param" getter="get_param" default="0.1">
+			The distance from [member directional_shadow_max_distance] (where the cached splits start) to the end of cached split 1 (shadow split 5). Relative to the distance between [member directional_shadow_max_distance] and [member directional_shadow_cached_max_distance]. Only used when [member directional_shadow_mode] is [constant SHADOW_PARALLEL_8_SPLITS].
+		</member>
+		<member name="directional_shadow_cached_split_2" type="float" setter="set_param" getter="get_param" default="0.3">
+			The distance from [member directional_shadow_max_distance] to the end of cached split 2 (shadow split 6). Relative to the distance between [member directional_shadow_max_distance] and [member directional_shadow_cached_max_distance]. Only used when [member directional_shadow_mode] is [constant SHADOW_PARALLEL_8_SPLITS].
+		</member>
+		<member name="directional_shadow_cached_split_3" type="float" setter="set_param" getter="get_param" default="0.6">
+			The distance from [member directional_shadow_max_distance] to the end of cached split 3 (shadow split 7). Relative to the distance between [member directional_shadow_max_distance] and [member directional_shadow_cached_max_distance]. Only used when [member directional_shadow_mode] is [constant SHADOW_PARALLEL_8_SPLITS]. The last cached split (shadow split 8) reaches [member directional_shadow_cached_max_distance].
+		</member>
 		<member name="directional_shadow_fade_start" type="float" setter="set_param" getter="get_param" default="0.8">
-			Proportion of [member directional_shadow_max_distance] at which point the shadow starts to fade. At [member directional_shadow_max_distance], the shadow will disappear. The default value is a balance between smooth fading and distant shadow visibility. If the camera moves fast and the [member directional_shadow_max_distance] is low, consider lowering [member directional_shadow_fade_start] below [code]0.8[/code] to make shadow transitions less noticeable. On the other hand, if you tuned [member directional_shadow_max_distance] to cover the entire scene, you can set [member directional_shadow_fade_start] to [code]1.0[/code] to prevent the shadow from fading in the distance (it will suddenly cut off instead).
+			Proportion of [member directional_shadow_max_distance] at which point the shadow starts to fade. At [member directional_shadow_max_distance], the shadow will disappear. When [member directional_shadow_mode] is [constant SHADOW_PARALLEL_8_SPLITS], the distance it is relative to is [member directional_shadow_cached_max_distance]. The default value is a balance between smooth fading and distant shadow visibility. If the camera moves fast and the [member directional_shadow_max_distance] is low, consider lowering [member directional_shadow_fade_start] below [code]0.8[/code] to make shadow transitions less noticeable. On the other hand, if you tuned [member directional_shadow_max_distance] to cover the entire scene, you can set [member directional_shadow_fade_start] to [code]1.0[/code] to prevent the shadow from fading in the distance (it will suddenly cut off instead).
 		</member>
 		<member name="directional_shadow_max_distance" type="float" setter="set_param" getter="get_param" default="100.0">
 			The maximum distance for shadow splits. Increasing this value will make directional shadows visible from further away, at the cost of lower overall shadow detail and performance (since more objects need to be included in the directional shadow rendering).
+			When [member directional_shadow_mode] is [constant SHADOW_PARALLEL_8_SPLITS], this is the distance where the 4 splits that are rendered every frame end. The cached splits go from there up to [member directional_shadow_cached_max_distance].
 		</member>
 		<member name="directional_shadow_mode" type="int" setter="set_shadow_mode" getter="get_shadow_mode" enum="DirectionalLight3D.ShadowMode" default="2">
 			The light's shadow rendering algorithm.
@@ -42,18 +55,6 @@
 		<member name="directional_shadow_split_3" type="float" setter="set_param" getter="get_param" default="0.5">
 			The distance from shadow split 2 to split 3. Relative to [member directional_shadow_max_distance]. Only used when [member directional_shadow_mode] is [constant SHADOW_PARALLEL_4_SPLITS] or [constant SHADOW_PARALLEL_8_SPLITS].
 		</member>
-		<member name="directional_shadow_split_4" type="float" setter="set_param" getter="get_param" default="0.6">
-			The distance from shadow split 3 to split 4. Relative to [member directional_shadow_max_distance]. Only used when [member directional_shadow_mode] is [constant SHADOW_PARALLEL_8_SPLITS]. The splits before it are rendered every frame, this one and the ones after it are cached.
-		</member>
-		<member name="directional_shadow_split_5" type="float" setter="set_param" getter="get_param" default="0.7">
-			The distance from shadow split 4 to split 5. Relative to [member directional_shadow_max_distance]. Only used when [member directional_shadow_mode] is [constant SHADOW_PARALLEL_8_SPLITS].
-		</member>
-		<member name="directional_shadow_split_6" type="float" setter="set_param" getter="get_param" default="0.8">
-			The distance from shadow split 5 to split 6. Relative to [member directional_shadow_max_distance]. Only used when [member directional_shadow_mode] is [constant SHADOW_PARALLEL_8_SPLITS].
-		</member>
-		<member name="directional_shadow_split_7" type="float" setter="set_param" getter="get_param" default="0.9">
-			The distance from shadow split 6 to split 7. Relative to [member directional_shadow_max_distance]. Only used when [member directional_shadow_mode] is [constant SHADOW_PARALLEL_8_SPLITS]. The last split (8) reaches [member directional_shadow_max_distance].
-		</member>
 		<member name="sky_mode" type="int" setter="set_sky_mode" getter="get_sky_mode" enum="DirectionalLight3D.SkyMode" default="0">
 			Whether this [DirectionalLight3D] is visible in the sky, in the scene, or both in the sky and in the scene.
 		</member>
@@ -69,8 +70,8 @@
 			Splits the view frustum in 4 areas, each with its own shadow map. This is the slowest directional shadow mode.
 		</constant>
 		<constant name="SHADOW_PARALLEL_8_SPLITS" value="3" enum="ShadowMode">
-			Splits the view frustum in 8 areas, each with its own shadow map. The first 4 splits are rendered every frame like in [constant SHADOW_PARALLEL_4_SPLITS]. The last 4 are cached: their shadow maps cover a region around the camera and are only rendered again every [member directional_shadow_cache_update_interval] frames, or when the camera gets close to the edge of the region they cover or the direction of the light changes. Moving objects in these splits (and changes to the scene) are therefore only reflected in their shadows when the cache updates, which makes this mode a good fit for large distant areas.
-			[b]Note:[/b] The cache is shared by all the viewports rendering the light, so it is only effective when a single viewport renders it. The cached splits are not used (only the first 4 are, covering the whole range) when rendering with an orthogonal camera or reflection probes, or with the Compatibility renderer.
+			Splits the view frustum in 8 areas, each with its own shadow map. The first 4 splits are rendered every frame like in [constant SHADOW_PARALLEL_4_SPLITS], and cover the distance up to [member directional_shadow_max_distance]. The last 4 cover the distance from there to [member directional_shadow_cached_max_distance], and are cached: their shadow maps cover a region around the camera and are only rendered again every [member directional_shadow_cache_update_interval] frames, or when the camera gets close to the edge of the region they cover or the direction of the light changes. Moving objects in these splits (and changes to the scene) are therefore only reflected in their shadows when the cache updates, which makes this mode a good fit for large distant areas.
+			[b]Note:[/b] The cache is shared by all the viewports rendering the light, so it is only effective when a single viewport renders it. The cached splits are not used (only the first 4 are, up to [member directional_shadow_max_distance]) when rendering with an orthogonal camera or reflection probes, or with the Compatibility renderer.
 		</constant>
 		<constant name="SKY_MODE_LIGHT_AND_SKY" value="0" enum="SkyMode">
 			Makes the light visible in both scene lighting and sky rendering.

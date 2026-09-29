@@ -213,17 +213,17 @@
 		<constant name="PARAM_CONTACT_SHADOW_BLUR" value="22" enum="Param">
 			Constant for accessing [member shadow_contact_shadows_blur].
 		</constant>
-		<constant name="PARAM_SHADOW_SPLIT_4_OFFSET" value="23" enum="Param">
-			Constant for accessing [member DirectionalLight3D.directional_shadow_split_4].
+		<constant name="PARAM_SHADOW_CACHED_MAX_DISTANCE" value="23" enum="Param">
+			Constant for accessing [member DirectionalLight3D.directional_shadow_cached_max_distance].
 		</constant>
-		<constant name="PARAM_SHADOW_SPLIT_5_OFFSET" value="24" enum="Param">
-			Constant for accessing [member DirectionalLight3D.directional_shadow_split_5].
+		<constant name="PARAM_SHADOW_CACHED_SPLIT_1_OFFSET" value="24" enum="Param">
+			Constant for accessing [member DirectionalLight3D.directional_shadow_cached_split_1].
 		</constant>
-		<constant name="PARAM_SHADOW_SPLIT_6_OFFSET" value="25" enum="Param">
-			Constant for accessing [member DirectionalLight3D.directional_shadow_split_6].
+		<constant name="PARAM_SHADOW_CACHED_SPLIT_2_OFFSET" value="25" enum="Param">
+			Constant for accessing [member DirectionalLight3D.directional_shadow_cached_split_2].
 		</constant>
-		<constant name="PARAM_SHADOW_SPLIT_7_OFFSET" value="26" enum="Param">
-			Constant for accessing [member DirectionalLight3D.directional_shadow_split_7].
+		<constant name="PARAM_SHADOW_CACHED_SPLIT_3_OFFSET" value="26" enum="Param">
+			Constant for accessing [member DirectionalLight3D.directional_shadow_cached_split_3].
 		</constant>
 		<constant name="PARAM_SHADOW_CACHE_UPDATE_INTERVAL" value="27" enum="Param">
 			Constant for accessing [member DirectionalLight3D.directional_shadow_cache_update_interval].

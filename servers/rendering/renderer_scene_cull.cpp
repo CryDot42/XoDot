@@ -2196,6 +2196,13 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 
 	real_t range = max_distance - min_distance;
 
+	// The cached cascades reach farther than the dynamic ones (which end at the max distance), and have their own splits.
+	real_t cached_max_distance = p_cam_projection.get_z_far();
+	real_t cached_shadow_max = RSG::light_storage->light_get_param(p_instance->base, RSE::LIGHT_PARAM_SHADOW_CACHED_MAX_DISTANCE);
+	if (cached_shadow_max > 0) {
+		cached_max_distance = MIN(cached_shadow_max, cached_max_distance);
+	}
+
 	int splits = 0;
 	switch (RSG::light_storage->light_directional_get_shadow_mode(p_instance->base)) {
 		case RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL:
@@ -2209,19 +2216,30 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 			break;
 		case RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS:
 			// The 4 last cascades are cached, which only works for a view (not an orthogonal camera, nor a reflection probe)
-			// that does not share the light with other views. Without that there is only room for the 4 dynamic ones.
-			splits = p_allow_shadow_cache && !p_cam_orthogonal ? 8 : 4;
+			// that does not share the light with other views, and when there is something farther than the dynamic cascades
+			// to cover. Without that there is only room for the 4 dynamic ones.
+			splits = p_allow_shadow_cache && !p_cam_orthogonal && cached_max_distance > max_distance + 0.001 ? 8 : 4;
 			break;
 	}
 
 	real_t distances[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES + 1];
 
+	// The dynamic cascades only depend on the max distance, so that changing how far the cached ones reach does not move them.
+	const int dynamic_splits = MIN(splits, (int)RendererSceneRender::DIRECTIONAL_LIGHT_DYNAMIC_CASCADES);
 	distances[0] = min_distance;
-	for (int i = 0; i < splits - 1; i++) {
-		distances[i + 1] = min_distance + RSG::light_storage->light_get_param(p_instance->base, RSE::light_param_shadow_split_offset(i)) * range;
+	for (int i = 0; i < dynamic_splits - 1; i++) {
+		distances[i + 1] = min_distance + RSG::light_storage->light_get_param(p_instance->base, RSE::LightParam(RSE::LIGHT_PARAM_SHADOW_SPLIT_1_OFFSET + i)) * range;
 	};
+	distances[dynamic_splits] = max_distance;
 
-	distances[splits] = max_distance;
+	// The cached ones split the range between the max distance and the cached max distance.
+	if (splits > dynamic_splits) {
+		const real_t cached_range = cached_max_distance - max_distance;
+		for (int i = 0; i < splits - dynamic_splits - 1; i++) {
+			distances[dynamic_splits + i + 1] = max_distance + RSG::light_storage->light_get_param(p_instance->base, RSE::LightParam(RSE::LIGHT_PARAM_SHADOW_CACHED_SPLIT_1_OFFSET + i)) * cached_range;
+		}
+		distances[splits] = cached_max_distance;
+	}
 
 	real_t texture_size = RSG::light_storage->get_directional_light_shadow_size(light->instance);
 

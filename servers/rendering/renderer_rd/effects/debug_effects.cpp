@@ -201,10 +201,10 @@ void DebugEffects::draw_shadow_frustum(RID p_light, const Projection &p_cam_proj
 	} else if (shadow_mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS) {
 		splits = 2;
 	} else if (shadow_mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS) {
-		splits = 8;
+		// Only the dynamic cascades are in the atlas that is displayed. They end at the max distance, the cached ones start there.
+		splits = RendererSceneRender::DIRECTIONAL_LIGHT_DYNAMIC_CASCADES;
 	}
-	// Only the dynamic cascades are in the atlas that is displayed.
-	const int drawn_splits = MIN(splits, (int)RendererSceneRender::DIRECTIONAL_LIGHT_DYNAMIC_CASCADES);
+	const int drawn_splits = splits;
 
 	// Setup our camera info (this is mostly a duplicate of the logic found in RendererSceneCull::_light_instance_setup_directional_shadow).
 	bool is_orthogonal = p_cam_projection.is_orthogonal();
@@ -228,10 +228,10 @@ void DebugEffects::draw_shadow_frustum(RID p_light, const Projection &p_cam_proj
 	min_distance = MIN(min_distance, max_distance);
 	real_t range = max_distance - min_distance;
 
-	real_t distances[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES + 1];
+	real_t distances[RendererSceneRender::DIRECTIONAL_LIGHT_DYNAMIC_CASCADES + 1];
 	distances[0] = min_distance;
 	for (int i = 0; i < splits - 1; i++) {
-		distances[i + 1] = min_distance + RSG::light_storage->light_get_param(base, RSE::light_param_shadow_split_offset(i)) * range;
+		distances[i + 1] = min_distance + RSG::light_storage->light_get_param(base, RSE::LightParam(RSE::LIGHT_PARAM_SHADOW_SPLIT_1_OFFSET + i)) * range;
 	};
 	distances[splits] = max_distance;
 

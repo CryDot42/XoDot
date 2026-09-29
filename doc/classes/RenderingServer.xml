@@ -5178,17 +5178,17 @@
 		<constant name="LIGHT_PARAM_CONTACT_SHADOW_BLUR" value="22" enum="LightParam">
 			Blurs the edges of the contact shadow. [code]0.0[/code] produces sharp shadows; higher values increase the noise magnitude.
 		</constant>
-		<constant name="LIGHT_PARAM_SHADOW_SPLIT_4_OFFSET" value="23" enum="LightParam">
-			Proportion of shadow atlas occupied by the fourth split. The fifth split occupies the rest when using [constant LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS]. The fourth split is the last one that is rendered every frame.
+		<constant name="LIGHT_PARAM_SHADOW_CACHED_MAX_DISTANCE" value="23" enum="LightParam">
+			Maximum distance of the cached splits of a directional light when using [constant LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS]. They cover the range between [constant LIGHT_PARAM_SHADOW_MAX_DISTANCE] (where the splits rendered every frame end) and this distance.
 		</constant>
-		<constant name="LIGHT_PARAM_SHADOW_SPLIT_5_OFFSET" value="24" enum="LightParam">
-			Proportion of shadow atlas occupied by the fifth split. The sixth split occupies the rest when using [constant LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS].
+		<constant name="LIGHT_PARAM_SHADOW_CACHED_SPLIT_1_OFFSET" value="24" enum="LightParam">
+			Proportion of the range covered by the cached splits (between [constant LIGHT_PARAM_SHADOW_MAX_DISTANCE] and [constant LIGHT_PARAM_SHADOW_CACHED_MAX_DISTANCE]) occupied by the first one of them (the fifth split). The other ones occupy the rest.
 		</constant>
-		<constant name="LIGHT_PARAM_SHADOW_SPLIT_6_OFFSET" value="25" enum="LightParam">
-			Proportion of shadow atlas occupied by the sixth split. The seventh split occupies the rest when using [constant LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS].
+		<constant name="LIGHT_PARAM_SHADOW_CACHED_SPLIT_2_OFFSET" value="25" enum="LightParam">
+			Proportion of the range covered by the cached splits occupied by the first two of them.
 		</constant>
-		<constant name="LIGHT_PARAM_SHADOW_SPLIT_7_OFFSET" value="26" enum="LightParam">
-			Proportion of shadow atlas occupied by the seventh split. The eighth split occupies the rest when using [constant LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS].
+		<constant name="LIGHT_PARAM_SHADOW_CACHED_SPLIT_3_OFFSET" value="26" enum="LightParam">
+			Proportion of the range covered by the cached splits occupied by the first three of them. The fourth one occupies the rest.
 		</constant>
 		<constant name="LIGHT_PARAM_SHADOW_CACHE_UPDATE_INTERVAL" value="27" enum="LightParam">
 			Number of frames after which the cached splits of a directional light are rendered again when using [constant LIGHT_DIRECTIONAL_SHADOW_PARALLEL_8_SPLITS].
