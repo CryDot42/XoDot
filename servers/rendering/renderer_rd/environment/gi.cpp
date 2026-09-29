@@ -4585,6 +4585,10 @@ GI::~GI() {
 		sdfgi_shader.preprocess_pipeline[i].free();
 	}
 
+	for (int i = 0; i < SDFGIShader::RADIANCE_CASCADES_MODE_MAX; i++) {
+		sdfgi_shader.radiance_cascades_pipeline[i].free();
+	}
+
 	for (int i = 0; i < VOXEL_GI_SHADER_VERSION_MAX; i++) {
 		voxel_gi_lighting_shader_version_pipelines[i].free();
 	}
@@ -4595,9 +4599,13 @@ GI::~GI() {
 
 	for (int i = 0; i < SCREEN_PROBES_MAX; i++) {
 		screen_probes_pipelines[i].free();
+		sdfgi_screen_probes_pipelines[i].free();
 	}
 	if (screen_probes_shader_version.is_valid()) {
 		screen_probes_shader.version_free(screen_probes_shader_version);
+	}
+	if (sdfgi_screen_probes_shader_version.is_valid()) {
+		sdfgi_screen_probes_shader.version_free(sdfgi_screen_probes_shader_version);
 	}
 	if (voxel_gi_mipmap_shader_version.is_valid()) {
 		voxel_gi_mipmap_shader.version_free(voxel_gi_mipmap_shader_version);
@@ -4626,6 +4634,9 @@ GI::~GI() {
 	}
 	if (sdfgi_shader.preprocess_shader.is_valid()) {
 		sdfgi_shader.preprocess.version_free(sdfgi_shader.preprocess_shader);
+	}
+	if (sdfgi_shader.radiance_cascades_shader.is_valid()) {
+		sdfgi_shader.radiance_cascades.version_free(sdfgi_shader.radiance_cascades_shader);
 	}
 
 	singleton = nullptr;
