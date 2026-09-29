@@ -6,11 +6,12 @@
 	<description>
 		A transparent water shader made for the meshes of [LandscapeSpline3D]:
 		- Ripples move with the flow of rivers and streams (flow mapping with two phases, without visible resets), at the speed of the points of the spline, slower near the banks. Lakes use the [member wind_velocity].
-		- The color depends on the depth of the water below the surface (absorption), the bottom is refracted. Reflections use the fresnel term and the specular reflections of the scene.
+		- The color depends on the depth of the water below the surface (absorption), the bottom is refracted by the ripples. Reflections use the fresnel term, the specular reflections of the scene (sky, reflection probes, lights) and screen space reflections of the terrain and objects around the water (see [member ssr_enabled]).
 		- Foam appears along the shores and on the fast parts of rivers (rapids). The water fades out where it meets the terrain.
 		- Optional gentle waves displace the vertices.
 		Built-in tileable ripple and foam textures are generated when [member normal_texture] and [member foam_texture] aren't set.
-		[b]Note:[/b] The material reads the screen and depth textures: transparent objects below the water aren't visible through it.
+		[b]Note:[/b] The material reads the screen and depth textures: transparent objects below the water aren't visible through it, nor reflected on it.
+		[b]Note:[/b] The screen space reflections of the [Environment] ([member Environment.ssr_enabled]) only apply to opaque materials, so they don't affect the water: this material traces its own, independently of them.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -86,8 +87,8 @@
 		<member name="normal_texture" type="Texture2D" setter="_set_parameter_texture" getter="_get_parameter_texture">
 			Tileable normal map of the ripples. If not set, a built-in texture is used (see [method get_default_normal_texture]).
 		</member>
-		<member name="refraction" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.04">
-			Strength of the distortion of the bottom seen through the water.
+		<member name="refraction" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.25">
+			Strength of the distortion of the bottom seen through the ripples: displacement of the bottom per meter of water crossed by the view ray (up to 4 meters) and unit of slope of the ripples. [code]0.25[/code] is close to real water seen from above, higher values exaggerate the distortion. A flat surface doesn't distort the bottom, and the distortion shrinks with distance like the rest of the scene.
 		</member>
 		<member name="roughness" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.03">
 			Roughness of the surface.
@@ -102,7 +103,25 @@
 			Depth of water below which the shore foam appears.
 		</member>
 		<member name="specular" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.5">
-			Strength of the specular reflections.
+			Strength of the specular reflections (the reflectance of the surface, as in [member BaseMaterial3D.metallic_specular]). It also sets how much light the surface reflects instead of letting it through at grazing angles.
+		</member>
+		<member name="ssr_edge_fade" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.1">
+			Fraction of the screen over which the screen space reflections fade out near its edges, where the reflected objects leave the screen.
+		</member>
+		<member name="ssr_enabled" type="bool" setter="_set_parameter_bool" getter="_get_parameter_bool" default="true">
+			If [code]true[/code], the terrain and objects around the water are reflected by marching the reflected rays on the screen. Where a ray leaves the screen or hits nothing, the reflections of the sky and of the reflection probes remain.
+		</member>
+		<member name="ssr_max_distance" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="400.0">
+			Length of the reflected rays. The reflections fade out over the last quarter of it.
+		</member>
+		<member name="ssr_max_steps" type="int" setter="_set_parameter_int" getter="_get_parameter_int" default="32">
+			Number of steps of the reflected rays (evenly spaced on the screen, then refined). Higher values find thinner objects, at a higher cost.
+		</member>
+		<member name="ssr_strength" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="1.0">
+			Weight of the screen space reflections over the reflections of the sky and of the reflection probes.
+		</member>
+		<member name="ssr_thickness" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="2.0">
+			Depth assumed behind the surfaces seen on the screen: a reflected ray passing further behind one (e.g. behind a pole in the foreground) goes on instead of hitting it.
 		</member>
 		<member name="tiling_variation" type="float" setter="_set_parameter_float" getter="_get_parameter_float" default="0.4">
 			Distorts the ripples at a large scale so that the repetition of the tiling normal map isn't obvious. [code]0[/code] disables it.

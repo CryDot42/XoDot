@@ -127,8 +127,8 @@ public:
 };
 
 // Built-in material of rivers, streams and lakes: ripples that follow the per-vertex flow velocity
-// (flow mapping with two crossfaded phases), light absorption with depth, refraction, shore and
-// rapids foam, soft intersection with the ground and an optional swell.
+// (flow mapping with two crossfaded phases), light absorption with depth, refraction, screen space
+// reflections, shore and rapids foam, soft intersection with the ground and an optional swell.
 class LandscapeWaterMaterial : public LandscapeSplineMaterial {
 	GDCLASS(LandscapeWaterMaterial, LandscapeSplineMaterial);
 	LANDSCAPE_SPLINE_MATERIAL_PARAMETER_ACCESSORS(LandscapeWaterMaterial)
