@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LandscapeFoliageType" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		A kind of foliage painted on a [Landscape3D] by [LandscapeFoliage3D].
+	</brief_description>
+	<description>
+		A foliage type, similar to foliage types in Unreal Engine: the meshes of its levels of detail and its cull distance, how densely instances are painted, how they are scaled, rotated and aligned to the ground, and where they may grow (slope, height, landscape layers).
+		The levels of detail are stored as [member lod_count] and [code]lod_&lt;n&gt;/mesh[/code], [code]lod_&lt;n&gt;/start_distance[/code] and [code]lod_&lt;n&gt;/cast_shadows[/code] properties. In the editor, they are edited in a separate window opened by the [b]Edit...[/b] button of the [b]LODs[/b] row of the inspector (or [b]LODs...[/b] in the Foliage tab of the Landscape dock), so that they don't clutter the inspector.
+		Foliage types are resources: save them to files to share them between scenes and landscapes.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="add_lod">
+			<return type="void" />
+			<param index="0" name="mesh" type="Mesh" />
+			<param index="1" name="start_distance" type="float" />
+			<param index="2" name="cast_shadows" type="bool" default="true" />
+			<description>
+				Adds a level of detail used from [param start_distance] (at most [constant MAX_LODS]). An empty [param mesh] draws the mesh of the previous level.
+			</description>
+		</method>
+		<method name="get_lod_effective_mesh" qualifiers="const">
+			<return type="Mesh" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the mesh drawn at the level [param index]: its mesh, or the mesh of the closest previous level with one.
+			</description>
+		</method>
+		<method name="get_lod_end_distance" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the distance at which the level [param index] ends: the start of the next level, or [member cull_distance] for the last one ([code]0[/code]: never).
+			</description>
+		</method>
+		<method name="get_lod_mesh" qualifiers="const">
+			<return type="Mesh" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the mesh of the level [param index] ([member mesh] for the first level). May be empty for the next levels, see [method get_lod_effective_mesh].
+			</description>
+		</method>
+		<method name="get_lod_start_distance" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the distance from which the level [param index] is used ([code]0[/code] for the first level).
+			</description>
+		</method>
+		<method name="get_mesh_bounds" qualifiers="const">
+			<return type="AABB" />
+			<description>
+				Returns the local bounds of the meshes of all the levels of detail.
+			</description>
+		</method>
+		<method name="is_lod_casting_shadows" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns [code]true[/code] if the level [param index] casts shadows.
+			</description>
+		</method>
+		<method name="remove_lod">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Removes the level of detail [param index]. The first level can't be removed.
+			</description>
+		</method>
+		<method name="set_lod_cast_shadows">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="enable" type="bool" />
+			<description>
+				Sets whether the level [param index] casts shadows (e.g. no shadows for the distant levels).
+			</description>
+		</method>
+		<method name="set_lod_mesh">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="mesh" type="Mesh" />
+			<description>
+				Sets the mesh of the level [param index]. An empty mesh draws the mesh of the previous level.
+			</description>
+		</method>
+		<method name="set_lod_start_distance">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="distance" type="float" />
+			<description>
+				Sets the distance from which the level [param index] is used. The first level always starts at the camera. Levels are used in order: a level starting before the previous one starts with it.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="align_max_angle" type="float" setter="set_align_max_angle" getter="get_align_max_angle" default="0.5235988">
+			Maximum angle between the up vector of the instances and the vertical when [member align_to_normal] is enabled. On steeper ground, instances are only partially aligned.
+		</member>
+		<member name="align_to_normal" type="bool" setter="set_align_to_normal" getter="is_aligned_to_normal" default="true">
+			If [code]true[/code], instances are aligned to the ground normal (up to [member align_max_angle]). When the terrain changes, aligned instances are rotated by the change of the normal.
+		</member>
+		<member name="cull_distance" type="float" setter="set_cull_distance" getter="get_cull_distance" default="0.0">
+			Distance from the camera beyond which instances aren't drawn. [code]0[/code] means never culled. Cells of [LandscapeFoliage3D] beyond this distance don't use any rendering resources.
+			[b]Note:[/b] Edited in the LOD window of the editor.
+		</member>
+		<member name="cull_random" type="float" setter="set_cull_random" getter="get_cull_random" default="0.0">
+			Fraction of [member cull_distance] over which instances disappear gradually: each instance is culled at its own distance between [code]cull_distance * (1 - cull_random)[/code] and [member cull_distance], which thins the foliage out with distance instead of a sharp boundary.
+			[b]Note:[/b] Edited in the LOD window of the editor.
+		</member>
+		<member name="density" type="float" setter="set_density" getter="get_density" default="10.0">
+			Number of instances per 100 m² (10 x 10 m, like "density per 1000 uu²" in Unreal Engine) that painting reaches where the filters allow the type.
+		</member>
+		<member name="exclude_layers" type="int" setter="set_exclude_layers" getter="get_exclude_layers" default="0">
+			Landscape layers (bit [code]i[/code] for layer [code]i[/code]) the type doesn't grow on: instances aren't placed where the total weight of these layers is at least [member layer_min_weight].
+		</member>
+		<member name="height_max" type="float" setter="set_height_max" getter="get_height_max" default="100000.0">
+			Maximum global height of the ground where the type grows.
+		</member>
+		<member name="height_min" type="float" setter="set_height_min" getter="get_height_min" default="-100000.0">
+			Minimum global height of the ground where the type grows.
+		</member>
+		<member name="layer_min_weight" type="float" setter="set_layer_min_weight" getter="get_layer_min_weight" default="0.5">
+			Minimum weight of [member layers] (and of [member exclude_layers] to exclude a position).
+		</member>
+		<member name="layers" type="int" setter="set_layers" getter="get_layers" default="0">
+			Landscape layers (bit [code]i[/code] for layer [code]i[/code]) the type grows on: instances are only placed where the total weight of these layers is at least [member layer_min_weight]. [code]0[/code] means any layer.
+		</member>
+		<member name="lod_count" type="int" setter="set_lod_count" getter="get_lod_count" default="1">
+			Number of levels of detail (at most [constant MAX_LODS]). The first level uses [member mesh], the next ones the mesh set with [method set_lod_mesh] (or the mesh of the previous level when empty) from their start distance.
+		</member>
+		<member name="lod_transition" type="float" setter="set_lod_transition" getter="get_lod_transition" default="2.0">
+			Hysteresis of the level changes, in meters: an instance switches to another level this far beyond the boundary, so that it doesn't flicker when the camera moves around a boundary.
+			[b]Note:[/b] Edited in the LOD window of the editor.
+		</member>
+		<member name="material_override" type="Material" setter="set_material_override" getter="get_material_override">
+			Material used by all levels of detail instead of the materials of the meshes.
+		</member>
+		<member name="mesh" type="Mesh" setter="set_mesh" getter="get_mesh">
+			Mesh of the first level of detail.
+		</member>
+		<member name="offset_max" type="float" setter="set_offset_max" getter="get_offset_max" default="0.0">
+			Maximum vertical offset of the instances from the ground (e.g. negative to sink rocks or trunks into the ground).
+		</member>
+		<member name="offset_min" type="float" setter="set_offset_min" getter="get_offset_min" default="0.0">
+			Minimum vertical offset of the instances from the ground.
+		</member>
+		<member name="radius" type="float" setter="set_radius" getter="get_radius" default="0.0">
+			Minimum distance between two instances of this type. [code]0[/code] disables the check.
+		</member>
+		<member name="random_pitch" type="float" setter="set_random_pitch" getter="get_random_pitch" default="0.0">
+			Maximum random tilt of the instances, in a random direction.
+		</member>
+		<member name="random_yaw" type="bool" setter="set_random_yaw" getter="has_random_yaw" default="true">
+			If [code]true[/code], instances are rotated randomly around their up vector.
+		</member>
+		<member name="scale_max" type="float" setter="set_scale_max" getter="get_scale_max" default="1.0">
+			Maximum random scale (horizontal scale with [constant SCALING_LOCK_HORIZONTAL] and [constant SCALING_FREE]).
+		</member>
+		<member name="scale_min" type="float" setter="set_scale_min" getter="get_scale_min" default="1.0">
+			Minimum random scale (horizontal scale with [constant SCALING_LOCK_HORIZONTAL] and [constant SCALING_FREE]).
+		</member>
+		<member name="scaling" type="int" setter="set_scaling" getter="get_scaling" enum="LandscapeFoliageType.Scaling" default="0">
+			How the random scale of the instances is chosen.
+		</member>
+		<member name="slope_max" type="float" setter="set_slope_max" getter="get_slope_max" default="1.5707964">
+			Maximum slope of the ground where the type grows.
+		</member>
+		<member name="slope_min" type="float" setter="set_slope_min" getter="get_slope_min" default="0.0">
+			Minimum slope of the ground where the type grows.
+		</member>
+		<member name="vertical_scale_max" type="float" setter="set_vertical_scale_max" getter="get_vertical_scale_max" default="1.0">
+			Maximum random vertical scale, with [constant SCALING_FREE] and [constant SCALING_LOCK_HORIZONTAL].
+		</member>
+		<member name="vertical_scale_min" type="float" setter="set_vertical_scale_min" getter="get_vertical_scale_min" default="1.0">
+			Minimum random vertical scale, with [constant SCALING_FREE] and [constant SCALING_LOCK_HORIZONTAL].
+		</member>
+	</members>
+	<constants>
+		<constant name="SCALING_UNIFORM" value="0" enum="Scaling">
+			The same random scale on all axes, between [member scale_min] and [member scale_max].
+		</constant>
+		<constant name="SCALING_FREE" value="1" enum="Scaling">
+			Independent random scales: X and Z between [member scale_min] and [member scale_max], Y between [member vertical_scale_min] and [member vertical_scale_max].
+		</constant>
+		<constant name="SCALING_LOCK_HORIZONTAL" value="2" enum="Scaling">
+			One random scale for X and Z (between [member scale_min] and [member scale_max]) and an independent one for Y (between [member vertical_scale_min] and [member vertical_scale_max]).
+		</constant>
+		<constant name="MAX_LODS" value="8">
+			Maximum number of levels of detail.
+		</constant>
+	</constants>
+</class>

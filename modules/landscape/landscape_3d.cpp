@@ -30,6 +30,7 @@
 
 #include "landscape_3d.h"
 
+#include "landscape_foliage_3d.h"
 #include "landscape_shader.h"
 #include "landscape_spline_3d.h"
 
@@ -328,6 +329,9 @@ void Landscape3D::set_data(const Ref<LandscapeData> &p_data) {
 }
 
 void Landscape3D::_data_region_changed(const Rect2i &p_rect, int p_flags) {
+	for (LandscapeFoliage3D *foliage : foliages) {
+		foliage->_terrain_region_changed(p_rect, p_flags);
+	}
 	if (full_update_pending) {
 		return;
 	}
@@ -1102,6 +1106,26 @@ TypedArray<LandscapeSpline3D> Landscape3D::_get_splines_bind() const {
 	return result;
 }
 
+/* Foliage */
+
+void Landscape3D::_register_foliage(LandscapeFoliage3D *p_foliage) {
+	if (!foliages.has(p_foliage)) {
+		foliages.push_back(p_foliage);
+	}
+}
+
+void Landscape3D::_unregister_foliage(LandscapeFoliage3D *p_foliage) {
+	foliages.erase(p_foliage);
+}
+
+TypedArray<LandscapeFoliage3D> Landscape3D::_get_foliages_bind() const {
+	TypedArray<LandscapeFoliage3D> result;
+	for (LandscapeFoliage3D *foliage : foliages) {
+		result.push_back(foliage);
+	}
+	return result;
+}
+
 bool Landscape3D::get_view_position(Vector3 &r_global) const {
 	Camera3D *camera = _get_lod_camera();
 	if (!camera || !camera->is_inside_tree()) {
@@ -1770,6 +1794,7 @@ void Landscape3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_splines"), &Landscape3D::_get_splines_bind);
 	ClassDB::bind_method(D_METHOD("update_splines"), &Landscape3D::update_splines);
 	ClassDB::bind_method(D_METHOD("rebuild_splines"), &Landscape3D::rebuild_splines);
+	ClassDB::bind_method(D_METHOD("get_foliages"), &Landscape3D::_get_foliages_bind);
 
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "data", PROPERTY_HINT_RESOURCE_TYPE, LandscapeData::get_class_static()), "set_data", "get_data");
 
