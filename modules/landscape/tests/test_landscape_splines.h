@@ -670,6 +670,11 @@ TEST_CASE("[Landscape][Splines] Built-in materials") {
 		found = found || property.name == "shore_foam";
 	}
 	CHECK(found);
+	// Screen space reflections, traced by the material itself (the water is transparent).
+	CHECK(bool(water->get("ssr_enabled")));
+	CHECK(water->get("ssr_max_steps").get_type() == Variant::INT);
+	water->set("ssr_max_steps", 48.0);
+	CHECK(int(water->get("ssr_max_steps")) == 48);
 
 	Ref<LandscapeRoadMaterial> road;
 	road.instantiate();
@@ -692,6 +697,16 @@ TEST_CASE("[Landscape][Splines] Built-in materials") {
 			has_roughness = has_roughness || parameter.name == "roughness";
 		}
 		CHECK(has_roughness);
+	}
+	// Every parameter of the water material is a uniform of its shader.
+	List<PropertyInfo> water_uniforms;
+	RenderingServer::get_singleton()->get_shader_parameter_list(water->get_shader_rid(), &water_uniforms);
+	for (int i = 0; i < water->get_parameter_count(); i++) {
+		bool uniform_found = false;
+		for (const PropertyInfo &uniform : water_uniforms) {
+			uniform_found = uniform_found || uniform.name == water->get_parameter_name(i);
+		}
+		CHECK_MESSAGE(uniform_found, water->get_parameter_name(i));
 	}
 }
 

@@ -317,6 +317,12 @@ enum {
 	WATER_ROUGHNESS,
 	WATER_SPECULAR,
 	WATER_REFRACTION,
+	WATER_SSR_ENABLED,
+	WATER_SSR_STRENGTH,
+	WATER_SSR_MAX_STEPS,
+	WATER_SSR_MAX_DISTANCE,
+	WATER_SSR_THICKNESS,
+	WATER_SSR_EDGE_FADE,
 	WATER_NORMAL_TEXTURE,
 	WATER_NORMAL_SCALE,
 	WATER_NORMAL_STRENGTH,
@@ -347,7 +353,13 @@ static const LandscapeSplineMaterial::ParameterInfo water_parameters[WATER_MAX] 
 	{ "clarity", Variant::FLOAT, PROPERTY_HINT_RANGE, "0.05,64,0.01,or_greater,suffix:m", "Water" },
 	{ "roughness", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,1,0.01", "Water" },
 	{ "specular", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,1,0.01", "Water" },
-	{ "refraction", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,0.2,0.001", "Water" },
+	{ "refraction", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,1,0.01,or_greater", "Water" },
+	{ "ssr_enabled", Variant::BOOL, PROPERTY_HINT_NONE, "", "Reflections" },
+	{ "ssr_strength", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,1,0.01", "Reflections" },
+	{ "ssr_max_steps", Variant::INT, PROPERTY_HINT_RANGE, "4,128,1", "Reflections" },
+	{ "ssr_max_distance", Variant::FLOAT, PROPERTY_HINT_RANGE, "1,2000,0.1,or_greater,suffix:m", "Reflections" },
+	{ "ssr_thickness", Variant::FLOAT, PROPERTY_HINT_RANGE, "0.01,32,0.01,or_greater,suffix:m", "Reflections" },
+	{ "ssr_edge_fade", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,0.5,0.01", "Reflections" },
 	{ "normal_texture", Variant::OBJECT, PROPERTY_HINT_RESOURCE_TYPE, "Texture2D", "Ripples" },
 	{ "normal_scale", Variant::FLOAT, PROPERTY_HINT_RANGE, "0.1,64,0.01,or_greater,suffix:m", "Ripples" },
 	{ "normal_strength", Variant::FLOAT, PROPERTY_HINT_RANGE, "0,2,0.01", "Ripples" },
@@ -392,7 +404,19 @@ Variant LandscapeWaterMaterial::_get_parameter_default(int p_index) const {
 		case WATER_SPECULAR:
 			return 0.5;
 		case WATER_REFRACTION:
-			return 0.04;
+			return 0.25;
+		case WATER_SSR_ENABLED:
+			return true;
+		case WATER_SSR_STRENGTH:
+			return 1.0;
+		case WATER_SSR_MAX_STEPS:
+			return 32;
+		case WATER_SSR_MAX_DISTANCE:
+			return 400.0;
+		case WATER_SSR_THICKNESS:
+			return 2.0;
+		case WATER_SSR_EDGE_FADE:
+			return 0.1;
 		case WATER_NORMAL_SCALE:
 			return 5.0;
 		case WATER_NORMAL_STRENGTH:
@@ -503,7 +527,13 @@ uniform vec4 deep_color : source_color = vec4(0.04, 0.17, 0.22, 1.0);
 uniform float clarity : hint_range(0.05, 64.0) = 3.0; // Distance (m) over which the light is mostly absorbed.
 uniform float roughness : hint_range(0.0, 1.0) = 0.03;
 uniform float specular : hint_range(0.0, 1.0) = 0.5;
-uniform float refraction : hint_range(0.0, 0.2) = 0.04;
+uniform float refraction : hint_range(0.0, 1.0) = 0.25; // Displacement of the bottom seen through the ripples, per meter of water crossed and unit of slope.
+uniform bool ssr_enabled = true;
+uniform float ssr_strength : hint_range(0.0, 1.0) = 1.0;
+uniform int ssr_max_steps : hint_range(4, 128) = 32;
+uniform float ssr_max_distance = 400.0; // Length (m) of the reflected rays.
+uniform float ssr_thickness = 2.0; // Depth (m) assumed behind the surfaces on the screen: a ray passing further behind one goes on.
+uniform float ssr_edge_fade : hint_range(0.0, 0.5) = 0.1; // Fade of the reflections near the edges of the screen.
 uniform sampler2D normal_texture : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform float normal_scale = 5.0; // Size (m) of the ripple pattern.
 uniform float normal_strength : hint_range(0.0, 2.0) = 0.5;
@@ -548,14 +578,96 @@ void vertex() {
 	}
 }
 
-float ls_view_depth(vec2 p_uv, mat4 p_inv_projection) {
+// View space position of the opaque scene (without the water) at a point of the screen.
+vec3 ls_view_position(vec2 p_uv, mat4 p_inv_projection) {
 	float depth = textureLod(ls_depth, p_uv, 0.0).r;
 #if CURRENT_RENDERER == RENDERER_COMPATIBILITY
 	vec4 view = p_inv_projection * vec4(vec3(p_uv, depth) * 2.0 - 1.0, 1.0);
 #else
 	vec4 view = p_inv_projection * vec4(p_uv * 2.0 - 1.0, depth, 1.0);
 #endif
-	return -view.z / view.w;
+	return view.xyz / view.w;
+}
+
+float ls_view_depth(vec2 p_uv, mat4 p_inv_projection) {
+	return -ls_view_position(p_uv, p_inv_projection).z;
+}
+
+// Screen UV of a view space position (the inverse of ls_view_position(), with any renderer).
+vec2 ls_project(vec3 p_view, mat4 p_projection) {
+	vec4 clip = p_projection * vec4(p_view, 1.0);
+	return clip.xy / clip.w * 0.5 + 0.5;
+}
+
+// Screen space reflection. The water is transparent, so the screen space reflections of the
+// environment (made from the buffers of the opaque pass) don't apply to it: the reflected ray is
+// marched here against the depth of the opaque scene, which doesn't contain the water itself. The
+// steps are evenly spaced on the screen, with a perspective-correct depth along the ray. Returns the
+// reflected color and, in alpha, its weight: 0 where the ray leaves the screen or hits nothing, so that
+// the reflections of the sky and of the reflection probes remain there.
+vec4 ls_screen_space_reflection(vec3 p_origin, vec3 p_direction, float p_lod, float p_jitter, mat4 p_projection, mat4 p_inv_projection) {
+	float ray_length = ssr_max_distance;
+	if (p_direction.z > 1e-5) {
+		// Towards the camera: the ray ends in front of it.
+		ray_length = min(ray_length, (-p_origin.z - 0.01) / p_direction.z);
+	}
+	if (ray_length <= 0.0) {
+		return vec4(0.0);
+	}
+	vec3 end = p_origin + p_direction * ray_length;
+	vec4 h0 = p_projection * vec4(p_origin, 1.0);
+	vec4 h1 = p_projection * vec4(end, 1.0);
+	// 1/w and z/w vary linearly on the screen, unlike the depth.
+	vec2 k = vec2(1.0 / h0.w, 1.0 / h1.w);
+	vec2 q = vec2(p_origin.z, end.z) * k;
+	vec2 uv0 = h0.xy * k.x * 0.5 + 0.5;
+	vec2 uv1 = h1.xy * k.y * 0.5 + 0.5;
+	// Clipped to the screen: no steps are wasted outside of it.
+	vec2 delta = uv1 - uv0;
+	float clip = 1.0;
+	if (abs(delta.x) > 1e-6) {
+		clip = min(clip, ((delta.x > 0.0 ? 1.0 : 0.0) - uv0.x) / delta.x);
+	}
+	if (abs(delta.y) > 1e-6) {
+		clip = min(clip, ((delta.y > 0.0 ? 1.0 : 0.0) - uv0.y) / delta.y);
+	}
+	uv1 = uv0 + delta * clip;
+	k.y = mix(k.x, k.y, clip);
+	q.y = mix(q.x, q.y, clip);
+
+	float steps = float(max(ssr_max_steps, 1));
+	float previous = 0.0;
+	float previous_depth = -p_origin.z;
+	for (int i = 0; i < ssr_max_steps; i++) {
+		float t = (float(i) + p_jitter) / steps;
+		vec2 uv = mix(uv0, uv1, t);
+		float depth = -mix(q.x, q.y, t) / mix(k.x, k.y, t);
+		float behind = depth - ls_view_depth(uv, p_inv_projection);
+		// A ray going further behind a surface than it moved in depth over the step, and than the assumed
+		// thickness, passed behind it (e.g. behind a pole in the foreground) instead of hitting it.
+		if (behind > 0.0 && behind < max(ssr_thickness, abs(depth - previous_depth) * 2.0)) {
+			// Refine the hit between the previous step and this one.
+			float lo = previous;
+			float hi = t;
+			for (int j = 0; j < 5; j++) {
+				float mid = (lo + hi) * 0.5;
+				float mid_depth = -mix(q.x, q.y, mid) / mix(k.x, k.y, mid);
+				if (mid_depth > ls_view_depth(mix(uv0, uv1, mid), p_inv_projection)) {
+					hi = mid;
+				} else {
+					lo = mid;
+				}
+			}
+			vec2 hit_uv = mix(uv0, uv1, hi);
+			vec2 edges = smoothstep(vec2(0.0), vec2(max(ssr_edge_fade, 1e-4)), min(hit_uv, 1.0 - hit_uv));
+			float hit_distance = length(ls_view_position(hit_uv, p_inv_projection) - p_origin);
+			float fade = edges.x * edges.y * (1.0 - smoothstep(0.75, 1.0, hit_distance / max(ssr_max_distance, 0.01)));
+			return vec4(textureLod(ls_screen, hit_uv, p_lod).rgb, fade);
+		}
+		previous = t;
+		previous_depth = depth;
+	}
+	return vec4(0.0);
 }
 
 // Flow mapping: two phases half a cycle apart, crossfaded. The pattern follows the local flow
@@ -600,26 +712,44 @@ void fragment() {
 	float surface = -VERTEX.z;
 	float ground = ls_view_depth(SCREEN_UV, INV_PROJECTION_MATRIX);
 	float thickness = max(ground - surface, 0.0);
-	// The distortion is applied in pixels, not UV fractions: otherwise it would stretch unevenly
-	// between the horizontal and vertical axes on a non-square viewport.
-	float aspect = VIEWPORT_SIZE.y / max(VIEWPORT_SIZE.x, 1.0);
-	vec2 refracted_uv = SCREEN_UV + normal.xy * vec2(aspect, 1.0) * refraction * clamp(thickness, 0.0, 1.0);
-	float refracted_ground = ls_view_depth(refracted_uv, INV_PROJECTION_MATRIX);
-	// Fade back to the unrefracted sample where it would otherwise grab a point closer to the
-	// camera than the water itself (an object poking through, not the bottom seen through it): a
-	// smooth blend avoids the stain-like seam a hard cutoff leaves wherever the bottom is uneven.
-	float refraction_valid = smoothstep(-0.2, 0.05, refracted_ground - surface);
-	refracted_uv = mix(SCREEN_UV, refracted_uv, refraction_valid);
-	refracted_ground = mix(ground, refracted_ground, refraction_valid);
 	// Distance travelled by the light in the water (along the view ray).
-	float path = max(refracted_ground - surface, 0.0) * length(VERTEX) / max(surface, 1e-4);
+	float path = thickness * length(VERTEX) / max(surface, 1e-4);
+
+	// Refraction: only the ripples bend the view ray, so the offset comes from their slope relative
+	// to the surface. (The surface itself faces up, not the camera: the xy of its view space normal
+	// would shift the whole image of the bottom towards the camera, grabbing points that are nowhere
+	// near the one below the water.) The bottom is displaced in meters, proportionally to the water
+	// crossed, so the distortion shrinks with distance like the geometry instead of staying the same
+	// number of pixels. Deep bottoms are mostly absorbed, and would be sampled too far away.
+	vec3 slope = normal - NORMAL;
+	float crossed = min(path, 4.0);
+	vec3 bottom = VERTEX + normalize(VERTEX) * crossed;
+	vec2 refraction_offset = ls_project(bottom + vec3(slope.xy * refraction * crossed, 0.0), PROJECTION_MATRIX) - ls_project(bottom, PROJECTION_MATRIX);
+	refraction_offset *= min(1.0, 0.05 / max(length(refraction_offset), 1e-6));
+	vec2 refracted_uv = SCREEN_UV + refraction_offset;
+	// Distance travelled in the water towards the refracted sample: from the plane of the surface to
+	// the sampled point, along the ray of the sampled pixel (not the depth of this fragment, whose
+	// bottom may be far away from it). Negative when the sample is above the water, e.g. the shore or
+	// an object crossing the surface, which the refracted image would show through the water: the
+	// unrefracted sample is kept there.
+	vec3 refracted_point = ls_view_position(refracted_uv, INV_PROJECTION_MATRIX);
+	float refracted_distance = length(refracted_point);
+	float refracted_cos = dot(refracted_point / max(refracted_distance, 1e-4), NORMAL);
+	float refracted_path = refracted_distance - dot(VERTEX, NORMAL) / min(refracted_cos, -1e-4);
+	float refraction_valid = smoothstep(0.0, 0.1, refracted_path);
+	refracted_uv = mix(SCREEN_UV, refracted_uv, refraction_valid);
+	path = mix(path, max(refracted_path, 0.0), refraction_valid);
+
 	float transmittance = exp(-path / max(clarity, 0.01));
 	vec3 background = textureLod(ls_screen, refracted_uv, 0.0).rgb;
 	vec3 transmitted = background * mix(shallow_color.rgb, vec3(1.0), transmittance);
 	vec3 scattered = mix(shallow_color.rgb, deep_color.rgb, 1.0 - exp(-path / max(clarity * 3.0, 0.01)));
 
-	// Less light comes through the surface at grazing angles (the rest is reflected).
-	float fresnel = 0.02 + 0.98 * pow(1.0 - clamp(dot(normal, VIEW), 0.0, 1.0), 5.0);
+	// Less light comes through the surface at grazing angles (the rest is reflected). Same fresnel
+	// as the reflections of the renderer (reflectance from the specular amount), so that the screen
+	// space reflections blend with them.
+	float reflectance = 0.16 * specular * specular;
+	float fresnel = reflectance + (clamp(50.0 * reflectance, 0.0, 1.0) - reflectance) * pow(1.0 - clamp(dot(normal, VIEW), 0.0, 1.0), 5.0);
 
 	// Soft intersection with the ground, avoiding a hard edge where the water meets the shore.
 	float edge_alpha = smoothstep(0.0, max(edge_fade, 0.001), thickness);
@@ -637,13 +767,29 @@ void fragment() {
 	// exactly at its edge.
 	float foam = smoothstep(threshold, threshold + 0.15, foam_noise) * smoothstep(0.0, 0.15, amount) * edge_alpha;
 
-	ALBEDO = mix(scattered * (1.0 - transmittance) * (1.0 - fresnel), foam_color.rgb, foam);
-	EMISSION = transmitted * transmittance * (1.0 - fresnel) * (1.0 - foam);
 	// Steeper ripples broaden the specular highlight (microfacet roughness), instead of a single
 	// flat value that keeps the reflection needle-sharp and invisible outside the exact mirror angle.
 	float ripple_amount = clamp(length(ts.xy) * 1.8, 0.0, 1.0);
-	ROUGHNESS = mix(mix(roughness, max(roughness, 0.18), ripple_amount), 0.65, foam);
-	SPECULAR = specular;
+	float surface_roughness = mix(mix(roughness, max(roughness, 0.18), ripple_amount), 0.65, foam);
+
+	// Screen space reflections of the terrain and objects around the water.
+	vec4 reflection = vec4(0.0);
+	if (ssr_enabled && ssr_strength > 0.0) {
+		vec3 reflected = reflect(-VIEW, normal);
+		// Ripples steep enough to send the reflected ray into the water: keep it above the surface.
+		reflected = normalize(reflected + NORMAL * max(0.02 - dot(reflected, NORMAL), 0.0));
+		// Interleaved gradient noise: offsets the steps between pixels, hiding their banding.
+		float jitter = fract(52.9829189 * fract(dot(FRAGCOORD.xy, vec2(0.06711056, 0.00583715))));
+		reflection = ls_screen_space_reflection(VERTEX, reflected, surface_roughness * 6.0, jitter, PROJECTION_MATRIX, INV_PROJECTION_MATRIX);
+		reflection.a *= ssr_strength * (1.0 - foam);
+	}
+
+	ALBEDO = mix(scattered * (1.0 - transmittance) * (1.0 - fresnel), foam_color.rgb, foam);
+	EMISSION = transmitted * transmittance * (1.0 - fresnel) * (1.0 - foam) + reflection.rgb * fresnel * reflection.a;
+	ROUGHNESS = surface_roughness;
+	// The reflections of the renderer (sky, reflection probes, specular highlights of the lights) are
+	// replaced where the screen space reflections hit something: that object hides them.
+	SPECULAR = specular * (1.0 - reflection.a);
 	METALLIC = 0.0;
 	NORMAL = normalize(mix(normal, NORMAL, foam * 0.7));
 	ALPHA = edge_alpha * v_fade;
