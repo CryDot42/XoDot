@@ -261,7 +261,7 @@ void LandscapeLayer::_bind_methods() {
 
 	ADD_GROUP("Mapping", "");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "tile_size", PROPERTY_HINT_RANGE, "0.01,1000,0.01,or_greater,suffix:m"), "set_tile_size", "get_tile_size");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "uv_rotation", PROPERTY_HINT_RANGE, "-180,180,0.1,radians_as_degrees,suffix:°"), "set_uv_rotation", "get_uv_rotation");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "uv_rotation", PROPERTY_HINT_RANGE, "-180,180,0.1,radians_as_degrees"), "set_uv_rotation", "get_uv_rotation");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "triplanar"), "set_triplanar", "is_triplanar");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "triplanar_sharpness", PROPERTY_HINT_RANGE, "1,16,0.1"), "set_triplanar_sharpness", "get_triplanar_sharpness");
 

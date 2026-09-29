@@ -230,14 +230,14 @@ var path := $Road.sample_transform($Road.get_length() * t) # машина еде
 
 | Группа | Настройки |
 |---|---|
-| Меш | `mesh` (LOD 0), `material_override`, строка **LODs** с кнопкой **Edit LODs...** |
+| Меш | `mesh` (LOD 0), `material_override`, строка **LODs** с кнопкой **Edit...** |
 | Painting | `density` — инстансов на 100 м² (10 × 10 м, как «на 1000 uu²» в UE), `radius` — минимальное расстояние между инстансами типа |
 | Scale | `scaling` (Uniform / Free / Lock Horizontal), `scale_min/max`, `vertical_scale_min/max` |
 | Placement | `offset_min/max` (по вертикали от земли), `align_to_normal` + `align_max_angle`, `random_yaw`, `random_pitch` |
 | Filters | `slope_min/max`, `height_min/max` (глобальная высота), `layers` / `exclude_layers` (слои ландшафта, компактная сетка 16 кнопок) и `layer_min_weight` |
 
 **Уровни детализации** не вложены в инспектор: строка **LODs** показывает сводку
-(«3 levels · culled at 300 m»), а кнопка открывает **отдельное окно LOD**:
+(«3 LODs · 300 m», подробности — во всплывающей подсказке), а кнопка **Edit...** открывает **отдельное окно LOD**:
 
 - линейка расстояний с цветными полосами уровней, границы (начала LOD и дальность отсечения)
   перетаскиваются мышью; более тёмные полосы — уровни без теней, серая — отсечено;

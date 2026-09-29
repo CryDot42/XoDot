@@ -5,7 +5,7 @@
 	</brief_description>
 	<description>
 		A foliage type, similar to foliage types in Unreal Engine: the meshes of its levels of detail and its cull distance, how densely instances are painted, how they are scaled, rotated and aligned to the ground, and where they may grow (slope, height, landscape layers).
-		The levels of detail are stored as [member lod_count] and [code]lod_&lt;n&gt;/mesh[/code], [code]lod_&lt;n&gt;/start_distance[/code] and [code]lod_&lt;n&gt;/cast_shadows[/code] properties. In the editor, they are edited in a separate window opened by the [b]Edit LODs...[/b] button of the inspector (or [b]LODs...[/b] in the Foliage tab of the Landscape dock), so that they don't clutter the inspector.
+		The levels of detail are stored as [member lod_count] and [code]lod_&lt;n&gt;/mesh[/code], [code]lod_&lt;n&gt;/start_distance[/code] and [code]lod_&lt;n&gt;/cast_shadows[/code] properties. In the editor, they are edited in a separate window opened by the [b]Edit...[/b] button of the [b]LODs[/b] row of the inspector (or [b]LODs...[/b] in the Foliage tab of the Landscape dock), so that they don't clutter the inspector.
 		Foliage types are resources: save them to files to share them between scenes and landscapes.
 	</description>
 	<tutorials>

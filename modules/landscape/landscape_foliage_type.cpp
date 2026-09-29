@@ -541,7 +541,7 @@ void LandscapeFoliageType::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "lod_transition", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m", PROPERTY_USAGE_NO_EDITOR), "set_lod_transition", "get_lod_transition");
 
 	ADD_GROUP("Painting", "");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "density", PROPERTY_HINT_RANGE, "0,1000,0.01,or_greater,suffix:/ 100 m²"), "set_density", "get_density");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "density", PROPERTY_HINT_RANGE, String::utf8("0,1000,0.01,or_greater,suffix:/ 100 m²")), "set_density", "get_density");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "radius", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m"), "set_radius", "get_radius");
 
 	ADD_GROUP("Scale", "");
@@ -555,13 +555,13 @@ void LandscapeFoliageType::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "offset_min", PROPERTY_HINT_RANGE, "-10,10,0.001,or_greater,or_less,suffix:m"), "set_offset_min", "get_offset_min");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "offset_max", PROPERTY_HINT_RANGE, "-10,10,0.001,or_greater,or_less,suffix:m"), "set_offset_max", "get_offset_max");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "align_to_normal"), "set_align_to_normal", "is_aligned_to_normal");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "align_max_angle", PROPERTY_HINT_RANGE, "0,90,0.1,radians_as_degrees,suffix:°"), "set_align_max_angle", "get_align_max_angle");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "align_max_angle", PROPERTY_HINT_RANGE, "0,90,0.1,radians_as_degrees"), "set_align_max_angle", "get_align_max_angle");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "random_yaw"), "set_random_yaw", "has_random_yaw");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "random_pitch", PROPERTY_HINT_RANGE, "0,90,0.1,radians_as_degrees,suffix:°"), "set_random_pitch", "get_random_pitch");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "random_pitch", PROPERTY_HINT_RANGE, "0,90,0.1,radians_as_degrees"), "set_random_pitch", "get_random_pitch");
 
 	ADD_GROUP("Filters", "");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "slope_min", PROPERTY_HINT_RANGE, "0,90,0.1,radians_as_degrees,suffix:°"), "set_slope_min", "get_slope_min");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "slope_max", PROPERTY_HINT_RANGE, "0,90,0.1,radians_as_degrees,suffix:°"), "set_slope_max", "get_slope_max");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "slope_min", PROPERTY_HINT_RANGE, "0,90,0.1,radians_as_degrees"), "set_slope_min", "get_slope_min");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "slope_max", PROPERTY_HINT_RANGE, "0,90,0.1,radians_as_degrees"), "set_slope_max", "get_slope_max");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "height_min", PROPERTY_HINT_RANGE, "-100000,100000,0.01,or_greater,or_less,suffix:m"), "set_height_min", "get_height_min");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "height_max", PROPERTY_HINT_RANGE, "-100000,100000,0.01,or_greater,or_less,suffix:m"), "set_height_max", "get_height_max");
 	// Shown as a compact grid of the 16 landscape layers by the editor.

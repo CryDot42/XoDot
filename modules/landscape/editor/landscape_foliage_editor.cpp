@@ -703,11 +703,16 @@ void EditorPropertyFoliageLods::update_property() {
 	if (!type->is_connected(CoreStringName(changed), callback)) {
 		type->connect(CoreStringName(changed), callback);
 	}
+	// Short enough for the width of the inspector, the details in the tooltip.
 	const int lods = type->get_lod_count();
-	const String levels = lods == 1 ? TTR("1 level") : vformat(TTR("%d levels"), lods);
-	const String cull = type->get_cull_distance() > 0.0 ? vformat(TTR("culled at %s"), _format_distance(type->get_cull_distance())) : TTR("never culled");
-	summary->set_text(levels + String::utf8(" · ") + cull);
-	summary->set_tooltip_text(summary->get_text());
+	const float cull = type->get_cull_distance();
+	summary->set_text(vformat(lods == 1 ? TTR("%d LOD") : TTR("%d LODs"), lods) + String::utf8(" · ") + (cull > 0.0 ? _format_distance(cull) : String::utf8("∞")));
+	String tooltip = lods == 1 ? TTR("1 level of detail") : vformat(TTR("%d levels of detail"), lods);
+	for (int i = 1; i < lods; i++) {
+		tooltip += "\n" + vformat(TTR("LOD %d from %s"), i, _format_distance(type->get_lod_start_distance(i)));
+	}
+	tooltip += "\n" + (cull > 0.0 ? vformat(TTR("Culled at %s"), _format_distance(cull)) : TTR("Never culled"));
+	summary->set_tooltip_text(tooltip);
 }
 
 EditorPropertyFoliageLods::EditorPropertyFoliageLods() {
@@ -718,7 +723,7 @@ EditorPropertyFoliageLods::EditorPropertyFoliageLods() {
 	summary->set_clip_text(true);
 	summary->set_mouse_filter(MOUSE_FILTER_PASS);
 	hb->add_child(summary);
-	edit_button = memnew(Button(TTR("Edit LODs...")));
+	edit_button = memnew(Button(TTR("Edit...")));
 	edit_button->set_tooltip_text(TTR("Open the levels of detail and the cull distance in a separate window."));
 	edit_button->connect(SceneStringName(pressed), callable_mp(this, &EditorPropertyFoliageLods::_edit_pressed));
 	hb->add_child(edit_button);
@@ -1522,8 +1527,6 @@ void LandscapeFoliagePanel::_notification(int p_what) {
 			}
 			add_type->set_button_icon(get_editor_theme_icon(SNAME("Add")));
 			remove_type->set_button_icon(get_editor_theme_icon(SNAME("Remove")));
-			edit_type->set_button_icon(get_editor_theme_icon(SNAME("Edit")));
-			edit_lods->set_button_icon(get_editor_theme_icon(SNAME("MeshInstance3D")));
 			palette_hash = 0;
 		} break;
 
@@ -1594,7 +1597,7 @@ LandscapeFoliagePanel::LandscapeFoliagePanel() {
 	remove_type->set_tooltip_text(TTR("Remove the selected foliage type and its instances."));
 	remove_type->connect(SceneStringName(pressed), callable_mp(this, &LandscapeFoliagePanel::_remove_type));
 	palette_hb->add_child(remove_type);
-	edit_type = memnew(Button);
+	edit_type = memnew(Button(TTR("Edit")));
 	edit_type->set_tooltip_text(TTR("Edit the selected foliage type in the inspector."));
 	edit_type->connect(SceneStringName(pressed), callable_mp(this, &LandscapeFoliagePanel::_edit_type));
 	palette_hb->add_child(edit_type);
@@ -1656,16 +1659,16 @@ LandscapeFoliagePanel::LandscapeFoliagePanel() {
 	GridContainer *brush = memnew(GridContainer);
 	brush->set_columns(2);
 	add_child(brush);
-	auto add_setting = [&](const String &p_label, Control *p_control, const String &p_tooltip) {
+	auto add_setting = [&](GridContainer *p_grid, const String &p_label, Control *p_control, const String &p_tooltip) {
 		Label *label = memnew(Label(p_label));
 		label->set_tooltip_text(p_tooltip);
 		label->set_mouse_filter(MOUSE_FILTER_PASS);
 		label->set_h_size_flags(SIZE_EXPAND_FILL);
 		label->set_stretch_ratio(0.8);
-		brush->add_child(label);
+		p_grid->add_child(label);
 		p_control->set_tooltip_text(p_tooltip);
 		p_control->set_h_size_flags(SIZE_EXPAND_FILL);
-		brush->add_child(p_control);
+		p_grid->add_child(p_control);
 	};
 	brush_size = memnew(SpinBox);
 	brush_size->set_min(0.1);
@@ -1676,7 +1679,7 @@ LandscapeFoliagePanel::LandscapeFoliagePanel() {
 	brush_size->set_value(8.0);
 	brush_size->set_select_all_on_focus(true);
 	brush_size->connect(SceneStringName(value_changed), callable_mp(this, &LandscapeFoliagePanel::_brush_size_changed));
-	add_setting(TTR("Brush Size"), brush_size, TTR("Brush radius. Shortcuts: [ and ]."));
+	add_setting(brush, TTR("Brush Size"), brush_size, TTR("Brush radius. Shortcuts: [ and ]."));
 	brush_size_slider = memnew(HSlider);
 	brush_size_slider->set_min(0.1);
 	brush_size_slider->set_max(512.0);
@@ -1685,18 +1688,21 @@ LandscapeFoliagePanel::LandscapeFoliagePanel() {
 	brush_size_slider->set_value(8.0);
 	brush_size_slider->connect(SceneStringName(value_changed), callable_mp(this, &LandscapeFoliagePanel::_brush_size_changed));
 	add_child(brush_size_slider);
+	GridContainer *densities = memnew(GridContainer);
+	densities->set_columns(2);
+	add_child(densities);
 	paint_density = memnew(SpinBox);
 	paint_density->set_max(1.0);
 	paint_density->set_step(0.01);
 	paint_density->set_value(0.5);
 	paint_density->set_select_all_on_focus(true);
-	add_setting(TTR("Paint Density"), paint_density, TTR("Fraction of the density of the types reached by painting."));
+	add_setting(densities, TTR("Paint Density"), paint_density, TTR("Fraction of the density of the types reached by painting."));
 	erase_density = memnew(SpinBox);
 	erase_density->set_max(1.0);
 	erase_density->set_step(0.01);
 	erase_density->set_value(0.0);
 	erase_density->set_select_all_on_focus(true);
-	add_setting(TTR("Erase Density"), erase_density, TTR("Fraction of the density of the types left by erasing (0 removes every instance in the brush)."));
+	add_setting(densities, TTR("Erase Density"), erase_density, TTR("Fraction of the density of the types left by erasing (0 removes every instance in the brush)."));
 
 	Label *help = memnew(Label(TTR("LMB: paint  |  Shift+LMB: erase  |  [ / ]: brush size\nInstances follow the terrain when it is sculpted.")));
 	help->set_modulate(Color(1, 1, 1, 0.6));
