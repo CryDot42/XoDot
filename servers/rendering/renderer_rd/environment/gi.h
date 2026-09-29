@@ -668,6 +668,10 @@ public:
 		Transform3D prev_cam_transform;
 		Projection prev_projection;
 
+		// How many more frames this view's GI takes to settle after the last change, and requests
+		// of its own when the engine only draws on changes (see GI::_request_settle_frames()).
+		uint32_t settle_frames_left = 0;
+
 		/* VoxelGI screen probes */
 		uint32_t screen_probe_frame = 0;
 		uint32_t screen_probe_history_index = 0;
@@ -1163,6 +1167,15 @@ public:
 	enum { TEMPORAL_SLOT_COUNT = 2 };
 	bool temporal_accumulation = true;
 	float temporal_blend = 1.0;
+
+	// Redraws requested by _request_settle_frames(): how many, and in which frame, so that the
+	// next frame can tell whether it was drawn only for them.
+	uint64_t settle_request_frame = UINT64_MAX;
+	int settle_requests = 0;
+	uint64_t settle_checked_frame = UINT64_MAX;
+	bool settle_external_change = false;
+	uint32_t _get_settle_frames(const Ref<SDFGI> &p_sdfgi, bool p_voxel_gi, bool p_temporal, bool p_sdfgi_screen_probes, bool p_voxel_gi_screen_probes) const;
+	void _request_settle_frames(Ref<RenderBuffersGI> p_rbgi, uint32_t p_frames);
 
 	// SDFGI screen probes: one per SCREEN_PROBE_TILE pixels square, placed at a different pixel of
 	// their tile every frame over SCREEN_PROBE_JITTER_FRAMES frames, plus one more for a second

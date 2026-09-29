@@ -39,6 +39,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
+#include "servers/rendering/rendering_server_default.h"
 #include "servers/rendering/rendering_server_globals.h"
 
 using namespace RendererRD;
@@ -5021,6 +5022,65 @@ static float _screen_probe_halton(uint32_t p_index, uint32_t p_base) {
 	return r;
 }
 
+uint32_t GI::_get_settle_frames(const Ref<SDFGI> &p_sdfgi, bool p_voxel_gi, bool p_temporal, bool p_sdfgi_screen_probes, bool p_voxel_gi_screen_probes) const {
+	uint32_t frames = 0;
+	if (p_temporal) {
+		// Every pixel is traced again within one checkerboard rotation.
+		frames += TEMPORAL_SLOT_COUNT;
+	}
+	if (p_sdfgi.is_valid()) {
+		// Dynamic lights are injected into the cascades over 1 << frames_to_update_light frames,
+		// the probes average over history_size frames, and every further bounce goes through
+		// the probes once more: twice the history takes all but a sliver of that in.
+		frames += (1u << uint32_t(sdfgi_frames_to_update_light)) + 2 * p_sdfgi->history_size;
+	}
+	if (p_sdfgi_screen_probes) {
+		// Each pixel averages what they gather with its history, which weighs the light of a
+		// change in by 1 / sdfgi_screen_probe_history_frames a frame: after three times that many
+		// frames, what is left of the old light is down to about 5%.
+		frames += 3 * sdfgi_screen_probe_history_frames;
+	}
+	if (p_voxel_gi) {
+		// Relighting may be spread over light_update_frames, and bounce feedback over four such
+		// updates (see VoxelGIInstance::update()).
+		frames += 4 * CLAMP(GLOBAL_GET_CACHED(int, "rendering/global_illumination/voxel_gi/light_update_frames"), 1, 16);
+	}
+	if (p_voxel_gi_screen_probes) {
+		frames += 3 * MAX(1, GLOBAL_GET_CACHED(int, "rendering/global_illumination/voxel_gi/screen_probes/temporal_frames"));
+	}
+	return frames;
+}
+
+void GI::_request_settle_frames(Ref<RenderBuffersGI> p_rbgi, uint32_t p_frames) {
+	// Much of what GI shows takes frames to catch up with a change (a light turned, an object
+	// moved): the SDFGI probes and screen probes average over frames, lights are injected over
+	// several of them, and temporal accumulation traces half of the pixels in each. When the
+	// engine only draws on changes, as the editor does, the frame drawn for the change was the
+	// only one, and GI stayed wherever that frame left it until something else changed. Request
+	// frames until it has settled instead. Those frames must not count as changes themselves,
+	// or the requests would never end: a frame is only taken for one when more changes led to
+	// it than GI requested in the frame before.
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+	if (settle_checked_frame != frame) {
+		const int own_requests = settle_request_frame + 1 == frame ? settle_requests : 0;
+		settle_external_change = RenderingServerDefault::get_drawn_frame_changes() > own_requests;
+		settle_checked_frame = frame;
+	}
+	if (settle_request_frame != frame) {
+		settle_request_frame = frame;
+		settle_requests = 0;
+	}
+
+	if (settle_external_change) {
+		p_rbgi->settle_frames_left = p_frames;
+	}
+	if (p_rbgi->settle_frames_left > 0) {
+		p_rbgi->settle_frames_left--;
+		settle_requests++;
+		RenderingServerDefault::redraw_request();
+	}
+}
+
 bool GI::is_using_screen_probes() {
 	return GLOBAL_GET_CACHED(bool, "rendering/global_illumination/voxel_gi/screen_probes/enabled");
 }
@@ -5630,6 +5690,8 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 	// both eyes of a multiview pass agree on which half they wrote.
 	rbgi->history_frame++;
 	rbgi->history_valid = temporal_active;
+
+	_request_settle_frames(rbgi, _get_settle_frames(sdfgi, use_voxel_gi_instances, temporal_active, use_sdfgi_screen_probes, use_screen_probes));
 
 	if (use_screen_probes) {
 		rbgi->screen_probe_history_index ^= 1;
