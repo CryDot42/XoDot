@@ -169,6 +169,15 @@ private:
 		float sdfgi_probe_bias = 1.1;
 		RSE::EnvironmentSDFGIYScale sdfgi_y_scale = RSE::ENV_SDFGI_Y_SCALE_75_PERCENT;
 
+		// SDFGI experimental probe backend (Radiance Cascades) and screen probes.
+		// See sdfgi_radiance_cascades.glsl / sdfgi_screen_probes.glsl.
+		bool sdfgi_radiance_cascades_enabled = false;
+		uint32_t sdfgi_rc_base_oct_size = 4; // Angular resolution (per axis) of cascade 0. Must be a power of two.
+		uint32_t sdfgi_rc_max_oct_size = 8; // Angular resolution cap for the farthest cascades. Must be a power of two, main quality/cost knob.
+		uint32_t sdfgi_rc_angular_branching_log2 = 1; // How many angular doublings per cascade step (RC's branching factor).
+		bool sdfgi_screen_probes_enabled = false;
+		uint32_t sdfgi_screen_probe_spacing = 16; // Screen-space tile size, in pixels, between probes.
+
 		// Adjustments
 		bool adjustments_enabled = false;
 		float adjustments_brightness = 1.0f;
@@ -317,6 +326,17 @@ public:
 	float environment_get_sdfgi_normal_bias(RID p_env) const;
 	float environment_get_sdfgi_probe_bias(RID p_env) const;
 	RSE::EnvironmentSDFGIYScale environment_get_sdfgi_y_scale(RID p_env) const;
+
+	// SDFGI experimental probe backend (Radiance Cascades) and screen probes.
+	void environment_set_sdfgi_radiance_cascades(RID p_env, bool p_enable, uint32_t p_base_oct_size, uint32_t p_max_oct_size, uint32_t p_angular_branching_log2);
+	bool environment_get_sdfgi_radiance_cascades_enabled(RID p_env) const;
+	uint32_t environment_get_sdfgi_rc_base_oct_size(RID p_env) const;
+	uint32_t environment_get_sdfgi_rc_max_oct_size(RID p_env) const;
+	uint32_t environment_get_sdfgi_rc_angular_branching_log2(RID p_env) const;
+
+	void environment_set_sdfgi_screen_probes(RID p_env, bool p_enable, uint32_t p_probe_spacing);
+	bool environment_get_sdfgi_screen_probes_enabled(RID p_env) const;
+	uint32_t environment_get_sdfgi_screen_probe_spacing(RID p_env) const;
 
 	// Adjustment
 	void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction);

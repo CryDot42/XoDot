@@ -694,6 +694,11 @@ public:
 
 	virtual void environment_set_sdfgi(RID p_env, bool p_enable, int p_cascades, float p_min_cell_size, RSE::EnvironmentSDFGIYScale p_y_scale, bool p_use_occlusion, float p_bounce_feedback, bool p_read_sky, float p_energy, float p_normal_bias, float p_probe_bias) = 0;
 
+	// Experimental SDFGI Radiance Cascades probe backend and screen probes,
+	// see sdfgi_radiance_cascades.glsl / sdfgi_screen_probes.glsl.
+	virtual void environment_set_sdfgi_radiance_cascades(RID p_env, bool p_enable, uint32_t p_base_oct_size, uint32_t p_max_oct_size, uint32_t p_angular_branching_log2) = 0;
+	virtual void environment_set_sdfgi_screen_probes(RID p_env, bool p_enable, uint32_t p_probe_spacing) = 0;
+
 	virtual void environment_set_sdfgi_ray_count(RSE::EnvironmentSDFGIRayCount p_ray_count) = 0;
 
 	virtual void environment_set_sdfgi_frames_to_converge(RSE::EnvironmentSDFGIFramesToConverge p_frames) = 0;

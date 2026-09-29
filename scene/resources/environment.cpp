@@ -571,6 +571,72 @@ void Environment::_update_sdfgi() {
 			sdfgi_energy,
 			sdfgi_normal_bias,
 			sdfgi_probe_bias);
+	RS::get_singleton()->environment_set_sdfgi_radiance_cascades(
+			environment,
+			sdfgi_radiance_cascades_enabled,
+			sdfgi_rc_base_oct_size,
+			sdfgi_rc_max_oct_size,
+			sdfgi_rc_angular_branching_log2);
+	RS::get_singleton()->environment_set_sdfgi_screen_probes(
+			environment,
+			sdfgi_screen_probes_enabled,
+			sdfgi_screen_probe_spacing);
+}
+
+// Experimental SDFGI Radiance Cascades probe backend and screen probes.
+
+void Environment::set_sdfgi_radiance_cascades_enabled(bool p_enabled) {
+	sdfgi_radiance_cascades_enabled = p_enabled;
+	_update_sdfgi();
+}
+
+bool Environment::is_sdfgi_radiance_cascades_enabled() const {
+	return sdfgi_radiance_cascades_enabled;
+}
+
+void Environment::set_sdfgi_rc_base_oct_size(int p_size) {
+	sdfgi_rc_base_oct_size = p_size;
+	_update_sdfgi();
+}
+
+int Environment::get_sdfgi_rc_base_oct_size() const {
+	return sdfgi_rc_base_oct_size;
+}
+
+void Environment::set_sdfgi_rc_max_oct_size(int p_size) {
+	sdfgi_rc_max_oct_size = p_size;
+	_update_sdfgi();
+}
+
+int Environment::get_sdfgi_rc_max_oct_size() const {
+	return sdfgi_rc_max_oct_size;
+}
+
+void Environment::set_sdfgi_rc_angular_branching_log2(int p_log2) {
+	sdfgi_rc_angular_branching_log2 = p_log2;
+	_update_sdfgi();
+}
+
+int Environment::get_sdfgi_rc_angular_branching_log2() const {
+	return sdfgi_rc_angular_branching_log2;
+}
+
+void Environment::set_sdfgi_screen_probes_enabled(bool p_enabled) {
+	sdfgi_screen_probes_enabled = p_enabled;
+	_update_sdfgi();
+}
+
+bool Environment::is_sdfgi_screen_probes_enabled() const {
+	return sdfgi_screen_probes_enabled;
+}
+
+void Environment::set_sdfgi_screen_probe_spacing(int p_spacing) {
+	sdfgi_screen_probe_spacing = p_spacing;
+	_update_sdfgi();
+}
+
+int Environment::get_sdfgi_screen_probe_spacing() const {
+	return sdfgi_screen_probe_spacing;
 }
 
 // Glow
@@ -1374,6 +1440,18 @@ void Environment::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_sdfgi_normal_bias"), &Environment::get_sdfgi_normal_bias);
 	ClassDB::bind_method(D_METHOD("set_sdfgi_probe_bias", "bias"), &Environment::set_sdfgi_probe_bias);
 	ClassDB::bind_method(D_METHOD("get_sdfgi_probe_bias"), &Environment::get_sdfgi_probe_bias);
+	ClassDB::bind_method(D_METHOD("set_sdfgi_radiance_cascades_enabled", "enabled"), &Environment::set_sdfgi_radiance_cascades_enabled);
+	ClassDB::bind_method(D_METHOD("is_sdfgi_radiance_cascades_enabled"), &Environment::is_sdfgi_radiance_cascades_enabled);
+	ClassDB::bind_method(D_METHOD("set_sdfgi_rc_base_oct_size", "size"), &Environment::set_sdfgi_rc_base_oct_size);
+	ClassDB::bind_method(D_METHOD("get_sdfgi_rc_base_oct_size"), &Environment::get_sdfgi_rc_base_oct_size);
+	ClassDB::bind_method(D_METHOD("set_sdfgi_rc_max_oct_size", "size"), &Environment::set_sdfgi_rc_max_oct_size);
+	ClassDB::bind_method(D_METHOD("get_sdfgi_rc_max_oct_size"), &Environment::get_sdfgi_rc_max_oct_size);
+	ClassDB::bind_method(D_METHOD("set_sdfgi_rc_angular_branching_log2", "log2"), &Environment::set_sdfgi_rc_angular_branching_log2);
+	ClassDB::bind_method(D_METHOD("get_sdfgi_rc_angular_branching_log2"), &Environment::get_sdfgi_rc_angular_branching_log2);
+	ClassDB::bind_method(D_METHOD("set_sdfgi_screen_probes_enabled", "enabled"), &Environment::set_sdfgi_screen_probes_enabled);
+	ClassDB::bind_method(D_METHOD("is_sdfgi_screen_probes_enabled"), &Environment::is_sdfgi_screen_probes_enabled);
+	ClassDB::bind_method(D_METHOD("set_sdfgi_screen_probe_spacing", "spacing"), &Environment::set_sdfgi_screen_probe_spacing);
+	ClassDB::bind_method(D_METHOD("get_sdfgi_screen_probe_spacing"), &Environment::get_sdfgi_screen_probe_spacing);
 
 	ADD_GROUP("SDFGI", "sdfgi_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "sdfgi_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_sdfgi_enabled", "is_sdfgi_enabled");
@@ -1390,6 +1468,16 @@ void Environment::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_energy"), "set_sdfgi_energy", "get_sdfgi_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_normal_bias"), "set_sdfgi_normal_bias", "get_sdfgi_normal_bias");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_probe_bias"), "set_sdfgi_probe_bias", "get_sdfgi_probe_bias");
+	// Experimental Radiance Cascades probe backend, replacing the per-probe hemisphere trace
+	// above with sdfgi_radiance_cascades.glsl. See that shader for the design note.
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "sdfgi_radiance_cascades_enabled"), "set_sdfgi_radiance_cascades_enabled", "is_sdfgi_radiance_cascades_enabled");
+	// Octahedral resolution per axis; the renderer supports 4 and 8 (see SDFGI::RC_MIN_OCT_SIZE / RC_MAX_OCT_SIZE).
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdfgi_rc_base_oct_size", PROPERTY_HINT_ENUM, "4:4,8:8"), "set_sdfgi_rc_base_oct_size", "get_sdfgi_rc_base_oct_size");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdfgi_rc_max_oct_size", PROPERTY_HINT_ENUM, "4:4,8:8"), "set_sdfgi_rc_max_oct_size", "get_sdfgi_rc_max_oct_size");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdfgi_rc_angular_branching_log2", PROPERTY_HINT_RANGE, "0,3,1"), "set_sdfgi_rc_angular_branching_log2", "get_sdfgi_rc_angular_branching_log2");
+	// Experimental screen-space probe layer over SDFGI's own probes, see sdfgi_screen_probes.glsl.
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "sdfgi_screen_probes_enabled"), "set_sdfgi_screen_probes_enabled", "is_sdfgi_screen_probes_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "sdfgi_screen_probe_spacing", PROPERTY_HINT_ENUM, "8:8,16:16"), "set_sdfgi_screen_probe_spacing", "get_sdfgi_screen_probe_spacing");
 
 	// Glow
 

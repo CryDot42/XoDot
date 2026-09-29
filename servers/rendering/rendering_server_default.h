@@ -895,6 +895,8 @@ public:
 	FUNC1(environment_set_volumetric_fog_filter_active, bool)
 
 	FUNC11(environment_set_sdfgi, RID, bool, int, float, RSE::EnvironmentSDFGIYScale, bool, float, bool, float, float, float)
+	FUNC5(environment_set_sdfgi_radiance_cascades, RID, bool, uint32_t, uint32_t, uint32_t)
+	FUNC3(environment_set_sdfgi_screen_probes, RID, bool, uint32_t)
 	FUNC1(environment_set_sdfgi_ray_count, RSE::EnvironmentSDFGIRayCount)
 	FUNC1(environment_set_sdfgi_frames_to_converge, RSE::EnvironmentSDFGIFramesToConverge)
 	FUNC1(environment_set_sdfgi_frames_to_update_light, RSE::EnvironmentSDFGIFramesToUpdateLight)

@@ -873,6 +873,62 @@ RSE::EnvironmentSDFGIYScale RendererEnvironmentStorage::environment_get_sdfgi_y_
 	return env->sdfgi_y_scale;
 }
 
+void RendererEnvironmentStorage::environment_set_sdfgi_radiance_cascades(RID p_env, bool p_enable, uint32_t p_base_oct_size, uint32_t p_max_oct_size, uint32_t p_angular_branching_log2) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	ERR_FAIL_COND_MSG(p_enable && (p_base_oct_size == 0 || (p_base_oct_size & (p_base_oct_size - 1)) != 0), "SDFGI radiance cascades base octahedral size must be a power of two.");
+	ERR_FAIL_COND_MSG(p_enable && (p_max_oct_size == 0 || (p_max_oct_size & (p_max_oct_size - 1)) != 0), "SDFGI radiance cascades max octahedral size must be a power of two.");
+	ERR_FAIL_COND_MSG(p_enable && p_max_oct_size < p_base_oct_size, "SDFGI radiance cascades max octahedral size must be >= base octahedral size.");
+	env->sdfgi_radiance_cascades_enabled = p_enable;
+	env->sdfgi_rc_base_oct_size = p_base_oct_size;
+	env->sdfgi_rc_max_oct_size = p_max_oct_size;
+	env->sdfgi_rc_angular_branching_log2 = p_angular_branching_log2;
+}
+
+bool RendererEnvironmentStorage::environment_get_sdfgi_radiance_cascades_enabled(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, false);
+	return env->sdfgi_radiance_cascades_enabled;
+}
+
+uint32_t RendererEnvironmentStorage::environment_get_sdfgi_rc_base_oct_size(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 4);
+	return env->sdfgi_rc_base_oct_size;
+}
+
+uint32_t RendererEnvironmentStorage::environment_get_sdfgi_rc_max_oct_size(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 8);
+	return env->sdfgi_rc_max_oct_size;
+}
+
+uint32_t RendererEnvironmentStorage::environment_get_sdfgi_rc_angular_branching_log2(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 1);
+	return env->sdfgi_rc_angular_branching_log2;
+}
+
+void RendererEnvironmentStorage::environment_set_sdfgi_screen_probes(RID p_env, bool p_enable, uint32_t p_probe_spacing) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	ERR_FAIL_COND_MSG(p_enable && p_probe_spacing == 0, "SDFGI screen probe spacing must be greater than zero.");
+	env->sdfgi_screen_probes_enabled = p_enable;
+	env->sdfgi_screen_probe_spacing = p_probe_spacing;
+}
+
+bool RendererEnvironmentStorage::environment_get_sdfgi_screen_probes_enabled(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, false);
+	return env->sdfgi_screen_probes_enabled;
+}
+
+uint32_t RendererEnvironmentStorage::environment_get_sdfgi_screen_probe_spacing(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 16);
+	return env->sdfgi_screen_probe_spacing;
+}
+
 // Adjustments
 
 void RendererEnvironmentStorage::environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction) {
