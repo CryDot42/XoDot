@@ -1711,7 +1711,9 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		// This should allow most of the processing to happen in parallel even if we're doing
 		// drawcalls per eye/view. It will all sync up at the barrier.
 
-		if (p_use_ssil || p_use_ssr || p_use_screen_probes) {
+		// SDFGI's screen probes trace rays against the previous frame's image, too.
+		const bool use_sdfgi_screen_probes = p_use_gi && gi.sdfgi_screen_probes && rb->has_custom_data(RB_SCOPE_SDFGI);
+		if (p_use_ssil || p_use_ssr || p_use_screen_probes || use_sdfgi_screen_probes) {
 			ss_effects->allocate_last_frame_buffer(rb, p_use_ssil || p_use_screen_probes, p_use_ssr);
 		}
 
@@ -2559,7 +2561,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	RD::get_singleton()->draw_command_end_label();
 
 	RD::get_singleton()->draw_command_begin_label("Copy Framebuffer for SSIL/SSR");
-	if (using_ssil || using_ssr || using_screen_probes) {
+	if (using_ssil || using_ssr || using_screen_probes || (using_sdfgi && gi.sdfgi_screen_probes)) {
 		RENDER_TIMESTAMP("Copy Final Framebuffer (SSIL/SSR/Screen Probes)");
 		_copy_framebuffer_to_ss_effects(rb, using_ssil || using_screen_probes, using_ssr);
 	}
