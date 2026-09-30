@@ -33,11 +33,6 @@
 TEST_FORCE_LINK(test_atmosphere)
 
 #include "core/object/class_db.h"
-#include "scene/3d/light_3d.h"
-#include "scene/3d/node_3d.h"
-#include "scene/3d/world_environment.h"
-#include "scene/main/scene_tree.h"
-#include "scene/main/window.h"
 #include "scene/resources/3d/sky_material.h"
 #include "scene/resources/environment.h"
 #include "scene/resources/sky.h"
@@ -119,7 +114,7 @@ TEST_CASE("[Atmosphere] Volumetric clouds of the sky material") {
 		CHECK(material->get_shader_rid() == with_clouds);
 	}
 
-	SUBCASE("Their parameters are properties a TimeOfDay track can drive") {
+	SUBCASE("Their parameters are properties an animation can drive") {
 		material->set("clouds_storm", 0.75);
 		CHECK(material->get_clouds_storm() == doctest::Approx(0.75));
 		material->set_clouds_samples(0);
