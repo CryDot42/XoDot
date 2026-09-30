@@ -141,4 +141,19 @@ TEST_CASE("[Atmosphere] Volumetric clouds of the sky material") {
 	}
 }
 
+TEST_CASE("[Atmosphere] Sky offers the atmosphere's material") {
+	Ref<Sky> sky;
+	sky.instantiate();
+	List<PropertyInfo> properties;
+	sky->get_property_list(&properties);
+	bool found = false;
+	for (const PropertyInfo &property : properties) {
+		if (property.name == "sky_material") {
+			found = true;
+			CHECK(property.hint_string.split(",").has("AtmosphereSkyMaterial"));
+		}
+	}
+	CHECK(found);
+}
+
 } // namespace TestAtmosphere

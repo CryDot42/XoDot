@@ -77,6 +77,15 @@ public:
 	virtual Ref<Resource> convert(const Ref<Resource> &p_resource) const override;
 };
 
+class AtmosphereSkyMaterialConversionPlugin : public EditorResourceConversionPlugin {
+	GDCLASS(AtmosphereSkyMaterialConversionPlugin, EditorResourceConversionPlugin);
+
+public:
+	virtual String converts_to() const override;
+	virtual bool handles(const Ref<Resource> &p_resource) const override;
+	virtual Ref<Resource> convert(const Ref<Resource> &p_resource) const override;
+};
+
 class FogMaterialConversionPlugin : public EditorResourceConversionPlugin {
 	GDCLASS(FogMaterialConversionPlugin, EditorResourceConversionPlugin);
 

@@ -9620,6 +9620,10 @@ EditorNode::EditorNode() {
 		physical_sky_mat_convert.instantiate();
 		resource_conversion_plugins.push_back(physical_sky_mat_convert);
 
+		Ref<AtmosphereSkyMaterialConversionPlugin> atmosphere_sky_mat_convert;
+		atmosphere_sky_mat_convert.instantiate();
+		resource_conversion_plugins.push_back(atmosphere_sky_mat_convert);
+
 		Ref<FogMaterialConversionPlugin> fog_mat_convert;
 		fog_mat_convert.instantiate();
 		resource_conversion_plugins.push_back(fog_mat_convert);
