@@ -116,6 +116,73 @@ layout(set = 2, binding = 2) uniform texture2D quarter_res;
 
 layout(set = 3, binding = 0) uniform texture3D volumetric_fog_texture;
 
+/* Atmosphere */
+
+#include "atmosphere_data_inc.glsl"
+
+layout(set = 4, binding = 0, std140) uniform AtmosphereBlock {
+	AtmosphereData atmosphere;
+};
+layout(set = 4, binding = 1) uniform texture2D atmosphere_transmittance_lut;
+layout(set = 4, binding = 2) uniform texture2D atmosphere_multiscattering_lut;
+layout(set = 4, binding = 3) uniform texture2D atmosphere_sky_view_lut;
+layout(set = 4, binding = 4) uniform texture3D atmosphere_aerial_perspective_volume;
+
+#define ATMOSPHERE_TRANSMITTANCE_LUT(m_uv) textureLod(sampler2D(atmosphere_transmittance_lut, SAMPLER_LINEAR_CLAMP), m_uv, 0.0)
+#define ATMOSPHERE_MULTISCATTERING_LUT(m_uv) textureLod(sampler2D(atmosphere_multiscattering_lut, SAMPLER_LINEAR_CLAMP), m_uv, 0.0)
+
+#include "atmosphere_inc.glsl"
+
+// Built-in functions of sky shaders.
+
+// The sky's luminance towards p_dir, from the eye: every order of scattering
+// of every light, but not the lights' own disks.
+vec3 atmosphere_sky(vec3 p_dir) {
+	if (atmosphere.enabled == 0) {
+		return vec3(0.0);
+	}
+	vec2 uv = atmosphere_sky_view_dir_to_uv(atmosphere.camera_position, normalize(p_dir));
+	return textureLod(sampler2D(atmosphere_sky_view_lut, SAMPLER_LINEAR_CLAMP), uv, 0.0).rgb * atmosphere.sky_luminance_factor;
+}
+
+// What is left of light coming from far away along p_dir once it has crossed
+// the atmosphere to the eye, such as the sun's or the stars'. Nothing is left
+// of what the planet hides.
+vec3 atmosphere_transmittance(vec3 p_dir) {
+	if (atmosphere.enabled == 0) {
+		return vec3(1.0);
+	}
+	vec3 dir = normalize(p_dir);
+	if (atmosphere_ray_sphere_nearest(atmosphere.camera_position, dir, atmosphere.bottom_radius) >= 0.0) {
+		return vec3(0.0);
+	}
+	return atmosphere_transmittance_to_top(atmosphere.camera_position, dir);
+}
+
+// The direction towards one of the lights the atmosphere is lit by (the sun
+// is 0), or zero if there are fewer.
+vec3 atmosphere_light_direction(int p_light) {
+	if (atmosphere.enabled == 0 || p_light < 0 || p_light >= int(atmosphere.light_count)) {
+		return vec3(0.0);
+	}
+	return atmosphere.light_direction[p_light].xyz;
+}
+
+// The illuminance that light brings to any point of the world (in meters,
+// like the scene) through the air above it, in the units the scene is lit
+// with: what lights a cloud, for one.
+vec3 atmosphere_light_at(vec3 p_position, int p_light) {
+	if (atmosphere.enabled == 0 || p_light < 0 || p_light >= int(atmosphere.light_count)) {
+		return vec3(0.0);
+	}
+	vec3 position = atmosphere_world_to_planet(p_position);
+	vec3 dir = atmosphere.light_direction[p_light].xyz;
+	if (atmosphere_ray_sphere_nearest(position, dir, atmosphere.bottom_radius) >= 0.0) {
+		return vec3(0.0);
+	}
+	return atmosphere.light_illuminance[p_light].rgb * atmosphere_transmittance_to_top(position, dir);
+}
+
 #ifdef USE_CUBEMAP_PASS
 #define AT_CUBEMAP_PASS true
 #else
@@ -273,10 +340,16 @@ void main() {
 	frag_color.rgb = color;
 	frag_color.a = alpha;
 
+	// Half and quarter resolution passes only fill buffers that the full pass
+	// reads through HALF_RES_COLOR and QUARTER_RES_COLOR, and which it then
+	// brightens and fogs with the rest of the sky: doing it here too would do
+	// it twice.
+#if !defined(USE_HALF_RES_PASS) && !defined(USE_QUARTER_RES_PASS)
 	// Apply environment 'brightness' setting separately before fog to ensure consistent luminance.
 	frag_color.rgb = frag_color.rgb * params.brightness_multiplier;
+#endif
 
-#if !defined(DISABLE_FOG)
+#if !defined(DISABLE_FOG) && !defined(USE_HALF_RES_PASS) && !defined(USE_QUARTER_RES_PASS)
 
 	// Draw "fixed" fog before volumetric fog to ensure volumetric fog can appear in front of the sky.
 	if (sky_scene_data.fog_enabled) {

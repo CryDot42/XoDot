@@ -282,6 +282,12 @@ public:
 
 	virtual void environment_set_ssao_quality(RSE::EnvironmentSSAOQuality p_quality, int p_denoise_passes, bool p_bent_normals) = 0;
 
+	// Atmosphere
+	virtual void environment_set_atmosphere(RID p_env, bool p_enable, float p_planet_radius, float p_height, const Color &p_ground_albedo, float p_multiscattering_factor, const Color &p_sky_luminance_factor, float p_aerial_perspective_distance_scale, float p_aerial_perspective_start_depth, bool p_affect_directional_lights) = 0;
+	virtual void environment_set_atmosphere_rayleigh(RID p_env, const Color &p_scattering, float p_scattering_scale, float p_exponential_distribution) = 0;
+	virtual void environment_set_atmosphere_mie(RID p_env, const Color &p_scattering, float p_scattering_scale, const Color &p_absorption, float p_absorption_scale, float p_anisotropy, float p_exponential_distribution) = 0;
+	virtual void environment_set_atmosphere_ozone(RID p_env, const Color &p_absorption, float p_absorption_scale, float p_tip_altitude, float p_width) = 0;
+
 	// SSIL
 
 	virtual void environment_set_ssil(RID p_env, bool p_enable, float p_radius, float p_intensity, float p_sharpness, float p_normal_rejection) = 0;

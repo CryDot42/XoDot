@@ -33,6 +33,7 @@
 #include "core/config/project_settings.h"
 #include "core/math/geometry_3d.h"
 #include "core/os/os.h"
+#include "servers/rendering/renderer_rd/environment/atmosphere.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_server_globals.h"
@@ -793,6 +794,14 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				}
 
 				Color linear_col = light->color.srgb_to_linear();
+				if (p_render_data->environment.is_valid()) {
+					// What of the light gets through the atmosphere to the eye: the
+					// sun reddens as it sets, and is gone once the planet hides it.
+					const RendererEnvironmentStorage::AtmosphereParams atmosphere = RendererSceneRenderRD::get_singleton()->environment_get_atmosphere(p_render_data->environment);
+					if (atmosphere.enabled && atmosphere.affect_directional_lights) {
+						linear_col *= RendererRD::AtmosphereRD::light_transmittance(atmosphere, p_camera_transform.origin, light_transform.basis.xform(Vector3(0, 0, 1)));
+					}
+				}
 				light_data.color[0] = linear_col.r;
 				light_data.color[1] = linear_col.g;
 				light_data.color[2] = linear_col.b;

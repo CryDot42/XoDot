@@ -100,6 +100,11 @@ void SkyRD::SkyShaderData::set_code(const String &p_code) {
 	actions.usage_flag_pointers["LIGHT3_DIRECTION"] = &uses_light;
 	actions.usage_flag_pointers["LIGHT3_COLOR"] = &uses_light;
 	actions.usage_flag_pointers["LIGHT3_SIZE"] = &uses_light;
+	// The atmosphere moves with the lights.
+	actions.usage_flag_pointers["atmosphere_sky"] = &uses_light;
+	actions.usage_flag_pointers["atmosphere_transmittance"] = &uses_light;
+	actions.usage_flag_pointers["atmosphere_light_direction"] = &uses_light;
+	actions.usage_flag_pointers["atmosphere_light_at"] = &uses_light;
 
 	actions.uniforms = &uniforms;
 
@@ -257,6 +262,7 @@ void SkyRD::_render_sky(RD::DrawListID p_list, float p_time, RID p_fb, PipelineC
 		} else {
 			RD::get_singleton()->draw_list_bind_uniform_set(draw_list, sky_scene_state.default_fog_uniform_set, SKY_SET_FOG);
 		}
+		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, get_atmosphere_uniform_set(), SKY_SET_ATMOSPHERE);
 	}
 
 	RD::get_singleton()->draw_list_set_push_constant(draw_list, &sky_push_constant, sizeof(SkyPushConstant));
@@ -719,9 +725,20 @@ SkyRD::SkyRD() {
 	sky_use_octmap_array = GLOBAL_GET("rendering/reflections/sky_reflections/texture_array_reflections");
 }
 
+RID SkyRD::get_atmosphere_uniform_set() {
+	RD::Uniform u_data(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, atmosphere.get_uniform_buffer());
+	RD::Uniform u_transmittance(RD::UNIFORM_TYPE_TEXTURE, 1, atmosphere.get_transmittance_lut());
+	RD::Uniform u_multiscattering(RD::UNIFORM_TYPE_TEXTURE, 2, atmosphere.get_multiscattering_lut());
+	RD::Uniform u_sky_view(RD::UNIFORM_TYPE_TEXTURE, 3, atmosphere.get_sky_view_lut());
+	RD::Uniform u_aerial_perspective(RD::UNIFORM_TYPE_TEXTURE, 4, atmosphere.get_aerial_perspective_volume());
+	return UniformSetCacheRD::get_singleton()->get_cache(sky_shader.default_shader_rd, SKY_SET_ATMOSPHERE, u_data, u_transmittance, u_multiscattering, u_sky_view, u_aerial_perspective);
+}
+
 void SkyRD::init() {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+
+	atmosphere.init();
 
 	{
 		// Start with the directional lights for the sky
@@ -799,6 +816,10 @@ void SkyRD::init() {
 		actions.renames["LIGHT3_ENERGY"] = "directional_lights.data[3].direction_energy.w";
 		actions.renames["LIGHT3_COLOR"] = "directional_lights.data[3].color_size.xyz";
 		actions.renames["LIGHT3_SIZE"] = "directional_lights.data[3].color_size.w";
+		actions.renames["atmosphere_sky"] = "atmosphere_sky";
+		actions.renames["atmosphere_transmittance"] = "atmosphere_transmittance";
+		actions.renames["atmosphere_light_direction"] = "atmosphere_light_direction";
+		actions.renames["atmosphere_light_at"] = "atmosphere_light_at";
 		actions.renames["AT_CUBEMAP_PASS"] = "AT_CUBEMAP_PASS";
 		actions.renames["AT_HALF_RES_PASS"] = "AT_HALF_RES_PASS";
 		actions.renames["AT_QUARTER_RES_PASS"] = "AT_QUARTER_RES_PASS";
@@ -962,6 +983,7 @@ SkyRD::~SkyRD() {
 	RD::get_singleton()->free_rid(sky_scene_state.uniform_buffer);
 	memdelete_arr(sky_scene_state.directional_lights);
 	memdelete_arr(sky_scene_state.last_frame_directional_lights);
+	atmosphere.free();
 	material_storage->shader_free(sky_shader.default_shader);
 	material_storage->material_free(sky_shader.default_material);
 	material_storage->shader_free(sky_scene_state.fog_shader);
@@ -1102,8 +1124,9 @@ void SkyRD::setup_sky(const RenderDataRD *p_render_data, const Size2i p_screen_s
 	}
 
 	bool sun_scatter_enabled = RendererSceneRenderRD::get_singleton()->environment_get_fog_enabled(p_render_data->environment) && RendererSceneRenderRD::get_singleton()->environment_get_fog_sun_scatter(p_render_data->environment) > 0.001;
+	const RendererEnvironmentStorage::AtmosphereParams atmosphere_params = RendererSceneRenderRD::get_singleton()->environment_get_atmosphere(p_render_data->environment);
 	sky_scene_state.ubo.directional_light_count = 0;
-	if (shader_data->uses_light || sun_scatter_enabled) {
+	if (shader_data->uses_light || sun_scatter_enabled || atmosphere_params.enabled) {
 		const PagedArray<RID> &lights = *p_render_data->lights;
 		// Run through the list of lights in the scene and pick out the Directional Lights.
 		// This can't be done in RenderSceneRenderRD::_setup lights because that needs to be called
@@ -1277,6 +1300,38 @@ void SkyRD::setup_sky(const RenderDataRD *p_render_data, const Size2i p_screen_s
 	sky_scene_state.ubo.fog_use_legacy_blending = RendererSceneRenderRD::get_singleton()->fog_use_legacy_blending_get();
 
 	RD::get_singleton()->buffer_update(sky_scene_state.uniform_buffer, 0, sizeof(SkySceneState::UBO), &sky_scene_state.ubo);
+
+	// The atmosphere is lit by the same directional lights as the sky, which
+	// after the swap above are the last frame's in either case.
+	if (atmosphere_params.enabled) {
+		AtmosphereRD::Light atmosphere_lights[AtmosphereRD::MAX_LIGHTS];
+		uint32_t atmosphere_light_count = 0;
+		for (uint32_t i = 0; i < sky_scene_state.ubo.directional_light_count && atmosphere_light_count < AtmosphereRD::MAX_LIGHTS; i++) {
+			const SkyDirectionalLightData &light = sky_scene_state.last_frame_directional_lights[i];
+			if (!light.enabled || light.energy <= 0.0) {
+				continue;
+			}
+			atmosphere_lights[atmosphere_light_count].direction = Vector3(light.direction[0], light.direction[1], light.direction[2]);
+			// Sky shaders see a light's energy as it is set, while the scene is lit
+			// with PI times it outside of physical light units. The atmosphere
+			// must match the scene.
+			const float energy = RendererSceneRenderRD::get_singleton()->is_using_physical_light_units() ? light.energy : light.energy * Math::PI;
+			atmosphere_lights[atmosphere_light_count].illuminance = Color(light.color[0], light.color[1], light.color[2]) * energy;
+			atmosphere_light_count++;
+		}
+		atmosphere.update(atmosphere_params, p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_projection, atmosphere_lights, atmosphere_light_count);
+	} else {
+		atmosphere.deactivate();
+	}
+
+	if (sky) {
+		// The sky's reflections follow the atmosphere's own parameters too.
+		uint32_t atmosphere_hash = atmosphere.get_tables_hash();
+		if (atmosphere_hash != sky->prev_atmosphere_hash) {
+			sky->prev_atmosphere_hash = atmosphere_hash;
+			sky->reflection.dirty = true;
+		}
+	}
 }
 
 void SkyRD::update_radiance_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_env, const Vector3 &p_global_pos, double p_time, float p_luminance_multiplier, float p_brightness_multiplier) {

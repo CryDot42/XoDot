@@ -500,6 +500,32 @@ float RendererSceneRender::environment_get_ssao_ao_channel_affect(RID p_env) con
 	return environment_storage.environment_get_ssao_ao_channel_affect(p_env);
 }
 
+// Atmosphere
+
+void RendererSceneRender::environment_set_atmosphere(RID p_env, bool p_enable, float p_planet_radius, float p_height, const Color &p_ground_albedo, float p_multiscattering_factor, const Color &p_sky_luminance_factor, float p_aerial_perspective_distance_scale, float p_aerial_perspective_start_depth, bool p_affect_directional_lights) {
+	environment_storage.environment_set_atmosphere(p_env, p_enable, p_planet_radius, p_height, p_ground_albedo, p_multiscattering_factor, p_sky_luminance_factor, p_aerial_perspective_distance_scale, p_aerial_perspective_start_depth, p_affect_directional_lights);
+}
+
+void RendererSceneRender::environment_set_atmosphere_rayleigh(RID p_env, const Color &p_scattering, float p_scattering_scale, float p_exponential_distribution) {
+	environment_storage.environment_set_atmosphere_rayleigh(p_env, p_scattering, p_scattering_scale, p_exponential_distribution);
+}
+
+void RendererSceneRender::environment_set_atmosphere_mie(RID p_env, const Color &p_scattering, float p_scattering_scale, const Color &p_absorption, float p_absorption_scale, float p_anisotropy, float p_exponential_distribution) {
+	environment_storage.environment_set_atmosphere_mie(p_env, p_scattering, p_scattering_scale, p_absorption, p_absorption_scale, p_anisotropy, p_exponential_distribution);
+}
+
+void RendererSceneRender::environment_set_atmosphere_ozone(RID p_env, const Color &p_absorption, float p_absorption_scale, float p_tip_altitude, float p_width) {
+	environment_storage.environment_set_atmosphere_ozone(p_env, p_absorption, p_absorption_scale, p_tip_altitude, p_width);
+}
+
+bool RendererSceneRender::environment_get_atmosphere_enabled(RID p_env) const {
+	return environment_storage.environment_get_atmosphere_enabled(p_env);
+}
+
+RendererEnvironmentStorage::AtmosphereParams RendererSceneRender::environment_get_atmosphere(RID p_env) const {
+	return environment_storage.environment_get_atmosphere(p_env);
+}
+
 // SSIL
 
 void RendererSceneRender::environment_set_ssil(RID p_env, bool p_enable, float p_radius, float p_intensity, float p_sharpness, float p_normal_rejection) {

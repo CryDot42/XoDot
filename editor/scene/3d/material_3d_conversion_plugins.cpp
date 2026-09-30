@@ -33,6 +33,7 @@
 #include "editor/scene/material_editor_plugin.h"
 #include "scene/resources/3d/fog_material.h"
 #include "scene/resources/3d/sky_material.h"
+#include "scene/resources/texture.h"
 #include "servers/rendering/rendering_server.h"
 
 String StandardMaterial3DConversionPlugin::converts_to() const {
@@ -138,6 +139,31 @@ bool PhysicalSkyMaterialConversionPlugin::handles(const Ref<Resource> &p_resourc
 
 Ref<Resource> PhysicalSkyMaterialConversionPlugin::convert(const Ref<Resource> &p_resource) const {
 	return MaterialEditor::make_shader_material(p_resource);
+}
+
+String AtmosphereSkyMaterialConversionPlugin::converts_to() const {
+	return "ShaderMaterial";
+}
+
+bool AtmosphereSkyMaterialConversionPlugin::handles(const Ref<Resource> &p_resource) const {
+	Ref<AtmosphereSkyMaterial> mat = p_resource;
+	return mat.is_valid();
+}
+
+Ref<Resource> AtmosphereSkyMaterialConversionPlugin::convert(const Ref<Resource> &p_resource) const {
+	Ref<AtmosphereSkyMaterial> mat = p_resource;
+	Ref<ShaderMaterial> smat = MaterialEditor::make_shader_material(mat);
+	// The copied parameters hold the textures' RIDs; the shader material needs
+	// the textures themselves, including the default cloud noise, which it
+	// gets copies of.
+	smat->set_shader_parameter("night_sky", mat->get_night_sky());
+	if (mat->is_clouds_enabled()) {
+		const Ref<Texture3D> shape = mat->get_clouds_shape_texture();
+		const Ref<Texture3D> detail = mat->get_clouds_detail_texture();
+		smat->set_shader_parameter("clouds_shape_texture", shape.is_valid() ? shape : AtmosphereSkyMaterial::make_default_clouds_shape_texture());
+		smat->set_shader_parameter("clouds_detail_texture", detail.is_valid() ? detail : AtmosphereSkyMaterial::make_default_clouds_detail_texture());
+	}
+	return smat;
 }
 
 String FogMaterialConversionPlugin::converts_to() const {

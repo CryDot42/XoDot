@@ -33,6 +33,8 @@
 #include "core/templates/rid.h"
 #include "scene/resources/material.h"
 
+class Texture3D;
+
 class ProceduralSkyMaterial : public Material {
 	GDCLASS(ProceduralSkyMaterial, Material);
 
@@ -233,4 +235,173 @@ public:
 
 	PhysicalSkyMaterial();
 	~PhysicalSkyMaterial();
+};
+
+// A sky drawn from the Environment's atmosphere (see Environment.atmosphere_enabled):
+// the scattered light of every directional light, their disks seen through
+// the air, the stars behind them, and a layer of volumetric clouds lit by the
+// same lights through the same air.
+//
+// The clouds are ray marched through two tiling 3D noise textures (a coarse
+// one for their shape and a fine one to erode their edges), at half the
+// screen's resolution. Both default to NoiseTexture3Ds built once and shared
+// by every material; any Texture3D can take their place.
+class AtmosphereSkyMaterial : public Material {
+	GDCLASS(AtmosphereSkyMaterial, Material);
+
+private:
+	enum ShaderFlags {
+		SHADER_DEBANDING = 1,
+		SHADER_CLOUDS = 2,
+		SHADER_MAX = 4,
+	};
+
+	static Mutex shader_mutex;
+	static RID shader_cache[SHADER_MAX];
+	static Ref<Texture3D> default_clouds_shape_texture;
+	static Ref<Texture3D> default_clouds_detail_texture;
+
+	float sun_disk_scale = 1.0f;
+	float sun_disk_intensity = 1.0f;
+	Ref<Texture2D> night_sky;
+	float night_sky_energy = 1.0f;
+	float energy_multiplier = 1.0f;
+	bool use_debanding = true;
+
+	bool clouds_enabled = true;
+	float clouds_coverage = 0.45f;
+	float clouds_density = 1.0f;
+	float clouds_bottom_altitude = 1500.0f;
+	float clouds_thickness = 2500.0f;
+	float clouds_extinction = 0.04f;
+	float clouds_anisotropy = 0.6f;
+	float clouds_ambient_strength = 1.0f;
+	Ref<Texture3D> clouds_shape_texture;
+	float clouds_shape_scale = 12000.0f;
+	float clouds_coverage_scale = 60000.0f;
+	Ref<Texture3D> clouds_detail_texture;
+	float clouds_detail_scale = 1800.0f;
+	float clouds_detail_strength = 0.35f;
+	Vector2 clouds_wind_direction = Vector2(1, 0);
+	float clouds_wind_speed = 10.0f;
+	float clouds_fade_distance = 40000.0f;
+	int clouds_samples = 48;
+	int clouds_light_samples = 6;
+	float clouds_storm = 0.0f;
+	float clouds_lightning_intensity = 1.0f;
+	float clouds_lightning_frequency = 0.3f;
+	Color clouds_lightning_color = Color(0.75, 0.8, 1.0);
+
+	mutable bool shader_set = false;
+
+	int _get_shader_flags() const;
+	RID get_shader_cache() const;
+	static void _update_shader(int p_flags);
+	void _update_shader_rid();
+	void _update_clouds_textures();
+	static void _create_default_clouds_textures();
+
+protected:
+	static void _bind_methods();
+
+public:
+	void set_sun_disk_scale(float p_scale);
+	float get_sun_disk_scale() const;
+
+	void set_sun_disk_intensity(float p_intensity);
+	float get_sun_disk_intensity() const;
+
+	void set_night_sky(const Ref<Texture2D> &p_night_sky);
+	Ref<Texture2D> get_night_sky() const;
+
+	void set_night_sky_energy(float p_energy);
+	float get_night_sky_energy() const;
+
+	void set_energy_multiplier(float p_multiplier);
+	float get_energy_multiplier() const;
+
+	void set_use_debanding(bool p_use_debanding);
+	bool get_use_debanding() const;
+
+	void set_clouds_enabled(bool p_enabled);
+	bool is_clouds_enabled() const;
+
+	void set_clouds_coverage(float p_coverage);
+	float get_clouds_coverage() const;
+
+	void set_clouds_density(float p_density);
+	float get_clouds_density() const;
+
+	void set_clouds_bottom_altitude(float p_altitude);
+	float get_clouds_bottom_altitude() const;
+
+	void set_clouds_thickness(float p_thickness);
+	float get_clouds_thickness() const;
+
+	void set_clouds_extinction(float p_extinction);
+	float get_clouds_extinction() const;
+
+	void set_clouds_anisotropy(float p_anisotropy);
+	float get_clouds_anisotropy() const;
+
+	void set_clouds_ambient_strength(float p_strength);
+	float get_clouds_ambient_strength() const;
+
+	void set_clouds_shape_texture(const Ref<Texture3D> &p_texture);
+	Ref<Texture3D> get_clouds_shape_texture() const;
+
+	void set_clouds_shape_scale(float p_scale);
+	float get_clouds_shape_scale() const;
+
+	void set_clouds_coverage_scale(float p_scale);
+	float get_clouds_coverage_scale() const;
+
+	void set_clouds_detail_texture(const Ref<Texture3D> &p_texture);
+	Ref<Texture3D> get_clouds_detail_texture() const;
+
+	void set_clouds_detail_scale(float p_scale);
+	float get_clouds_detail_scale() const;
+
+	void set_clouds_detail_strength(float p_strength);
+	float get_clouds_detail_strength() const;
+
+	void set_clouds_wind_direction(const Vector2 &p_direction);
+	Vector2 get_clouds_wind_direction() const;
+
+	void set_clouds_wind_speed(float p_speed);
+	float get_clouds_wind_speed() const;
+
+	void set_clouds_fade_distance(float p_distance);
+	float get_clouds_fade_distance() const;
+
+	void set_clouds_samples(int p_samples);
+	int get_clouds_samples() const;
+
+	void set_clouds_light_samples(int p_samples);
+	int get_clouds_light_samples() const;
+
+	void set_clouds_storm(float p_storm);
+	float get_clouds_storm() const;
+
+	void set_clouds_lightning_intensity(float p_intensity);
+	float get_clouds_lightning_intensity() const;
+
+	void set_clouds_lightning_frequency(float p_frequency);
+	float get_clouds_lightning_frequency() const;
+
+	void set_clouds_lightning_color(const Color &p_color);
+	Color get_clouds_lightning_color() const;
+
+	// New copies of the noise the clouds use when no texture is set, to start
+	// from when making one's own.
+	static Ref<Texture3D> make_default_clouds_shape_texture();
+	static Ref<Texture3D> make_default_clouds_detail_texture();
+
+	virtual Shader::Mode get_shader_mode() const override;
+	virtual RID get_shader_rid() const override;
+	virtual RID get_rid() const override;
+
+	static void cleanup_shader();
+
+	AtmosphereSkyMaterial();
 };
