@@ -1214,6 +1214,11 @@ public:
 	void render_empty_scene(const Ref<RenderSceneBuffers> &p_render_buffers, RID p_scenario, RID p_shadow_atlas, float p_window_output_max_value);
 
 	void render_camera(const Ref<RenderSceneBuffers> &p_render_buffers, RID p_camera, RID p_scenario, RID p_viewport, Size2 p_viewport_size, uint32_t p_jitter_phase_count, float p_screen_mesh_lod_threshold, RID p_shadow_atlas, float p_window_output_max_value, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
+
+	LocalVector<Callable> camera_callbacks; // Rendering thread only.
+	virtual void camera_callback_add(const Callable &p_callback);
+	virtual void camera_callback_remove(const Callable &p_callback);
+
 	void update_dirty_instances() const;
 
 	void render_particle_colliders();

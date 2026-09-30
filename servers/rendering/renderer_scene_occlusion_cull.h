@@ -280,6 +280,12 @@ public:
 		RID get_debug_texture();
 		const Size2i &get_occlusion_buffer_size() const { return occlusion_buffer_size; }
 
+		// Every mip, one after another from the first one (see `get_mip_size()`), for GPU-driven rendering to test
+		// occlusion the same way: the distance to the camera of the farthest surface seen in each texel.
+		_FORCE_INLINE_ const LocalVector<float> &get_data() const { return data; }
+		_FORCE_INLINE_ int get_mip_count() const { return sizes.size(); }
+		_FORCE_INLINE_ const Size2i &get_mip_size(int p_mip) const { return sizes[p_mip]; }
+
 		virtual ~HZBuffer() {}
 	};
 

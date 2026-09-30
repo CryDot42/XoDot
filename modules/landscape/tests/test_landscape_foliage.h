@@ -431,6 +431,7 @@ TEST_CASE("[SceneTree][Landscape][Foliage] Debug views and frozen levels of deta
 	Camera3D *camera = memnew(Camera3D);
 	landscape->add_child(camera);
 	camera->set_position(Vector3(0, 0, 64));
+	camera->set_rotation(Vector3(0, -Math::PI / 2, 0)); // Looks at the instances (+X).
 	landscape->set_lod_camera_path(landscape->get_path_to(camera));
 	Ref<LandscapeFoliageType> type = make_type();
 	type->set_cull_distance(60.0);
@@ -461,6 +462,7 @@ TEST_CASE("[SceneTree][Landscape][Foliage] Debug views and frozen levels of deta
 	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
 	stats = foliage->get_statistics();
 	CHECK(int64_t(stats["cells_rendered"]) == 2);
+	CHECK(int64_t(stats["cells_out_of_view"]) == 0);
 	CHECK(int64_t(stats["instances_drawn"]) == 6);
 	landscape->set_freeze_lod(false);
 	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
@@ -475,6 +477,63 @@ TEST_CASE("[SceneTree][Landscape][Foliage] Debug views and frozen levels of deta
 	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
 	CHECK(int64_t(foliage->get_statistics()["debug_bounds"]) == 0);
 	CHECK(int64_t(foliage->get_statistics()["instances_drawn"]) == 6);
+
+	memdelete(landscape);
+}
+
+TEST_CASE("[SceneTree][Landscape][Foliage] Culling with the frozen view of the camera") {
+	LandscapeFoliage3D *foliage = nullptr;
+	Landscape3D *landscape = make_landscape(foliage, 0.0);
+	Camera3D *camera = memnew(Camera3D);
+	landscape->add_child(camera);
+	camera->set_position(Vector3(32, 0, 64));
+	camera->set_rotation(Vector3(0, -Math::PI / 2, 0)); // Looks along +X.
+	landscape->set_lod_camera_path(landscape->get_path_to(camera));
+	Ref<LandscapeFoliageType> type = make_type();
+	type->set_cull_distance(60.0);
+	type->set_lod_transition(0.0);
+	foliage->add_foliage_type(type);
+	for (int i = 0; i < 13; i++) {
+		foliage->add_instance(0, Transform3D(Basis(), Vector3(5 + i * 10, 0, 64)));
+	}
+	// The cells within the cull distance: [0, 32) behind the camera, [32, 64) and [64, 96) in front of it.
+	// The renderer culls them for every camera.
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	Dictionary stats = foliage->get_statistics();
+	CHECK(int64_t(stats["cells_rendered"]) == 3);
+	CHECK(int64_t(stats["cells_out_of_view"]) == 0);
+	CHECK(int64_t(stats["instances_drawn"]) == 9);
+
+	// With the LOD of the landscape frozen, the cells out of the view of its camera are hidden like its
+	// patches (they keep their rendering resources for the shadows).
+	landscape->set_freeze_lod(true);
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	stats = foliage->get_statistics();
+	CHECK(int64_t(stats["cells_rendered"]) == 3);
+	CHECK(int64_t(stats["cells_out_of_view"]) == 1);
+	CHECK(int64_t(stats["instances_drawn"]) == 6);
+
+	// The view stays frozen when the camera moves and turns around.
+	camera->set_position(Vector3(40, 0, 64));
+	camera->set_rotation(Vector3(0, Math::PI / 2, 0));
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	stats = foliage->get_statistics();
+	CHECK(int64_t(stats["cells_out_of_view"]) == 1);
+	CHECK(int64_t(stats["instances_drawn"]) == 6);
+
+	// Instances added out of the frozen view are hidden too.
+	foliage->add_instance(0, Transform3D(Basis(), Vector3(20, 0, 20)));
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	stats = foliage->get_statistics();
+	CHECK(int64_t(stats["cells_out_of_view"]) == 2);
+	CHECK(int64_t(stats["instances_drawn"]) == 6);
+
+	// Unfrozen: the renderer culls the cells again. From 40 m, the instances up to 95 m are drawn.
+	landscape->set_freeze_lod(false);
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	stats = foliage->get_statistics();
+	CHECK(int64_t(stats["cells_out_of_view"]) == 0);
+	CHECK(int64_t(stats["instances_drawn"]) == 11);
 
 	memdelete(landscape);
 }
@@ -630,6 +689,10 @@ TEST_CASE("[SceneTree][Landscape][Foliage] GPU indirect rendering falls back to 
 
 	foliage->set_gpu_max_instances(10);
 	CHECK(foliage->get_gpu_max_instances() == 1024);
+	CHECK(foliage->is_gpu_frustum_culling());
+	CHECK(foliage->is_gpu_occlusion_culling());
+	foliage->set_gpu_occlusion_culling(false);
+	CHECK_FALSE(foliage->is_gpu_occlusion_culling());
 	foliage->set_gpu_indirect(false);
 	CHECK(foliage->get_configuration_warnings().is_empty());
 

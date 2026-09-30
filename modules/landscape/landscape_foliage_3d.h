@@ -61,9 +61,13 @@ class Landscape3D;
 // Instances follow the terrain when it is sculpted (`follow_terrain`). The debug views color the
 // instances by level of detail, cell or cell state and draw the bounds of the drawn cells.
 //
+// The renderer culls the cells by the view frustum and occlusion (HZB) of every camera. While the
+// LOD of the landscape is frozen, the cells out of the view of its camera are hidden too (only
+// their shadows are drawn), like the patches of the landscape.
+//
 // Optionally (`gpu_indirect`, Forward+ and Mobile), the instances of the loaded cells are culled
-// and sorted per level of detail on the GPU, straight into indirect MultiMeshes (see
-// LandscapeFoliageGPU). Instances saved in a LandscapeFoliageData file (`data`, .lfdata) are
+// (view frustum and occlusion buffer of every camera, per instance) and sorted per level of detail
+// on the GPU, straight into indirect MultiMeshes (see LandscapeFoliageGPU). Instances saved in a LandscapeFoliageData file (`data`, .lfdata) are
 // streamed: only the cells within the cull distance of the camera and of the streaming sources are
 // loaded (in the background), the others are released within a memory budget.
 class LandscapeFoliage3D : public Node3D {
@@ -120,6 +124,7 @@ private:
 		bool render_dirty = true;
 		Vector3 sort_camera; // Camera position of the last per-instance sort.
 		LocalVector<uint8_t> instance_lods; // Level of each instance (per-instance sort).
+		bool out_of_view = false; // Out of the frozen view of the LOD camera: only shadows are drawn.
 	};
 
 	struct Entry {
@@ -147,6 +152,10 @@ private:
 			RID instance;
 			uint32_t capacity = 0;
 			int surfaces = 0;
+			AABB bounds;
+			// Most instances received since window_start (shrinks the capacity when mostly unused).
+			uint32_t window_peak = 0;
+			uint64_t window_start = 0;
 		};
 		struct GPUSlot {
 			uint32_t offset = 0;
@@ -159,13 +168,13 @@ private:
 		uint32_t gpu_capacity = 0; // Instance buffer.
 		uint32_t gpu_used = 0; // End of the last slot.
 		uint32_t gpu_count = 0; // Instances in the slots.
-		AABB gpu_bounds;
+		AABB gpu_bounds; // Of the cells with a slot (shadow lists).
+		AABB gpu_view_bounds; // Of every cell, only growing (main lists, stable for the HZB of the renderer).
 		bool gpu_dirty = true; // A cell changed or the camera moved: slots to update.
 		bool gpu_outputs_dirty = true;
 		bool gpu_run = true; // Culling to run.
 		Vector3 gpu_slots_camera;
-		uint64_t gpu_serial = 0; // Last run.
-		uint64_t gpu_outputs_serial = 0; // Run after the last change of the outputs.
+		uint64_t gpu_outputs_serial = 0; // Last change of the outputs (the statistics of older ones are ignored).
 		uint32_t gpu_dropped = 0; // Instances beyond the capacity of the outputs (last statistics).
 	};
 	LocalVector<Entry *> entries;
@@ -211,17 +220,41 @@ private:
 	void _process_streaming();
 	void _add_loaded_bytes(int64_t p_bytes);
 
+	// The view of the camera of the LOD of the landscape (landscape space), frozen with its LOD.
+	struct View {
+		bool valid = false;
+		Vector3 position;
+		bool frustum = false; // The planes are valid.
+		Plane planes[6]; // Normals point outside.
+	};
+	View view;
+	void _update_view();
+	bool _is_in_view(const AABB &p_bounds) const;
+
 	// GPU indirect rendering (culling and LOD selection on the GPU, see LandscapeFoliageGPU).
 	bool gpu_indirect = false;
 	bool gpu_frustum_culling = true;
+	bool gpu_occlusion_culling = true;
 	int gpu_max_instances = 262144;
 	LandscapeFoliageGPU *gpu = nullptr;
 	uint64_t next_gpu_id = 1;
-	bool gpu_view_valid = false;
-	Vector3 gpu_view_camera; // Landscape space.
-	Plane gpu_view_planes[6];
-	bool gpu_view_frustum = false;
+	uint64_t next_gpu_serial = 1;
+	bool gpu_lod_valid = false; // LOD camera of the last levels chosen on the GPU.
+	Vector3 gpu_lod_camera;
+	struct GPUViewSettings {
+		RID scenario;
+		RID lod_viewport;
+		bool frozen = false;
+		Transform3D space;
+		uint32_t render_layers = 0;
+		uint32_t flags = 0;
+		bool operator==(const GPUViewSettings &p_other) const { return scenario == p_other.scenario && lod_viewport == p_other.lod_viewport && frozen == p_other.frozen && space == p_other.space && render_layers == p_other.render_layers && flags == p_other.flags; }
+	};
+	GPUViewSettings gpu_view_settings; // Last sent to the GPU.
+	bool gpu_view_settings_sent = false;
 	bool _is_gpu_active() const;
+	void _send_gpu_outputs(Entry *p_entry);
+	void _update_gpu_view_settings(bool p_visible);
 	void _free_gpu_outputs(Entry *p_entry);
 	void _free_gpu(Entry *p_entry);
 	void _gpu_call(const Callable &p_callable);
@@ -238,6 +271,8 @@ private:
 
 	// Rendering state.
 	bool render_pending = true;
+	bool view_culling = false; // The cells out of the frozen view are hidden (out_of_view).
+	void _update_view_culling();
 	bool has_last_camera = false;
 	Vector3 last_camera;
 	uint64_t last_update_usec = 0;
@@ -339,6 +374,8 @@ public:
 	bool is_gpu_indirect() const { return gpu_indirect; }
 	void set_gpu_frustum_culling(bool p_enable);
 	bool is_gpu_frustum_culling() const { return gpu_frustum_culling; }
+	void set_gpu_occlusion_culling(bool p_enable);
+	bool is_gpu_occlusion_culling() const { return gpu_occlusion_culling; }
 	void set_gpu_max_instances(int p_count);
 	int get_gpu_max_instances() const { return gpu_max_instances; }
 	bool is_gpu_indirect_active() const { return _is_gpu_active(); }
