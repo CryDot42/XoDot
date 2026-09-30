@@ -33,7 +33,6 @@
 #include "landscape_foliage_gpu.h"
 
 #include "landscape_horizon.h"
-
 #include "shaders/landscape_foliage_cull.glsl.gen.h"
 
 #include "core/object/callable_mp.h"
