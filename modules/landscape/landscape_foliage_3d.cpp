@@ -32,6 +32,7 @@
 
 #include "landscape_3d.h"
 #include "landscape_foliage_gpu.h"
+#include "landscape_horizon.h"
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
@@ -1266,10 +1267,12 @@ void LandscapeFoliage3D::_update_batch_settings(Entry *p_entry, const Cell &p_ce
 	RenderingServer *rs = RenderingServer::get_singleton();
 	rs->instance_set_transform(r_batch.instance, _get_space_transform());
 	rs->instance_set_layer_mask(r_batch.instance, render_layers);
-	// Out of the frozen view of the LOD camera, like the patches of the landscape: only the shadows are drawn.
+	// Hidden by the terrain, or out of the frozen view of the LOD camera (like the patches of the
+	// landscape): only the shadows are drawn.
+	const bool hidden = p_cell.out_of_view || p_cell.terrain_hidden;
 	const bool shadows = cast_shadows && p_entry->lod_shadows[p_lod];
-	rs->instance_set_visible(r_batch.instance, is_visible_in_tree() && (!p_cell.out_of_view || shadows));
-	rs->instance_geometry_set_cast_shadows_setting(r_batch.instance, !shadows ? RSE::SHADOW_CASTING_SETTING_OFF : (p_cell.out_of_view ? RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY : RSE::SHADOW_CASTING_SETTING_ON));
+	rs->instance_set_visible(r_batch.instance, is_visible_in_tree() && (!hidden || shadows));
+	rs->instance_geometry_set_cast_shadows_setting(r_batch.instance, !shadows ? RSE::SHADOW_CASTING_SETTING_OFF : (hidden ? RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY : RSE::SHADOW_CASTING_SETTING_ON));
 	if (debug_view != DEBUG_VIEW_DISABLED) {
 		// One shared material, the color is an instance uniform of the batch.
 		rs->instance_geometry_set_material_override(r_batch.instance, _get_debug_material());
@@ -1420,7 +1423,7 @@ void LandscapeFoliage3D::_update_debug_bounds() {
 				for (const Batch &batch : cell.batches) {
 					drawn = drawn || (batch.instance.is_valid() && batch.count > 0);
 				}
-				drawn = drawn && !cell.out_of_view;
+				drawn = drawn && !cell.out_of_view && !cell.terrain_hidden;
 			}
 			if (!drawn) {
 				continue;
@@ -1600,12 +1603,15 @@ bool LandscapeFoliage3D::_update_cell(Entry *p_entry, Cell &r_cell, int p_state,
 		r_cell.state = STATE_CULLED;
 		r_cell.render_dirty = false;
 		r_cell.out_of_view = false;
+		r_cell.terrain_hidden = false;
 		return true;
 	}
 	// Its bounds may have changed.
 	const bool out_of_view = view_culling && !_is_in_view(r_cell.bounds);
-	if (out_of_view != r_cell.out_of_view) {
+	const bool terrain_hidden = terrain_horizon && terrain_horizon->is_aabb_hidden(r_cell.bounds);
+	if (out_of_view != r_cell.out_of_view || terrain_hidden != r_cell.terrain_hidden) {
 		r_cell.out_of_view = out_of_view;
+		r_cell.terrain_hidden = terrain_hidden;
 		for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
 			_update_batch_settings(p_entry, r_cell, lod, r_cell.batches[lod]);
 		}
@@ -1698,6 +1704,55 @@ void LandscapeFoliage3D::_update_view_culling() {
 	debug_bounds_dirty = true;
 }
 
+real_t LandscapeFoliage3D::get_terrain_occlusion_range() const {
+	if (!terrain_occlusion_culling || !is_inside_tree() || !is_visible_in_tree()) {
+		return 0.0;
+	}
+	real_t range = 0.0;
+	for (const Entry *entry : entries) {
+		if (entry->type.is_null() || entry->count == 0) {
+			continue;
+		}
+		if (entry->cull_end <= 0.0f) {
+			return Math::INF;
+		}
+		range = MAX(range, entry->cull_end + entry->transition * 0.5f + chunk_size);
+	}
+	return range;
+}
+
+void LandscapeFoliage3D::_update_terrain_culling() {
+	// The cells that the terrain hides from the LOD camera only draw their shadows. The horizon is
+	// exact for the current camera, so it also works when it moves (unlike the depth buffer).
+	terrain_horizon = nullptr;
+	if (terrain_occlusion_culling && landscape && view.valid && !_is_gpu_active()) {
+		terrain_horizon = landscape->get_horizon(view.position);
+	}
+	const uint64_t version = terrain_horizon ? terrain_horizon->get_version() : 0;
+	if (version == terrain_culling_version) {
+		return;
+	}
+	terrain_culling_version = version;
+	for (Entry *entry : entries) {
+		for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
+			Cell &cell = kv.value;
+			bool rendered = false;
+			for (const Batch &batch : cell.batches) {
+				rendered = rendered || batch.instance.is_valid();
+			}
+			const bool hidden = rendered && terrain_horizon && terrain_horizon->is_aabb_hidden(cell.bounds);
+			if (hidden == cell.terrain_hidden) {
+				continue;
+			}
+			cell.terrain_hidden = hidden;
+			for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
+				_update_batch_settings(entry, cell, lod, cell.batches[lod]);
+			}
+			debug_bounds_dirty = true;
+		}
+	}
+}
+
 void LandscapeFoliage3D::_update_rendering() {
 	if (!is_inside_tree() || get_world_3d().is_null() || !is_visible_in_tree()) {
 		return;
@@ -1713,6 +1768,7 @@ void LandscapeFoliage3D::_update_rendering() {
 		return;
 	}
 	_update_view_culling();
+	_update_terrain_culling();
 	if (debug_bounds_dirty && debug_view != DEBUG_VIEW_DISABLED) {
 		_update_debug_bounds();
 	}
@@ -2676,11 +2732,51 @@ void LandscapeFoliage3D::_update_gpu_view_settings(bool p_visible) {
 #endif
 }
 
-void LandscapeFoliage3D::_frame_pre_draw() {
+void LandscapeFoliage3D::_update_gpu_horizon() {
 #ifdef RD_ENABLED
-	if (!_is_gpu_active()) {
+	// The GPU culling tests the instances against the horizon of the LOD camera, in its views.
+	const LandscapeHorizon *horizon = nullptr;
+	if (terrain_occlusion_culling && landscape && view.valid) {
+		horizon = landscape->get_horizon(view.position);
+	}
+	const uint64_t version = horizon ? horizon->get_version() : 0;
+	if (version == gpu_horizon_version) {
 		return;
 	}
+	gpu_horizon_version = version;
+	Vector<float> table;
+	Vector3 camera;
+	float first_ring = 0.0;
+	float ring_scale = 0.0;
+	if (horizon) {
+		const LocalVector<float> &source = horizon->get_table();
+		table.resize(source.size());
+		memcpy(table.ptrw(), source.ptr(), source.size() * sizeof(float));
+		camera = horizon->get_params().camera;
+		first_ring = horizon->get_first_ring();
+		ring_scale = horizon->get_ring_scale();
+	}
+	_gpu_call(callable_mp(gpu, &LandscapeFoliageGPU::set_horizon).bind(table, camera, first_ring, ring_scale));
+#endif
+}
+
+void LandscapeFoliage3D::_frame_pre_draw() {
+	if (!is_inside_tree()) {
+		return;
+	}
+	if (!_is_gpu_active()) {
+		// The cells hidden by the terrain from the camera of this frame (after the scripts moved it).
+		if (is_visible_in_tree() && get_world_3d().is_valid()) {
+			_update_view();
+			_update_view_culling();
+			_update_terrain_culling();
+			if (debug_bounds_dirty && debug_view != DEBUG_VIEW_DISABLED) {
+				_update_debug_bounds();
+			}
+		}
+		return;
+	}
+#ifdef RD_ENABLED
 	// Hidden: the cameras drawn don't cull anything.
 	_update_gpu_view_settings(is_visible_in_tree());
 	if (!is_visible_in_tree()) {
@@ -2689,6 +2785,7 @@ void LandscapeFoliage3D::_frame_pre_draw() {
 	// The levels of detail for the LOD camera of this frame (after the scripts moved it), frozen
 	// with the LOD of the landscape. The cameras drawn cull the main lists (see LandscapeFoliageGPU).
 	_update_view();
+	_update_gpu_horizon();
 	const bool moved = view.valid != gpu_lod_valid || view.position != gpu_lod_camera;
 	gpu_lod_valid = view.valid;
 	gpu_lod_camera = view.position;
@@ -2745,13 +2842,13 @@ void LandscapeFoliage3D::set_gpu_indirect(bool p_enable) {
 #ifdef RD_ENABLED
 	if (gpu_indirect && !gpu && is_gpu_indirect_supported()) {
 		gpu = memnew(LandscapeFoliageGPU);
-		if (is_inside_tree()) {
-			RenderingServer::get_singleton()->connect(SNAME("frame_pre_draw"), callable_mp(this, &LandscapeFoliage3D::_frame_pre_draw));
-		}
+		gpu_horizon_version = UINT64_MAX; // Sent again.
+		gpu_view_settings_sent = false;
 	}
 #endif
 	if (was_active != _is_gpu_active()) {
 		// Switches between the CPU and the GPU paths.
+		terrain_culling_version = UINT64_MAX;
 		for (Entry *entry : entries) {
 			for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
 				_free_cell_rendering(kv.value);
@@ -2824,6 +2921,15 @@ void LandscapeFoliage3D::set_cast_shadows(bool p_enable) {
 	_update_all_batch_settings();
 }
 
+void LandscapeFoliage3D::set_terrain_occlusion_culling(bool p_enable) {
+	if (terrain_occlusion_culling == p_enable) {
+		return;
+	}
+	terrain_occlusion_culling = p_enable;
+	terrain_culling_version = UINT64_MAX; // Tested again (the GPU culling before the next frame).
+	render_pending = true;
+}
+
 void LandscapeFoliage3D::force_update() {
 	for (Entry *entry : entries) {
 		_update_entry_lods(entry);
@@ -2842,6 +2948,7 @@ Dictionary LandscapeFoliage3D::get_statistics() const {
 	int64_t cells_rendered = 0;
 	int64_t cells_mixed = 0;
 	int64_t cells_out_of_view = 0;
+	int64_t cells_hidden_by_terrain = 0;
 	int64_t batches = 0;
 	int64_t drawn = 0;
 	for (const Entry *entry : entries) {
@@ -2851,13 +2958,14 @@ Dictionary LandscapeFoliage3D::get_statistics() const {
 			for (const Batch &batch : kv.value.batches) {
 				if (batch.instance.is_valid() && batch.count > 0) {
 					batches++;
-					drawn += kv.value.out_of_view ? 0 : batch.count;
+					drawn += (kv.value.out_of_view || kv.value.terrain_hidden) ? 0 : batch.count;
 					rendered = true;
 				}
 			}
 			cells_rendered += rendered ? 1 : 0;
 			cells_mixed += kv.value.state == STATE_MIXED ? 1 : 0;
 			cells_out_of_view += rendered && kv.value.out_of_view ? 1 : 0;
+			cells_hidden_by_terrain += rendered && kv.value.terrain_hidden ? 1 : 0;
 		}
 	}
 	// GPU indirect rendering: instances in the GPU buffers, drawn (read back from the last run).
@@ -2867,6 +2975,7 @@ Dictionary LandscapeFoliage3D::get_statistics() const {
 	int64_t gpu_shadow_drawn = 0;
 	int64_t gpu_frustum_culled = 0;
 	int64_t gpu_occlusion_culled = 0;
+	int64_t gpu_terrain_culled = 0;
 	int64_t gpu_dropped = 0;
 	int64_t gpu_memory = 0;
 #ifdef RD_ENABLED
@@ -2880,6 +2989,7 @@ Dictionary LandscapeFoliage3D::get_statistics() const {
 			const LandscapeFoliageGPU::Stats gpu_stats = gpu->get_stats(entry->gpu_id);
 			gpu_frustum_culled += gpu_stats.frustum_culled;
 			gpu_occlusion_culled += gpu_stats.occlusion_culled;
+			gpu_terrain_culled += gpu_stats.terrain_culled;
 			for (int list = 0; list < 2; list++) {
 				for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
 					const Entry::GPUOutput &output = entry->gpu_outputs[list][lod];
@@ -2906,6 +3016,7 @@ Dictionary LandscapeFoliage3D::get_statistics() const {
 	stats["cells_rendered"] = gpu_active ? gpu_cells : cells_rendered;
 	stats["cells_mixed"] = cells_mixed;
 	stats["cells_out_of_view"] = cells_out_of_view;
+	stats["cells_hidden_by_terrain"] = cells_hidden_by_terrain;
 	stats["batches"] = batches;
 	stats["instances_drawn"] = drawn;
 	stats["update_usec"] = int64_t(last_update_usec);
@@ -2916,6 +3027,7 @@ Dictionary LandscapeFoliage3D::get_statistics() const {
 	stats["gpu_shadow_instances_drawn"] = gpu_shadow_drawn;
 	stats["gpu_frustum_culled"] = gpu_frustum_culled;
 	stats["gpu_occlusion_culled"] = gpu_occlusion_culled;
+	stats["gpu_terrain_culled"] = gpu_terrain_culled;
 	stats["gpu_dropped"] = gpu_dropped;
 	stats["gpu_memory"] = gpu_memory;
 	stats["streamed"] = _is_streamed();
@@ -2969,22 +3081,24 @@ void LandscapeFoliage3D::_notification(int p_what) {
 			if (landscape) {
 				landscape->_register_foliage(this);
 			}
-			if (gpu) {
-				RenderingServer::get_singleton()->connect(SNAME("frame_pre_draw"), callable_mp(this, &LandscapeFoliage3D::_frame_pre_draw));
-			}
+			// The view of the frame, after the scripts moved the camera: culling by the terrain, GPU culling.
+			RenderingServer::get_singleton()->connect(SNAME("frame_pre_draw"), callable_mp(this, &LandscapeFoliage3D::_frame_pre_draw));
 			render_pending = true;
 			streaming_dirty = true;
 			view = View();
 			gpu_lod_valid = false;
 			gpu_view_settings_sent = false;
+			gpu_horizon_version = UINT64_MAX;
+			terrain_culling_version = UINT64_MAX;
 			set_process_internal(true);
 		} break;
 
 		case NOTIFICATION_EXIT_TREE: {
 			_free_all_rendering();
-			if (gpu && RenderingServer::get_singleton()->is_connected(SNAME("frame_pre_draw"), callable_mp(this, &LandscapeFoliage3D::_frame_pre_draw))) {
+			if (RenderingServer::get_singleton()->is_connected(SNAME("frame_pre_draw"), callable_mp(this, &LandscapeFoliage3D::_frame_pre_draw))) {
 				RenderingServer::get_singleton()->disconnect(SNAME("frame_pre_draw"), callable_mp(this, &LandscapeFoliage3D::_frame_pre_draw));
 			}
+			terrain_horizon = nullptr;
 			if (landscape) {
 				landscape->_unregister_foliage(this);
 				landscape = nullptr;
@@ -3063,6 +3177,8 @@ void LandscapeFoliage3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_render_layers"), &LandscapeFoliage3D::get_render_layers);
 	ClassDB::bind_method(D_METHOD("set_cast_shadows", "enable"), &LandscapeFoliage3D::set_cast_shadows);
 	ClassDB::bind_method(D_METHOD("is_casting_shadows"), &LandscapeFoliage3D::is_casting_shadows);
+	ClassDB::bind_method(D_METHOD("set_terrain_occlusion_culling", "enable"), &LandscapeFoliage3D::set_terrain_occlusion_culling);
+	ClassDB::bind_method(D_METHOD("is_terrain_occlusion_culling"), &LandscapeFoliage3D::is_terrain_occlusion_culling);
 	ClassDB::bind_method(D_METHOD("set_gpu_indirect", "enable"), &LandscapeFoliage3D::set_gpu_indirect);
 	ClassDB::bind_method(D_METHOD("is_gpu_indirect"), &LandscapeFoliage3D::is_gpu_indirect);
 	ClassDB::bind_method(D_METHOD("set_gpu_frustum_culling", "enable"), &LandscapeFoliage3D::set_gpu_frustum_culling);
@@ -3113,6 +3229,7 @@ void LandscapeFoliage3D::_bind_methods() {
 	ADD_GROUP("Rendering", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "render_layers", PROPERTY_HINT_LAYERS_3D_RENDER), "set_render_layers", "get_render_layers");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "cast_shadows"), "set_cast_shadows", "is_casting_shadows");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "terrain_occlusion_culling"), "set_terrain_occlusion_culling", "is_terrain_occlusion_culling");
 
 	ADD_GROUP("GPU", "gpu_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "gpu_indirect"), "set_gpu_indirect", "is_gpu_indirect");

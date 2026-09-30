@@ -17,7 +17,8 @@
 // MODE_EMIT: one dispatch per level of detail and list. The instances of the level are appended to
 // the instance buffer of the indirect MultiMesh of that level and list:
 // - shadow list (once per frame): every instance within the cull distance,
-// - main list (for every camera drawn): the instances whose bounding sphere is in the view frustum
+// - main list (for every camera drawn): the instances whose bounding sphere is in the view frustum,
+//   not hidden by the terrain (horizon seen from the LOD camera, see LandscapeHorizon, in its views)
 //   and not hidden in the occlusion buffer of the viewport (HZB, the same test as the one of the
 //   renderer, see RendererSceneOcclusionCull::HZBuffer).
 //
@@ -31,10 +32,12 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 #define COUNTER_OVERFLOW 8u
 #define COUNTER_FRUSTUM_CULLED 9u
 #define COUNTER_OCCLUSION_CULLED 10u
+#define COUNTER_TERRAIN_CULLED 11u
 #define COMMAND_STRIDE 5u
 #define VIEW_FRUSTUM 1u
 #define VIEW_OCCLUSION 2u
 #define VIEW_ORTHOGONAL 4u
+#define VIEW_TERRAIN 8u
 #define MAX_HZB_MIPS 16
 #define MAX_HZB_SAMPLES 128
 
@@ -154,6 +157,8 @@ layout(set = 0, binding = 6, std140) uniform View {
 	vec4 hzb; // xy = size of the first mip of the occlusion buffer, z = mip count, w = scale of the landscape space.
 	uvec4 flags; // x = VIEW_* flags.
 	uvec4 hzb_mips[MAX_HZB_MIPS]; // x = offset of the mip in the occlusion buffer, y = width, z = height.
+	vec4 horizon_camera; // xyz = point the horizon is seen from (landscape space), w = distance of the first ring.
+	vec4 horizon; // x = rings per unit of the logarithm of the distance, y = azimuths per radian, z = azimuths, w = rings.
 }
 view;
 
@@ -163,8 +168,50 @@ layout(set = 0, binding = 7, std430) restrict readonly buffer OcclusionBuffer {
 }
 hzb;
 
+// Horizon of the terrain: for every azimuth and ring, the tangent of the steepest elevation of the
+// terrain closer than the ring (see LandscapeHorizon).
+layout(set = 0, binding = 8, std430) restrict readonly buffer Horizon {
+	float data[];
+}
+horizon;
+
 shared uint group_frustum_culled;
 shared uint group_occlusion_culled;
+shared uint group_terrain_culled;
+
+// Same test as LandscapeHorizon::is_sphere_hidden(), in the landscape space.
+bool is_hidden_by_terrain(vec3 p_center, float p_radius) {
+	vec2 offset = p_center.xz - view.horizon_camera.xz;
+	float center_distance = length(offset);
+	if (center_distance <= p_radius) {
+		return false;
+	}
+	float nearest = center_distance - p_radius;
+	if (nearest < view.horizon_camera.w) {
+		return false;
+	}
+	int rings = int(view.horizon.w);
+	int azimuths = int(view.horizon.z);
+	int ring = min(int(log(nearest / view.horizon_camera.w) * view.horizon.x), rings - 1);
+	// The steepest elevation of the sphere: its top, nearest when above the point, farthest below.
+	float top = p_center.y + p_radius - view.horizon_camera.y;
+	float tangent = top > 0.0 ? top / nearest : top / (center_distance + p_radius);
+	float azimuth = atan(offset.y, offset.x);
+	float half_width = asin(min(p_radius / center_distance, 1.0));
+	int from = int(floor((azimuth - half_width) * view.horizon.y));
+	int to = int(floor((azimuth + half_width) * view.horizon.y));
+	if (to - from >= azimuths / 8) {
+		return false; // Too wide (close to the point).
+	}
+	for (int i = from; i <= to; i++) {
+		// The azimuths are at least -azimuths / 2 - azimuths / 8 (atan() is at least -pi).
+		int index = (i + azimuths) % azimuths;
+		if (tangent >= horizon.data[index * rings + ring]) {
+			return false;
+		}
+	}
+	return true;
+}
 
 // Same test as RendererSceneOcclusionCull::HZBuffer::_is_occluded(), for a bounding sphere.
 bool is_occluded(vec3 p_center, float p_radius) {
@@ -228,7 +275,7 @@ bool is_occluded(vec3 p_center, float p_radius) {
 
 // Whether the instance is drawn by the camera of the view (main list).
 bool is_in_view(vec4 p_r0, vec4 p_r1, vec4 p_r2) {
-	if ((view.flags.x & (VIEW_FRUSTUM | VIEW_OCCLUSION)) == 0u) {
+	if ((view.flags.x & (VIEW_FRUSTUM | VIEW_OCCLUSION | VIEW_TERRAIN)) == 0u) {
 		return true;
 	}
 	vec3 sphere = params.sphere.xyz;
@@ -244,6 +291,10 @@ bool is_in_view(vec4 p_r0, vec4 p_r1, vec4 p_r2) {
 				return false;
 			}
 		}
+	}
+	if ((view.flags.x & VIEW_TERRAIN) != 0u && is_hidden_by_terrain(local_center, params.sphere.w * scale)) {
+		atomicAdd(group_terrain_culled, 1u);
+		return false;
 	}
 	if ((view.flags.x & VIEW_OCCLUSION) != 0u && is_occluded(center, radius)) {
 		atomicAdd(group_occlusion_culled, 1u);
@@ -280,6 +331,7 @@ void main() {
 	if (gl_LocalInvocationIndex == 0u) {
 		group_frustum_culled = 0u;
 		group_occlusion_culled = 0u;
+		group_terrain_culled = 0u;
 	}
 	barrier();
 	uint index = instance_index();
@@ -294,6 +346,9 @@ void main() {
 		}
 		if (group_occlusion_culled > 0u) {
 			atomicAdd(counters.data[COUNTER_OCCLUSION_CULLED], group_occlusion_culled);
+		}
+		if (group_terrain_culled > 0u) {
+			atomicAdd(counters.data[COUNTER_TERRAIN_CULLED], group_terrain_culled);
 		}
 	}
 }

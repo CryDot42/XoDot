@@ -103,7 +103,7 @@ public:
 		_FORCE_INLINE_ static void _reproject_texel_from_row(const ReprojectionData &p_data, const Vector4 &p_view_row, const Vector4 &p_clip_row, real_t p_ndc_x, float p_depth, ReprojectedTexel &r_texel);
 		void _reproject_row(uint32_t p_row, const ReprojectionData *p_data);
 		void _find_disocclusions_row(uint32_t p_row, const ReprojectionData *p_data);
-		void _unocclude_bounds(float *p_data, const AABB &p_aabb, const Transform3D &p_cam_inv_transform, const Projection &p_cam_projection) const;
+		void _unocclude_bounds(float *p_data, const AABB &p_aabb, const Vector3 &p_cam_position, const Transform3D &p_cam_inv_transform, const Projection &p_cam_projection, bool p_cam_orthogonal) const;
 
 		bool use_occluders = true;
 		bool use_depth_readback = false;

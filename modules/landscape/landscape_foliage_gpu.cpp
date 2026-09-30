@@ -32,6 +32,8 @@
 
 #include "landscape_foliage_gpu.h"
 
+#include "landscape_horizon.h"
+
 #include "shaders/landscape_foliage_cull.glsl.gen.h"
 
 #include "core/object/callable_mp.h"
@@ -49,12 +51,14 @@ LandscapeFoliageGPU::Shared *LandscapeFoliageGPU::shared = nullptr;
 static constexpr uint32_t FOLIAGE_LIST_COUNTERS = 16;
 static constexpr uint32_t FOLIAGE_COUNTER_FRUSTUM_CULLED = 9;
 static constexpr uint32_t FOLIAGE_COUNTER_OCCLUSION_CULLED = 10;
+static constexpr uint32_t FOLIAGE_COUNTER_TERRAIN_CULLED = 11;
 static constexpr uint32_t FOLIAGE_COUNTER_COUNT = FOLIAGE_LIST_COUNTERS * LandscapeFoliageGPU::LIST_MAX;
 static constexpr uint32_t FOLIAGE_LOD_UNKNOWN = 254;
 static constexpr uint32_t FOLIAGE_GROUP_SIZE = 64;
 static constexpr uint32_t FOLIAGE_MAX_GROUPS_X = 32768;
 static constexpr int FOLIAGE_MAX_HZB_MIPS = 16;
 static constexpr uint32_t FOLIAGE_VIEW_ORTHOGONAL = 4;
+static constexpr uint32_t FOLIAGE_VIEW_TERRAIN = 8;
 
 struct LandscapeFoliageCullPushConstant {
 	uint32_t lod;
@@ -73,9 +77,11 @@ struct LandscapeFoliageViewParams {
 	float hzb[4] = {};
 	uint32_t flags[4] = {};
 	uint32_t hzb_mips[FOLIAGE_MAX_HZB_MIPS][4] = {};
+	float horizon_camera[4] = {};
+	float horizon[4] = {};
 };
 
-static_assert(sizeof(LandscapeFoliageViewParams) == 560, "LandscapeFoliageViewParams must match the std140 layout of the foliage culling shader.");
+static_assert(sizeof(LandscapeFoliageViewParams) == 592, "LandscapeFoliageViewParams must match the std140 layout of the foliage culling shader.");
 
 static _FORCE_INLINE_ int64_t _foliage_gpu_bytes(uint32_t p_capacity) {
 	return int64_t(p_capacity) * (LandscapeFoliageGPU::INSTANCE_FLOATS * sizeof(float) + sizeof(uint32_t));
@@ -128,6 +134,35 @@ void LandscapeFoliageGPU::_ensure_view_resources() {
 			rd->set_resource_name(hzb_buffers[i], "Foliage Occlusion Buffer");
 		}
 	}
+	if (horizon_buffer.is_null()) {
+		horizon_capacity = 4; // Bound even without horizon.
+		horizon_buffer = rd->storage_buffer_create(horizon_capacity * sizeof(float));
+		rd->set_resource_name(horizon_buffer, "Foliage Terrain Horizon");
+	}
+}
+
+void LandscapeFoliageGPU::set_horizon(const Vector<float> &p_table, const Vector3 &p_camera, float p_first_ring, float p_ring_scale) {
+	horizon_valid = p_table.size() == LandscapeHorizon::AZIMUTHS * LandscapeHorizon::RINGS && p_first_ring > 0.0f;
+	if (horizon_valid) {
+		_ensure_view_resources();
+		RenderingDevice *rd = RenderingDevice::get_singleton();
+		const uint32_t size = p_table.size();
+		if (horizon_capacity < size) {
+			rd->free_rid(horizon_buffer);
+			horizon_capacity = size;
+			horizon_buffer = rd->storage_buffer_create(size * sizeof(float));
+			rd->set_resource_name(horizon_buffer, "Foliage Terrain Horizon");
+		}
+		rd->buffer_update(horizon_buffer, 0, size * sizeof(float), p_table.ptr());
+		horizon_camera = p_camera;
+		horizon_first_ring = p_first_ring;
+		horizon_ring_scale = p_ring_scale;
+	}
+	// Emitted again by the next camera drawn.
+	for (KeyValue<uint64_t, Entry> &kv : entries) {
+		kv.value.main_view = 0;
+	}
+	last_view_id = 0;
 }
 
 void LandscapeFoliageGPU::_free_entry(Entry &r_entry) {
@@ -261,7 +296,8 @@ void LandscapeFoliageGPU::_emit(Entry &r_entry, int p_list, RD::ComputeListID p_
 					RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, r_entry.counters),
 					RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, target.instances),
 					RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, view_params),
-					RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_hzb));
+					RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_hzb),
+					RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, horizon_buffer));
 			rd->compute_list_bind_uniform_set(p_compute_list, emit_set, 0);
 			rd->compute_list_set_push_constant(p_compute_list, &target.push, sizeof(target.push));
 			rd->compute_list_dispatch(p_compute_list, groups_x, groups_y, 1);
@@ -462,6 +498,18 @@ void LandscapeFoliageGPU::_draw_view(RID p_viewport, const Transform3D &p_transf
 	if (current.orthogonal) {
 		params.flags[0] |= FOLIAGE_VIEW_ORTHOGONAL;
 	}
+	// The horizon of the terrain is valid for the views from its point only.
+	if (horizon_valid && !current.orthogonal && space.xform(horizon_camera).distance_to(current.transform.origin) < 0.01) {
+		params.flags[0] |= FOLIAGE_VIEW_TERRAIN;
+		params.horizon_camera[0] = horizon_camera.x;
+		params.horizon_camera[1] = horizon_camera.y;
+		params.horizon_camera[2] = horizon_camera.z;
+		params.horizon_camera[3] = horizon_first_ring;
+		params.horizon[0] = horizon_ring_scale;
+		params.horizon[1] = LandscapeHorizon::AZIMUTHS / Math::TAU;
+		params.horizon[2] = LandscapeHorizon::AZIMUTHS;
+		params.horizon[3] = LandscapeHorizon::RINGS;
+	}
 
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	rd->buffer_update(view_params, 0, sizeof(params), &params);
@@ -516,6 +564,7 @@ void LandscapeFoliageGPU::_stats_received(const Vector<uint8_t> &p_data, ObjectI
 	if (p_list == LIST_MAIN) {
 		last.frustum_culled = counters[FOLIAGE_COUNTER_FRUSTUM_CULLED];
 		last.occlusion_culled = counters[FOLIAGE_COUNTER_OCCLUSION_CULLED];
+		last.terrain_culled = counters[FOLIAGE_COUNTER_TERRAIN_CULLED];
 	}
 	// Most instances of every camera, for the outputs they were emitted with.
 	Stats &peak = entry->peak;
@@ -571,7 +620,7 @@ void LandscapeFoliageGPU::free_resources() {
 		stats.clear();
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
-	for (RID *buffer : { &view_params, &hzb_buffers[0], &hzb_buffers[1] }) {
+	for (RID *buffer : { &view_params, &hzb_buffers[0], &hzb_buffers[1], &horizon_buffer }) {
 		if (buffer->is_valid()) {
 			rd->free_rid(*buffer);
 			*buffer = RID();
@@ -579,6 +628,8 @@ void LandscapeFoliageGPU::free_resources() {
 	}
 	hzb_capacities[0] = 0;
 	hzb_capacities[1] = 0;
+	horizon_capacity = 0;
+	horizon_valid = false;
 	lod_view = View();
 	last_view_id = 0;
 	if (!initialized) {

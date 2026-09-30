@@ -40,6 +40,7 @@
 #include "core/math/rect2i.h"
 #include "core/math/vector2i.h"
 #include "core/templates/hash_map.h"
+#include "core/templates/hash_set.h"
 #include "core/variant/typed_array.h"
 
 class LandscapeData;
@@ -188,6 +189,10 @@ public:
 	bool is_hole(int p_x, int p_z) const;
 	void set_hole(int p_x, int p_z, bool p_hole);
 	void clear_holes();
+	// The cells (squares of p_cell_quads quads, like the patches of the LOD tree: cell (x, z) covers the
+	// texels x * p_cell_quads to (x + 1) * p_cell_quads) with a hole in the texel rect. Tiles without
+	// holes are skipped without reading their texels.
+	void get_hole_cells(const Rect2i &p_texel_rect, int p_cell_quads, HashSet<Vector2i> &r_cells) const;
 
 	// Region snapshots (used by undo/redo and runtime scripts).
 	Dictionary get_region(const Rect2i &p_rect, bool p_heights = true, bool p_weights = true) const;

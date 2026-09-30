@@ -232,6 +232,13 @@ TEST_CASE("[HZBOcclusion] Objects that moved since the depth buffer was rendered
 	CHECK_MESSAGE(!buffer.test_occluded(behind_left, camera, projection, false), "Objects revealed by moving objects should not be occluded.");
 	CHECK_MESSAGE(buffer.test_occluded(behind_right, camera, projection, false), "Objects hidden by objects that didn't move should remain occluded.");
 
+	// Something changed behind the left wall: the wall, in front of it, still occludes.
+	const AABB behind_wall_bounds = AABB(Vector3(-4.0f, -1.0f, -25.0f), Vector3(2.0f, 2.0f, 2.0f));
+	REQUIRE(buffer.reproject_depth(readback, camera, projection, false, false, Span<AABB>(&behind_wall_bounds, 1)));
+	buffer.update_mips();
+	CHECK_MESSAGE(buffer.test_occluded(behind_left, camera, projection, false), "Changes behind occluders should not stop them from occluding.");
+	CHECK(buffer.test_occluded(behind_right, camera, projection, false));
+
 	// Bounds crossing the near plane.
 	const AABB near_bounds = AABB(Vector3(-4.0f, -1.0f, -5.0f), Vector3(4.0f, 2.0f, 10.0f));
 	REQUIRE(buffer.reproject_depth(readback, camera, projection, false, false, Span<AABB>(&near_bounds, 1)));

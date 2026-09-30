@@ -1557,12 +1557,15 @@ String LandscapeFoliagePanel::get_statistics_text() const {
 	String text;
 	if (bool(s["gpu_indirect"])) {
 		text = vformat(TTR("Foliage: %s instances in %d cells, GPU culling: %s instances in %d cells, %s drawn (%s shadow casters) in %d batches, %s MB"), _format_count(int64_t(s["instances"])), int64_t(s["cells"]), _format_count(int64_t(s["gpu_instances"])), int64_t(s["cells_rendered"]), _format_count(int64_t(s["instances_drawn"])), _format_count(int64_t(s["gpu_shadow_instances_drawn"])), int64_t(s["batches"]), String::num(int64_t(s["gpu_memory"]) / 1048576.0, 1));
-		text += "\n" + vformat(TTR("Culled: %s out of the view, %s hidden by occlusion (HZB)."), _format_count(int64_t(s["gpu_frustum_culled"])), _format_count(int64_t(s["gpu_occlusion_culled"])));
+		text += "\n" + vformat(TTR("Culled: %s out of the view, %s hidden by the terrain, %s by occlusion (HZB)."), _format_count(int64_t(s["gpu_frustum_culled"])), _format_count(int64_t(s["gpu_terrain_culled"])), _format_count(int64_t(s["gpu_occlusion_culled"])));
 		if (int64_t(s["gpu_dropped"]) > 0) {
 			text += "\n" + vformat(TTR("%s instances dropped: increase GPU > Max Instances."), _format_count(int64_t(s["gpu_dropped"])));
 		}
 	} else {
 		text = vformat(TTR("Foliage: %s instances in %d cells, %d cells drawn (%d sorted per instance), %s instances in %d batches, update %s ms"), _format_count(int64_t(s["instances"])), int64_t(s["cells"]), int64_t(s["cells_rendered"]), int64_t(s["cells_mixed"]), _format_count(int64_t(s["instances_drawn"])), int64_t(s["batches"]), String::num(int64_t(s["update_usec"]) / 1000.0, 2));
+		if (int64_t(s["cells_hidden_by_terrain"]) > 0) {
+			text += "\n" + vformat(TTR("%d cells hidden by the terrain (shadows only)."), int64_t(s["cells_hidden_by_terrain"]));
+		}
 		if (int64_t(s["cells_out_of_view"]) > 0) {
 			text += "\n" + vformat(TTR("%d cells out of the frozen view (shadows only)."), int64_t(s["cells_out_of_view"]));
 		}

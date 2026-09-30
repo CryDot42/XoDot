@@ -538,6 +538,72 @@ TEST_CASE("[SceneTree][Landscape][Foliage] Culling with the frozen view of the c
 	memdelete(landscape);
 }
 
+TEST_CASE("[SceneTree][Landscape][Foliage] Culling of the cells hidden by the terrain") {
+	LandscapeFoliage3D *foliage = nullptr;
+	Landscape3D *landscape = make_landscape(foliage, 0.0);
+	// A ridge 30 m high across the landscape (x from 40 to 88, flat top from 56 to 72), and patches
+	// of 8 m: the horizon relies on the lowest heights of the patches of the LOD tree.
+	landscape->set_patch_size(8);
+	Ref<Image> heights = Image::create_empty(129, 129, false, Image::FORMAT_RF);
+	for (int z = 0; z < 129; z++) {
+		for (int x = 0; x < 129; x++) {
+			heights->set_pixel(x, z, Color(30.0 * CLAMP((24.0 - Math::abs(x - 64.0)) / 16.0, 0.0, 1.0), 0, 0));
+		}
+	}
+	landscape->get_data()->set_heightmap_image(heights);
+	Camera3D *camera = memnew(Camera3D);
+	landscape->add_child(camera);
+	camera->set_position(Vector3(2, 2, 64));
+	camera->set_rotation(Vector3(0, -Math::PI / 2, 0)); // Looks at the ridge (+X).
+	landscape->set_lod_camera_path(landscape->get_path_to(camera));
+	// Trees 8 m high.
+	Ref<LandscapeFoliageType> type = make_type();
+	Ref<BoxMesh> tree = type->get_mesh();
+	tree->set_size(Vector3(1, 8, 1));
+	type->set_cull_distance(200.0);
+	foliage->add_foliage_type(type);
+	// Rows of instances on the ground every 10 m, in front of the ridge, on it and behind it.
+	for (real_t z : { real_t(20.0), real_t(64.0), real_t(100.0) }) {
+		for (int i = 0; i < 13; i++) {
+			CHECK(foliage->place_instance(0, Vector3(5 + i * 10, 100, z)));
+		}
+	}
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	Dictionary stats = foliage->get_statistics();
+	// The cells from 96 m (3 instances per row) are behind the ridge: only their shadows are drawn.
+	CHECK(int64_t(stats["cells_rendered"]) == 12);
+	CHECK(int64_t(stats["cells_hidden_by_terrain"]) == 3);
+	CHECK(int64_t(stats["instances_drawn"]) == 30);
+
+	// Disabled: the renderer culls them with the depth buffer only.
+	foliage->set_terrain_occlusion_culling(false);
+	CHECK(foliage->get_terrain_occlusion_range() == 0.0);
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	stats = foliage->get_statistics();
+	CHECK(int64_t(stats["cells_hidden_by_terrain"]) == 0);
+	CHECK(int64_t(stats["instances_drawn"]) == 39);
+	foliage->set_terrain_occlusion_culling(true);
+	CHECK(foliage->get_terrain_occlusion_range() > 200.0);
+
+	// Seen from above, nothing is hidden.
+	camera->set_position(Vector3(2, 60, 64));
+	camera->set_rotation(Vector3(-0.5, -Math::PI / 2, 0));
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	stats = foliage->get_statistics();
+	CHECK(int64_t(stats["cells_hidden_by_terrain"]) == 0);
+	CHECK(int64_t(stats["instances_drawn"]) == 39);
+
+	// Back on the ground on the other side: the cells until the top of the ridge are hidden now.
+	camera->set_position(Vector3(126, 2, 64));
+	camera->set_rotation(Vector3(0, Math::PI / 2, 0));
+	foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);
+	stats = foliage->get_statistics();
+	CHECK(int64_t(stats["cells_hidden_by_terrain"]) == 6);
+	CHECK(int64_t(stats["instances_drawn"]) == 21);
+
+	memdelete(landscape);
+}
+
 static void process_streaming(LandscapeFoliage3D *p_foliage) {
 	// Requests the needed cells, waits for their loads and installs them.
 	p_foliage->notification(Node::NOTIFICATION_INTERNAL_PROCESS);

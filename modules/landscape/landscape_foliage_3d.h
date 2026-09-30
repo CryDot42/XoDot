@@ -40,6 +40,7 @@
 
 class Camera3D;
 class LandscapeFoliageGPU;
+class LandscapeHorizon;
 class Shader;
 class ShaderMaterial;
 class StandardMaterial3D;
@@ -61,9 +62,11 @@ class Landscape3D;
 // Instances follow the terrain when it is sculpted (`follow_terrain`). The debug views color the
 // instances by level of detail, cell or cell state and draw the bounds of the drawn cells.
 //
-// The renderer culls the cells by the view frustum and occlusion (HZB) of every camera. While the
-// LOD of the landscape is frozen, the cells out of the view of its camera are hidden too (only
-// their shadows are drawn), like the patches of the landscape.
+// The renderer culls the cells by the view frustum and occlusion (HZB) of every camera. The cells
+// that the terrain hides from the camera of the landscape (its horizon, see LandscapeHorizon:
+// exact for the current camera, also when it moves) only draw their shadows
+// (`terrain_occlusion_culling`). While the LOD of the landscape is frozen, the cells out of the
+// view of its camera are hidden too, like the patches of the landscape.
 //
 // Optionally (`gpu_indirect`, Forward+ and Mobile), the instances of the loaded cells are culled
 // (view frustum and occlusion buffer of every camera, per instance) and sorted per level of detail
@@ -125,6 +128,7 @@ private:
 		Vector3 sort_camera; // Camera position of the last per-instance sort.
 		LocalVector<uint8_t> instance_lods; // Level of each instance (per-instance sort).
 		bool out_of_view = false; // Out of the frozen view of the LOD camera: only shadows are drawn.
+		bool terrain_hidden = false; // Hidden by the terrain from the LOD camera: only shadows are drawn.
 	};
 
 	struct Entry {
@@ -185,6 +189,14 @@ private:
 	bool follow_terrain = true;
 	uint32_t render_layers = 1;
 	bool cast_shadows = true;
+	bool terrain_occlusion_culling = true;
+
+	// Occlusion by the terrain (horizon of the landscape from the LOD camera).
+	const LandscapeHorizon *terrain_horizon = nullptr; // Current (chunks).
+	uint64_t terrain_culling_version = 0; // Horizon the cells were tested with.
+	uint64_t gpu_horizon_version = 0; // Horizon sent to the GPU.
+	void _update_terrain_culling();
+	void _update_gpu_horizon();
 
 	Landscape3D *landscape = nullptr;
 	RandomPCG rng;
@@ -370,6 +382,11 @@ public:
 	uint32_t get_render_layers() const { return render_layers; }
 	void set_cast_shadows(bool p_enable);
 	bool is_casting_shadows() const { return cast_shadows; }
+	void set_terrain_occlusion_culling(bool p_enable);
+	bool is_terrain_occlusion_culling() const { return terrain_occlusion_culling; }
+	// Distance (landscape space) up to which the terrain may hide the instances from the camera
+	// (infinite for the types without cull distance, 0 without terrain occlusion culling).
+	real_t get_terrain_occlusion_range() const;
 	void set_gpu_indirect(bool p_enable);
 	bool is_gpu_indirect() const { return gpu_indirect; }
 	void set_gpu_frustum_culling(bool p_enable);

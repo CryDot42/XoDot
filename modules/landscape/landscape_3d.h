@@ -32,6 +32,7 @@
 
 #include "landscape_data.h"
 #include "landscape_gpu.h"
+#include "landscape_horizon.h"
 #include "landscape_layer.h"
 #include "landscape_lod_tree.h"
 #include "landscape_spline_system.h"
@@ -214,6 +215,15 @@ private:
 	LocalVector<LandscapeFoliage3D *> foliages;
 	TypedArray<LandscapeFoliage3D> _get_foliages_bind() const;
 
+	// Horizon of the terrain around the camera: occlusion culling by the terrain (foliage).
+	LandscapeHorizon horizon;
+	LandscapeHorizon::Holes horizon_holes;
+	bool horizon_holes_dirty = true; // Every leaf.
+	LocalVector<Rect2i> horizon_hole_rects; // Texels.
+	uint64_t terrain_version = 1; // Heights or holes changed.
+	uint64_t horizon_terrain_version = 0;
+	void _update_horizon_holes(const LandscapeLodTree &p_tree);
+
 	void _clear_collision();
 	void _update_collision();
 	void _mark_collision_dirty(const Rect2i &p_rect);
@@ -313,6 +323,10 @@ public:
 	void _register_foliage(LandscapeFoliage3D *p_foliage);
 	void _unregister_foliage(LandscapeFoliage3D *p_foliage);
 	const LocalVector<LandscapeFoliage3D *> &get_foliages() const { return foliages; }
+	// The horizon of the terrain seen from a point of the landscape space (built again when it or the
+	// terrain changes), up to the cull distance of the foliage. Null when the terrain can't be relied
+	// on to hide anything from there: below the terrain (e.g. in a cave), orthogonal camera, no data.
+	const LandscapeHorizon *get_horizon(const Vector3 &p_local_camera);
 
 	// Position of the camera used for the LOD (and to build spline meshes and foliage around it).
 	bool get_view_position(Vector3 &r_global) const;

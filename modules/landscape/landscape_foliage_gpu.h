@@ -90,9 +90,10 @@ public:
 		uint64_t serial = 0; // Outputs the counts were emitted with (see set_outputs(), 0: none yet).
 		uint32_t lists = 0; // Bit per list with counts.
 		uint32_t counts[OUTPUT_COUNT] = {}; // Instances emitted per output (may exceed its capacity).
-		// Main list: instances out of the view frustum, hidden by occlusion.
+		// Main list: instances out of the view frustum, hidden by occlusion, by the terrain.
 		uint32_t frustum_culled = 0;
 		uint32_t occlusion_culled = 0;
+		uint32_t terrain_culled = 0;
 	};
 
 private:
@@ -159,6 +160,13 @@ private:
 	RID view_params;
 	RID hzb_buffers[2]; // LOD camera, other cameras.
 	uint32_t hzb_capacities[2] = {};
+	// Horizon of the terrain seen from the LOD camera (see LandscapeHorizon), for its views.
+	RID horizon_buffer;
+	uint32_t horizon_capacity = 0;
+	bool horizon_valid = false;
+	Vector3 horizon_camera; // Landscape space.
+	float horizon_first_ring = 0.0;
+	float horizon_ring_scale = 0.0;
 
 	mutable Mutex stats_mutex;
 	struct StatsEntry {
@@ -195,6 +203,9 @@ public:
 	// The cameras that cull the main lists: the ones drawn in the scenario that see the layers, the
 	// view of the LOD camera (its viewport) while frozen. p_flags: ViewFlags.
 	void set_view_settings(RID p_scenario, RID p_lod_viewport, bool p_frozen, const Transform3D &p_space, uint32_t p_render_layers, uint32_t p_flags);
+	// The horizon of the terrain (LandscapeHorizon table, empty for none) seen from a point of the
+	// landscape space: the views from that point also cull the instances that the terrain hides.
+	void set_horizon(const Vector<float> &p_table, const Vector3 &p_camera, float p_first_ring, float p_ring_scale);
 	void free_entry(uint64_t p_id);
 
 	void free_resources();
