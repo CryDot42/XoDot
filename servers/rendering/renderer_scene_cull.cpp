@@ -1336,6 +1336,9 @@ void RendererSceneCull::instance_geometry_set_flag(RID p_instance, RSE::Instance
 				}
 			}
 		} break;
+		case RSE::INSTANCE_FLAG_HZB_STABLE_CONTENT: {
+			instance->hzb_stable_content = p_enabled;
+		} break;
 		default: {
 		}
 	}
@@ -1345,6 +1348,10 @@ void RendererSceneCull::instance_geometry_set_cast_shadows_setting(RID p_instanc
 	Instance *instance = instance_owner.get_or_null(p_instance);
 	ERR_FAIL_NULL(instance);
 
+	if (p_shadow_casting_setting == RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY && instance->cast_shadows != RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY && instance->indexer_id.is_valid()) {
+		// Gone from the depth buffers rendered before, which can't be trusted where it was.
+		_hzb_occlusion_record_change(instance);
+	}
 	instance->cast_shadows = p_shadow_casting_setting;
 
 	if (instance->scenario && instance->array_index >= 0) {
@@ -1724,13 +1731,15 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 		}
 	}
 
-	if (p_instance->indexer_id.is_valid()) {
-		// Depth buffers rendered before this update can't be trusted where this instance was.
+	AABB new_aabb;
+	new_aabb = instance_xform->xform(p_instance->aabb);
+
+	if (p_instance->indexer_id.is_valid() && (!p_instance->hzb_stable_content || new_aabb != p_instance->transformed_aabb)) {
+		// Depth buffers rendered before this update can't be trusted where this instance was
+		// (unless it declared that only moving or resizing it matters).
 		_hzb_occlusion_record_change(p_instance);
 	}
 
-	AABB new_aabb;
-	new_aabb = instance_xform->xform(p_instance->aabb);
 	p_instance->transformed_aabb = new_aabb;
 
 	if ((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) {
@@ -2904,6 +2913,9 @@ void RendererSceneCull::_hzb_occlusion_record_change(Instance *p_instance) const
 	if (!hzb_occlusion_used || p_instance->scenario == nullptr || !((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK)) {
 		return;
 	}
+	if (p_instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY) {
+		return; // Not drawn in the depth buffer.
+	}
 
 	const uint64_t frame = RSG::rasterizer->get_frame_number();
 	if (frame - hzb_occlusion_last_used_frame > HZB_OCCLUSION_MAX_DEPTH_AGE) {
@@ -3076,8 +3088,22 @@ void RendererSceneCull::render_camera(const Ref<RenderSceneBuffers> &p_render_bu
 	// For now just cull on the first camera
 	RendererSceneOcclusionCull::get_singleton()->buffer_update(p_viewport, camera_data.main_transform, camera_data.main_projection, camera_data.is_orthogonal, depth_readback, changed_bounds);
 
+	// GPU-driven rendering culls with the same camera and occlusion buffer, before the scene is drawn.
+	for (const Callable &callback : camera_callbacks) {
+		callback.call(p_scenario, p_viewport, camera_data.main_transform, camera_data.main_projection, camera_data.is_orthogonal, camera->visible_layers);
+	}
+
 	_render_scene(&camera_data, p_render_buffers, environment, camera->attributes, compositor, camera->visible_layers, p_scenario, p_viewport, p_shadow_atlas, RID(), -1, p_screen_mesh_lod_threshold, p_window_output_max_value, true, r_render_info);
 #endif
+}
+
+void RendererSceneCull::camera_callback_add(const Callable &p_callback) {
+	ERR_FAIL_COND(camera_callbacks.has(p_callback));
+	camera_callbacks.push_back(p_callback);
+}
+
+void RendererSceneCull::camera_callback_remove(const Callable &p_callback) {
+	camera_callbacks.erase(p_callback);
 }
 
 void RendererSceneCull::_visibility_cull_threaded(uint32_t p_thread, VisibilityCullData *cull_data) {

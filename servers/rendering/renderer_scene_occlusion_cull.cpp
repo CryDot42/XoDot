@@ -231,20 +231,32 @@ void RendererSceneOcclusionCull::HZBuffer::_find_disocclusions_row(uint32_t p_ro
 	}
 }
 
-void RendererSceneOcclusionCull::HZBuffer::_unocclude_bounds(float *p_data, const AABB &p_aabb, const Transform3D &p_cam_inv_transform, const Projection &p_cam_projection) const {
+void RendererSceneOcclusionCull::HZBuffer::_unocclude_bounds(float *p_data, const AABB &p_aabb, const Vector3 &p_cam_position, const Transform3D &p_cam_inv_transform, const Projection &p_cam_projection, bool p_cam_orthogonal) const {
 	const real_t z_near = p_cam_projection.get_z_near();
 
 	Vector3 corners[8];
 	bool in_front[8];
 	bool any_in_front = false;
+	real_t min_depth = FLT_MAX; // Orthogonal cameras.
 	for (int i = 0; i < 8; i++) {
 		corners[i] = p_cam_inv_transform.xform(p_aabb.get_endpoint(i));
 		in_front[i] = -corners[i].z >= z_near;
 		any_in_front = any_in_front || in_front[i];
+		min_depth = MIN(min_depth, real_t(-corners[i].z));
 	}
 	if (!any_in_front) {
 		return; // Fully behind the camera.
 	}
+	// The instance could only be seen where nothing nearer than it was: the texels in front of it
+	// (e.g. of the hill that hid it) keep occluding. Same distance metric as the occlusion test.
+	float min_distance = 0.0f;
+	if (p_cam_orthogonal) {
+		min_distance = MAX(min_depth, real_t(0.0));
+	} else {
+		min_distance = (p_cam_position.clamp(p_aabb.position, p_aabb.position + p_aabb.size) - p_cam_position).length();
+	}
+	// With a margin for the inaccuracy of the reprojection.
+	min_distance *= 0.98f;
 
 	// Screen space bounds of the part in front of the near plane: corners in front of it,
 	// and intersections of the edges crossing it.
@@ -279,7 +291,10 @@ void RendererSceneOcclusionCull::HZBuffer::_unocclude_bounds(float *p_data, cons
 
 	for (int y = from_y; y < to_y; y++) {
 		for (int x = from_x; x < to_x; x++) {
-			p_data[y * size.x + x] = FLT_MAX;
+			float &distance = p_data[y * size.x + x];
+			if (distance >= min_distance) {
+				distance = FLT_MAX;
+			}
 		}
 	}
 }
@@ -406,7 +421,7 @@ bool RendererSceneOcclusionCull::HZBuffer::reproject_depth(const DepthReadback &
 	if (!p_changed_bounds.is_empty()) {
 		const Transform3D cam_inv_transform = p_cam_transform.affine_inverse();
 		for (const AABB &aabb : p_changed_bounds) {
-			_unocclude_bounds(result, aabb, cam_inv_transform, p_cam_projection);
+			_unocclude_bounds(result, aabb, p_cam_transform.origin, cam_inv_transform, p_cam_projection, p_cam_orthogonal);
 		}
 	}
 

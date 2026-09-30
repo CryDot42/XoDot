@@ -332,6 +332,12 @@ void Landscape3D::_data_region_changed(const Rect2i &p_rect, int p_flags) {
 	for (LandscapeFoliage3D *foliage : foliages) {
 		foliage->_terrain_region_changed(p_rect, p_flags);
 	}
+	if (p_flags & (LandscapeData::CHANGED_HEIGHTS | LandscapeData::CHANGED_HOLES)) {
+		terrain_version++; // Another horizon.
+		if (p_flags & LandscapeData::CHANGED_HOLES) {
+			horizon_hole_rects.push_back(p_rect);
+		}
+	}
 	if (full_update_pending) {
 		return;
 	}
@@ -350,6 +356,8 @@ void Landscape3D::_data_region_changed(const Rect2i &p_rect, int p_flags) {
 void Landscape3D::_data_changed() {
 	full_update_pending = true;
 	collision_full_rebuild = true;
+	terrain_version++;
+	horizon_holes_dirty = true;
 	// The size or spacing of the data may have changed, the splines are applied again where needed.
 	spline_system.invalidate_all();
 	dirty_heights.clear();
@@ -564,6 +572,8 @@ void Landscape3D::set_patch_size(int p_size) {
 	patch_size = p_size;
 	_rebuild_patch_mesh();
 	full_update_pending = true;
+	terrain_version++; // Another LOD tree.
+	horizon_holes_dirty = true;
 }
 
 void Landscape3D::set_lod_pixel_error(float p_error) {
@@ -1116,6 +1126,78 @@ void Landscape3D::_register_foliage(LandscapeFoliage3D *p_foliage) {
 
 void Landscape3D::_unregister_foliage(LandscapeFoliage3D *p_foliage) {
 	foliages.erase(p_foliage);
+}
+
+void Landscape3D::_update_horizon_holes(const LandscapeLodTree &p_tree) {
+	// The leaves of the LOD tree with a hole don't hide anything.
+	if (horizon_holes.get_max_level() != p_tree.get_max_level()) {
+		horizon_holes_dirty = true;
+	}
+	if (horizon_holes_dirty || !data->has_holes()) {
+		horizon_hole_rects.clear();
+	}
+	if (horizon_holes_dirty) {
+		horizon_holes_dirty = false;
+		horizon_holes.clear();
+		HashSet<Vector2i> holes;
+		if (data->has_holes()) {
+			data->get_hole_cells(Rect2i(Point2i(), data->get_size()), p_tree.get_patch_quads(), holes);
+		}
+		const int leaves = 1 << p_tree.get_max_level();
+		horizon_holes.set_leaves(p_tree.get_max_level(), Rect2i(0, 0, leaves, leaves), holes);
+	}
+	for (const Rect2i &rect : horizon_hole_rects) {
+		// The leaves touching the texels (their borders are shared).
+		const int patch = p_tree.get_patch_quads();
+		const Vector2i begin = (rect.position - Vector2i(1, 1)).maxi(0) / patch;
+		const Vector2i end = rect.get_end() / patch;
+		const Rect2i leaves(begin, end - begin + Vector2i(1, 1));
+		HashSet<Vector2i> holes;
+		data->get_hole_cells(Rect2i(leaves.position * patch, leaves.size * patch + Vector2i(1, 1)), patch, holes);
+		horizon_holes.set_leaves(p_tree.get_max_level(), leaves, holes);
+	}
+	horizon_hole_rects.clear();
+}
+
+const LandscapeHorizon *Landscape3D::get_horizon(const Vector3 &p_local_camera) {
+	const LandscapeLodTree *tree = _get_tree();
+	if (!tree || !tree->is_valid() || !is_inside_tree()) {
+		return nullptr;
+	}
+	if (!lod_camera.valid) {
+		_update_lod_camera(); // Not drawn yet.
+	}
+	if (!lod_camera.valid || lod_camera.orthogonal) {
+		return nullptr;
+	}
+	// Up to the farthest foliage (the whole terrain for the types without cull distance).
+	const Vector2 world_size = data->get_world_size();
+	const real_t diagonal = world_size.length();
+	real_t range = 0.0;
+	for (const LandscapeFoliage3D *foliage : foliages) {
+		range = MAX(range, MIN(foliage->get_terrain_occlusion_range(), diagonal));
+	}
+	if (range <= 0.0) {
+		return nullptr;
+	}
+	// Below the terrain (e.g. in a cave seen through a hole), the heightfield doesn't tell what hides.
+	if (p_local_camera.x >= 0.0 && p_local_camera.z >= 0.0 && p_local_camera.x <= world_size.x && p_local_camera.z <= world_size.y && p_local_camera.y < data->sample_height(p_local_camera.x, p_local_camera.z) - 0.05) {
+		return nullptr;
+	}
+
+	LandscapeHorizon::Params params;
+	params.camera = p_local_camera;
+	params.range = range;
+	// The drawn terrain differs from the heights by its geometric error, a few pixels at most.
+	params.angle_margin = 2.0 * lod_pixel_error / MAX(lod_camera.projection_factor, real_t(1.0));
+	params.height_margin = micro_levels_in_use > 0 ? micro_amplitude * displacement_scale : 0.0;
+	if (horizon.is_valid() && horizon_terrain_version == terrain_version && horizon.get_params() == params) {
+		return &horizon;
+	}
+	_update_horizon_holes(*tree);
+	horizon.build(*tree, data->get_vertex_spacing(), params, &horizon_holes);
+	horizon_terrain_version = terrain_version;
+	return &horizon;
 }
 
 TypedArray<LandscapeFoliage3D> Landscape3D::_get_foliages_bind() const {

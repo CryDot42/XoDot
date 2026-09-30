@@ -524,6 +524,49 @@ void LandscapeData::set_hole(int p_x, int p_z, bool p_hole) {
 	}
 }
 
+void LandscapeData::get_hole_cells(const Rect2i &p_texel_rect, int p_cell_quads, HashSet<Vector2i> &r_cells) const {
+	ERR_FAIL_COND(p_cell_quads <= 0);
+	const Rect2i rect = clip_rect(p_texel_rect);
+	if (!has_holes() || !rect.has_area()) {
+		return;
+	}
+	constexpr int TILE_SIZE = LandscapeStorage::TILE_SIZE;
+	const Vector2i tile_begin = rect.position / TILE_SIZE;
+	const Vector2i tile_end = (rect.get_end() - Vector2i(1, 1)) / TILE_SIZE;
+	for (int tz = tile_begin.y; tz <= tile_end.y; tz++) {
+		for (int tx = tile_begin.x; tx <= tile_end.x; tx++) {
+			const LandscapeStorage::Tile *tile = storage.get_tile(0, tx, tz, LandscapeStorage::MASK_HOLES);
+			if (!tile || tile->holes.is_empty()) {
+				continue; // No hole in the tile.
+			}
+			const Rect2i texels = rect.intersection(Rect2i(tx * TILE_SIZE, tz * TILE_SIZE, TILE_SIZE, TILE_SIZE));
+			const uint8_t *holes = tile->holes.ptr();
+			for (int z = texels.position.y; z < texels.get_end().y; z++) {
+				for (int x = texels.position.x; x < texels.get_end().x; x++) {
+					if (holes[(z - tz * TILE_SIZE) * TILE_SIZE + (x - tx * TILE_SIZE)] == 0) {
+						continue;
+					}
+					// The texels on the border of a cell belong to its neighbors too.
+					const Vector2i cell(x / p_cell_quads, z / p_cell_quads);
+					const bool left = x % p_cell_quads == 0 && cell.x > 0;
+					const bool top = z % p_cell_quads == 0 && cell.y > 0;
+					r_cells.insert(cell);
+					if (left) {
+						r_cells.insert(cell - Vector2i(1, 0));
+					}
+					if (top) {
+						r_cells.insert(cell - Vector2i(0, 1));
+					}
+					if (left && top) {
+						r_cells.insert(cell - Vector2i(1, 1));
+					}
+				}
+			}
+		}
+		storage.trim();
+	}
+}
+
 void LandscapeData::clear_holes() {
 	if (!has_holes()) {
 		return;

@@ -32,6 +32,7 @@
 
 #include "../landscape_brush.h"
 #include "../landscape_data.h"
+#include "../landscape_horizon.h"
 #include "../landscape_lod_tree.h"
 
 #include "core/io/dir_access.h"
@@ -423,6 +424,132 @@ TEST_CASE("[Landscape][WorldStreaming] Jobs") {
 	CHECK(ws->is_pool_over_limit("Test Pool"));
 	ws->add_pool_usage("Test Pool", -150);
 	CHECK_FALSE(ws->is_pool_over_limit("Test Pool"));
+}
+
+// A flat 256 x 256 m landscape with a ridge across it, around x = 128: 40 m high, 48 m wide at the
+// top and 112 m at the bottom (the horizon relies on the lowest heights of the patches of the LOD tree).
+static Ref<LandscapeData> make_ridge() {
+	Ref<LandscapeData> data;
+	data.instantiate();
+	data->create(Vector2i(257, 257), 1.0, 0.0);
+	Ref<Image> heights = Image::create_empty(257, 257, false, Image::FORMAT_RF);
+	for (int z = 0; z < 257; z++) {
+		for (int x = 0; x < 257; x++) {
+			heights->set_pixel(x, z, Color(40.0 * CLAMP((56.0 - Math::abs(x - 128.0)) / 32.0, 0.0, 1.0), 0, 0));
+		}
+	}
+	data->set_heightmap_image(heights);
+	return data;
+}
+
+// Whether the segment between two points goes below the terrain (sampled every 10 cm).
+static bool segment_hits_terrain(const Ref<LandscapeData> &p_data, const Vector3 &p_from, const Vector3 &p_to) {
+	const int steps = int(p_from.distance_to(p_to) * 10.0);
+	for (int i = 1; i < steps; i++) {
+		const Vector3 point = p_from.lerp(p_to, real_t(i) / steps);
+		if (point.y < p_data->sample_height(point.x, point.z)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+TEST_CASE("[Landscape][LandscapeHorizon] Terrain hiding what is behind a ridge") {
+	Ref<LandscapeData> data = make_ridge();
+	const LandscapeLodTree *tree = data->get_lod_tree(32);
+	REQUIRE(tree != nullptr);
+	LandscapeHorizon horizon;
+	CHECK_FALSE(horizon.is_sphere_hidden(Vector3(230, 1, 128), 1.0));
+
+	LandscapeHorizon::Params params;
+	params.camera = Vector3(20, 2, 128);
+	params.range = 300.0;
+	horizon.build(*tree, 1.0, params, nullptr);
+	REQUIRE(horizon.is_valid());
+	const uint64_t version = horizon.get_version();
+
+	// Behind the ridge, low: hidden. In front of it or high above it: visible.
+	CHECK(horizon.is_sphere_hidden(Vector3(230, 1, 128), 1.0));
+	CHECK(horizon.is_sphere_hidden(Vector3(220, 5, 90), 3.0));
+	CHECK_FALSE(horizon.is_sphere_hidden(Vector3(60, 1, 128), 1.0));
+	CHECK_FALSE(horizon.is_sphere_hidden(Vector3(230, 150, 128), 1.0));
+	CHECK(horizon.is_aabb_hidden(AABB(Vector3(200, 0, 100), Vector3(30, 5, 30))));
+	CHECK_FALSE(horizon.is_aabb_hidden(AABB(Vector3(40, 0, 100), Vector3(30, 5, 30))));
+	CHECK_FALSE(horizon.is_aabb_hidden(AABB(Vector3(10, 0, 120), Vector3(20, 5, 20)))); // Around the camera.
+
+	// Conservative: what is hidden is below the terrain seen from the camera.
+	int hidden = 0;
+	for (int z = 8; z < 256; z += 12) {
+		for (int x = 8; x < 256; x += 12) {
+			for (real_t y : { real_t(0.5), real_t(10.0), real_t(30.0) }) {
+				const Vector3 top(x, y + data->sample_height(x, z), z);
+				if (horizon.is_sphere_hidden(top - Vector3(0, 0.5, 0), 0.5)) {
+					hidden++;
+					CHECK_MESSAGE(segment_hits_terrain(data, params.camera, top), vformat("%s is hidden but visible from the camera.", top));
+				}
+			}
+		}
+	}
+	CHECK(hidden > 100);
+
+	// The margins lower the horizon.
+	const float before = horizon.get_horizon(0.0, 250.0);
+	CHECK(before > 0.0);
+	params.angle_margin = 0.05;
+	params.height_margin = 1.0;
+	horizon.build(*tree, 1.0, params, nullptr);
+	CHECK(horizon.get_version() != version);
+	CHECK(horizon.get_horizon(0.0, 250.0) < before - 0.05);
+
+	// Seen from above the ridge: nothing hidden. From outside of the terrain: only by the terrain.
+	params.angle_margin = 0.0;
+	params.height_margin = 0.0;
+	params.camera = Vector3(128, 100, 128);
+	horizon.build(*tree, 1.0, params, nullptr);
+	CHECK_FALSE(horizon.is_sphere_hidden(Vector3(230, 1, 128), 1.0));
+	params.camera = Vector3(-100, 2, 128);
+	horizon.build(*tree, 1.0, params, nullptr);
+	CHECK(horizon.is_sphere_hidden(Vector3(230, 1, 128), 1.0));
+	CHECK_FALSE(horizon.is_sphere_hidden(Vector3(-50, 1, 128), 1.0));
+	horizon.clear();
+	CHECK_FALSE(horizon.is_valid());
+}
+
+TEST_CASE("[Landscape][LandscapeHorizon] Holes in the terrain hide nothing") {
+	Ref<LandscapeData> data = make_ridge();
+	// A tunnel through the ridge.
+	for (int z = 124; z <= 132; z++) {
+		for (int x = 68; x <= 188; x++) {
+			data->set_hole(x, z, true);
+		}
+	}
+	const LandscapeLodTree *tree = data->get_lod_tree(32);
+	const int leaves = 1 << tree->get_max_level();
+	HashSet<Vector2i> cells;
+	data->get_hole_cells(Rect2i(0, 0, 257, 257), 32, cells);
+	CHECK(cells.has(Vector2i(4, 3)));
+	CHECK(cells.has(Vector2i(3, 4)));
+	CHECK_FALSE(cells.has(Vector2i(0, 0)));
+	LandscapeHorizon::Holes holes;
+	holes.set_leaves(tree->get_max_level(), Rect2i(0, 0, leaves, leaves), cells);
+	CHECK(holes.has_any());
+	CHECK(holes.has_hole(0, 0, 0));
+	CHECK(holes.has_hole(tree->get_max_level(), 4, 3));
+	CHECK_FALSE(holes.has_hole(tree->get_max_level(), 0, 0));
+
+	LandscapeHorizon::Params params;
+	params.camera = Vector3(20, 2, 128);
+	params.range = 300.0;
+	LandscapeHorizon horizon;
+	horizon.build(*tree, 1.0, params, &holes);
+	CHECK_FALSE(horizon.is_sphere_hidden(Vector3(230, 1, 128), 1.0)); // Seen through the tunnel.
+	CHECK(horizon.is_sphere_hidden(Vector3(230, 1, 20), 1.0)); // Elsewhere the ridge still hides.
+
+	// Without holes in the leaves.
+	holes.set_leaves(tree->get_max_level(), Rect2i(0, 0, leaves, leaves), HashSet<Vector2i>());
+	CHECK_FALSE(holes.has_any());
+	horizon.build(*tree, 1.0, params, &holes);
+	CHECK(horizon.is_sphere_hidden(Vector3(230, 1, 128), 1.0));
 }
 
 } // namespace TestLandscape

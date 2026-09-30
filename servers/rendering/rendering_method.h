@@ -357,6 +357,14 @@ public:
 
 	virtual void render_camera(const Ref<RenderSceneBuffers> &p_render_buffers, RID p_camera, RID p_scenario, RID p_viewport, Size2 p_viewport_size, uint32_t p_jitter_phase_count, float p_mesh_lod_threshold, RID p_shadow_atlas, float p_window_output_max_value, RenderingServerTypes::RenderInfo *r_render_info = nullptr) = 0;
 
+	// Called on the rendering thread for every camera drawn, once the occlusion buffer of its viewport is up to date for it
+	// (see RendererSceneOcclusionCull::buffer_get_ptr()) and before the scene is culled and drawn: GPU-driven rendering
+	// (e.g. instances culled by compute shaders) can cull with the same view. The arguments are the scenario, the viewport,
+	// the camera transform, its projection, whether it's orthogonal, and its visible layers.
+	// Must be called on the rendering thread.
+	virtual void camera_callback_add(const Callable &p_callback) = 0;
+	virtual void camera_callback_remove(const Callable &p_callback) = 0;
+
 	virtual void update() = 0;
 	virtual void render_probes() = 0;
 	virtual void update_visibility_notifiers() = 0;

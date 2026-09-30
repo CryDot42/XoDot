@@ -103,7 +103,7 @@ public:
 		_FORCE_INLINE_ static void _reproject_texel_from_row(const ReprojectionData &p_data, const Vector4 &p_view_row, const Vector4 &p_clip_row, real_t p_ndc_x, float p_depth, ReprojectedTexel &r_texel);
 		void _reproject_row(uint32_t p_row, const ReprojectionData *p_data);
 		void _find_disocclusions_row(uint32_t p_row, const ReprojectionData *p_data);
-		void _unocclude_bounds(float *p_data, const AABB &p_aabb, const Transform3D &p_cam_inv_transform, const Projection &p_cam_projection) const;
+		void _unocclude_bounds(float *p_data, const AABB &p_aabb, const Vector3 &p_cam_position, const Transform3D &p_cam_inv_transform, const Projection &p_cam_projection, bool p_cam_orthogonal) const;
 
 		bool use_occluders = true;
 		bool use_depth_readback = false;
@@ -279,6 +279,12 @@ public:
 
 		RID get_debug_texture();
 		const Size2i &get_occlusion_buffer_size() const { return occlusion_buffer_size; }
+
+		// Every mip, one after another from the first one (see `get_mip_size()`), for GPU-driven rendering to test
+		// occlusion the same way: the distance to the camera of the farthest surface seen in each texel.
+		_FORCE_INLINE_ const LocalVector<float> &get_data() const { return data; }
+		_FORCE_INLINE_ int get_mip_count() const { return sizes.size(); }
+		_FORCE_INLINE_ const Size2i &get_mip_size(int p_mip) const { return sizes[p_mip]; }
 
 		virtual ~HZBuffer() {}
 	};
