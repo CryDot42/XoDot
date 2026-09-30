@@ -34,6 +34,8 @@
 #include "landscape_brush.h"
 #include "landscape_data.h"
 #include "landscape_foliage_3d.h"
+#include "landscape_foliage_data.h"
+#include "landscape_foliage_gpu.h"
 #include "landscape_foliage_type.h"
 #include "landscape_gpu.h"
 #include "landscape_layer.h"
@@ -51,10 +53,13 @@
 
 static Ref<ResourceFormatLoaderLandscapeData> landscape_data_loader;
 static Ref<ResourceFormatSaverLandscapeData> landscape_data_saver;
+static Ref<ResourceFormatLoaderLandscapeFoliageData> foliage_data_loader;
+static Ref<ResourceFormatSaverLandscapeFoliageData> foliage_data_saver;
 
 void initialize_landscape_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/landscape/streaming/cpu_cache_size_mb", PROPERTY_HINT_RANGE, "64,16384,1,or_greater,suffix:MB"), 512);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/landscape/streaming/foliage_cache_size_mb", PROPERTY_HINT_RANGE, "16,16384,1,or_greater,suffix:MB"), 256);
 
 		GDREGISTER_CLASS(LandscapeData);
 		GDREGISTER_CLASS(LandscapeLayer);
@@ -62,18 +67,24 @@ void initialize_landscape_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(Landscape3D);
 		GDREGISTER_CLASS(LandscapeSpline3D);
 		GDREGISTER_CLASS(LandscapeFoliageType);
+		GDREGISTER_CLASS(LandscapeFoliageData);
 		GDREGISTER_CLASS(LandscapeFoliage3D);
 		GDREGISTER_ABSTRACT_CLASS(LandscapeSplineMaterial);
 		GDREGISTER_CLASS(LandscapeWaterMaterial);
 		GDREGISTER_CLASS(LandscapeRoadMaterial);
 #ifdef RD_ENABLED
 		GDREGISTER_INTERNAL_CLASS(LandscapeGPU);
+		GDREGISTER_INTERNAL_CLASS(LandscapeFoliageGPU);
 #endif
 
 		landscape_data_loader.instantiate();
 		ResourceLoader::add_resource_format_loader(landscape_data_loader);
 		landscape_data_saver.instantiate();
 		ResourceSaver::add_resource_format_saver(landscape_data_saver);
+		foliage_data_loader.instantiate();
+		ResourceLoader::add_resource_format_loader(foliage_data_loader);
+		foliage_data_saver.instantiate();
+		ResourceSaver::add_resource_format_saver(foliage_data_saver);
 	}
 #ifdef TOOLS_ENABLED
 	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
@@ -95,5 +106,9 @@ void uninitialize_landscape_module(ModuleInitializationLevel p_level) {
 		landscape_data_loader.unref();
 		ResourceSaver::remove_resource_format_saver(landscape_data_saver);
 		landscape_data_saver.unref();
+		ResourceLoader::remove_resource_format_loader(foliage_data_loader);
+		foliage_data_loader.unref();
+		ResourceSaver::remove_resource_format_saver(foliage_data_saver);
+		foliage_data_saver.unref();
 	}
 }

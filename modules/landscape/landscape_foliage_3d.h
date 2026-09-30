@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "landscape_foliage_data.h"
 #include "landscape_foliage_type.h"
 
 #include "core/math/random_pcg.h"
@@ -37,6 +38,8 @@
 #include "core/variant/typed_array.h"
 #include "scene/3d/node_3d.h"
 
+class Camera3D;
+class LandscapeFoliageGPU;
 class Shader;
 class ShaderMaterial;
 class StandardMaterial3D;
@@ -57,6 +60,12 @@ class Landscape3D;
 //   time budget per frame (nearest cells first).
 // Instances follow the terrain when it is sculpted (`follow_terrain`). The debug views color the
 // instances by level of detail, cell or cell state and draw the bounds of the drawn cells.
+//
+// Optionally (`gpu_indirect`, Forward+ and Mobile), the instances of the loaded cells are culled
+// and sorted per level of detail on the GPU, straight into indirect MultiMeshes (see
+// LandscapeFoliageGPU). Instances saved in a LandscapeFoliageData file (`data`, .lfdata) are
+// streamed: only the cells within the cull distance of the camera and of the streaming sources are
+// loaded (in the background), the others are released within a memory budget.
 class LandscapeFoliage3D : public Node3D {
 	GDCLASS(LandscapeFoliage3D, Node3D);
 
@@ -68,21 +77,8 @@ public:
 		DEBUG_VIEW_CELL_STATE, // Cells drawn as a whole or sorted per instance.
 	};
 
-	// One instance, in the space of the landscape. The transform is stored in the layout of
-	// MultiMesh buffers (3 x 4, row-major), so that it can be copied as is.
-	struct Instance {
-		float xform[12];
-		float offset; // Vertical offset from the ground.
-		float random; // Per-instance random value in [0, 1), INSTANCE_CUSTOM.x in shaders.
-		float normal_x; // Up vector of the alignment (its Y is positive).
-		float normal_z;
-
-		Vector3 get_position() const { return Vector3(xform[3], xform[7], xform[11]); }
-		Transform3D get_transform() const;
-		void set_transform(const Transform3D &p_transform);
-		Vector3 get_align_normal() const;
-		void set_align_normal(const Vector3 &p_normal);
-	};
+	// One instance, in the space of the landscape (see LandscapeFoliageInstance).
+	typedef LandscapeFoliageInstance Instance;
 	static constexpr int INSTANCE_FLOATS = sizeof(Instance) / sizeof(float);
 	static_assert(INSTANCE_FLOATS == 16);
 
@@ -110,6 +106,14 @@ private:
 		LocalVector<Instance> instances;
 		AABB bounds; // Landscape space, including the meshes.
 		bool bounds_dirty = true;
+		// Streaming (`data`): cells that aren't loaded only know their instance count and bounds.
+		bool loaded = true;
+		bool data_dirty = false; // Modified since written to the data.
+		uint32_t stored_count = 0;
+		AABB stored_bounds; // Positions of the instances.
+		bool requested = false;
+		float request_priority = 0.0;
+		bool gpu_dirty = true; // Modified since uploaded to the GPU (gpu_indirect).
 		// Rendering.
 		Batch batches[LandscapeFoliageType::MAX_LODS];
 		int state = STATE_NONE;
@@ -135,6 +139,34 @@ private:
 		// Serialized instances (cache).
 		PackedByteArray serialized;
 		bool serialized_dirty = true;
+		bool data_dirty = false; // A cell is modified since written to the data.
+		// GPU indirect rendering: the instances of the cells around the camera, one slot per cell
+		// in the instance buffer of the GPU (the rest of a slot is holes).
+		struct GPUOutput {
+			RID multimesh;
+			RID instance;
+			uint32_t capacity = 0;
+			int surfaces = 0;
+		};
+		struct GPUSlot {
+			uint32_t offset = 0;
+			uint32_t capacity = 0;
+		};
+		uint64_t gpu_id = 0;
+		GPUOutput gpu_outputs[2][LandscapeFoliageType::MAX_LODS]; // Main (visible), shadow.
+		HashMap<Vector2i, GPUSlot> gpu_slots;
+		LocalVector<GPUSlot> gpu_free; // Released slots.
+		uint32_t gpu_capacity = 0; // Instance buffer.
+		uint32_t gpu_used = 0; // End of the last slot.
+		uint32_t gpu_count = 0; // Instances in the slots.
+		AABB gpu_bounds;
+		bool gpu_dirty = true; // A cell changed or the camera moved: slots to update.
+		bool gpu_outputs_dirty = true;
+		bool gpu_run = true; // Culling to run.
+		Vector3 gpu_slots_camera;
+		uint64_t gpu_serial = 0; // Last run.
+		uint64_t gpu_outputs_serial = 0; // Run after the last change of the outputs.
+		uint32_t gpu_dropped = 0; // Instances beyond the capacity of the outputs (last statistics).
 	};
 	LocalVector<Entry *> entries;
 
@@ -147,6 +179,62 @@ private:
 
 	Landscape3D *landscape = nullptr;
 	RandomPCG rng;
+
+	// Streaming: the cells of the data within the cull distance of the camera and of the
+	// streaming sources are loaded (nearest first), the others are released (hysteresis, budget).
+	struct CellRequest {
+		Entry *entry = nullptr;
+		Vector2i key;
+	};
+	Ref<LandscapeFoliageData> data;
+	LocalVector<CellRequest> requests; // Cells being loaded.
+	bool streaming_dirty = true;
+	LocalVector<Vector3> stream_centers; // Landscape space, range scale in the order of the sources.
+	LocalVector<real_t> stream_scales;
+	int64_t loaded_bytes = 0; // Loaded instances, reported to the "Foliage CPU" pool.
+	int loaded_cells = 0;
+	bool data_dirty = false; // Cells to write to the data.
+	bool _is_streamed() const;
+	void _drop_cells(Entry *p_entry);
+	void _populate_entry(Entry *p_entry, int p_index);
+	void _reload_from_data();
+	void _adopt_loaded_cells();
+	void _detach_data();
+	int _get_entry_index(const Entry *p_entry) const;
+	void _load_cell(Entry *p_entry, Cell &r_cell);
+	void _install_cell(Entry *p_entry, Cell &r_cell, LocalVector<Instance> &r_instances);
+	void _evict_cell(Entry *p_entry, Cell &r_cell);
+	void _cancel_requests(const Entry *p_entry = nullptr);
+	void _ensure_all_loaded(Entry *p_entry);
+	void _flush_data();
+	void _mark_data_edited();
+	void _process_streaming();
+	void _add_loaded_bytes(int64_t p_bytes);
+
+	// GPU indirect rendering (culling and LOD selection on the GPU, see LandscapeFoliageGPU).
+	bool gpu_indirect = false;
+	bool gpu_frustum_culling = true;
+	int gpu_max_instances = 262144;
+	LandscapeFoliageGPU *gpu = nullptr;
+	uint64_t next_gpu_id = 1;
+	bool gpu_view_valid = false;
+	Vector3 gpu_view_camera; // Landscape space.
+	Plane gpu_view_planes[6];
+	bool gpu_view_frustum = false;
+	bool _is_gpu_active() const;
+	void _free_gpu_outputs(Entry *p_entry);
+	void _free_gpu(Entry *p_entry);
+	void _gpu_call(const Callable &p_callable);
+	void _update_gpu_output_settings(Entry *p_entry, int p_list, int p_lod);
+	void _update_all_gpu_output_settings();
+	void _release_gpu_slot(Entry *p_entry, const Vector2i &p_key);
+	bool _allocate_gpu_slot(Entry *p_entry, uint32_t p_capacity, uint32_t &r_offset);
+	void _write_gpu_slot(const Cell &p_cell, const Entry::GPUSlot &p_slot, float *r_buffer);
+	void _update_gpu_slots(Entry *p_entry, const Vector3 &p_camera, bool p_has_camera);
+	void _update_gpu_outputs(Entry *p_entry);
+	void _update_gpu(const Vector3 &p_camera, bool p_has_camera);
+	void _frame_pre_draw();
+	Camera3D *_get_view_camera() const;
 
 	// Rendering state.
 	bool render_pending = true;
@@ -212,8 +300,6 @@ private:
 	void _update_rendering();
 
 	// Serialization.
-	static PackedByteArray _encode_instances(const LocalVector<Instance> &p_instances);
-	static bool _decode_instances(const PackedByteArray &p_data, LocalVector<Instance> &r_instances);
 	void _set_foliage_types_bind(const TypedArray<LandscapeFoliageType> &p_types);
 	TypedArray<LandscapeFoliageType> _get_foliage_types_bind() const;
 	void _set_instance_data(const Array &p_data);
@@ -249,6 +335,22 @@ public:
 	uint32_t get_render_layers() const { return render_layers; }
 	void set_cast_shadows(bool p_enable);
 	bool is_casting_shadows() const { return cast_shadows; }
+	void set_gpu_indirect(bool p_enable);
+	bool is_gpu_indirect() const { return gpu_indirect; }
+	void set_gpu_frustum_culling(bool p_enable);
+	bool is_gpu_frustum_culling() const { return gpu_frustum_culling; }
+	void set_gpu_max_instances(int p_count);
+	int get_gpu_max_instances() const { return gpu_max_instances; }
+	bool is_gpu_indirect_active() const { return _is_gpu_active(); }
+	static bool is_gpu_indirect_supported();
+
+	// Streaming.
+	void set_data(const Ref<LandscapeFoliageData> &p_data);
+	Ref<LandscapeFoliageData> get_data() const { return data; }
+	// Saves every instance to a new .lfdata file and streams them from it.
+	Error save_to_data_file(const String &p_path);
+	// Loads every cell of the streamed data (e.g. before processing all instances).
+	void load_all_cells();
 
 	// Painting (UE-like tools). Centers are global positions, radii are in meters.
 	// Adds instances until the density of the type (scaled) is reached in the circle.
@@ -296,6 +398,7 @@ public:
 	// Colors of the debug views (the same as the debug views of Landscape3D for the same index).
 	static Color get_debug_color(int p_index);
 	static Color get_debug_state_color(bool p_sorted_per_instance);
+	static Color get_debug_gpu_color();
 
 	Dictionary get_statistics() const;
 	void force_update();

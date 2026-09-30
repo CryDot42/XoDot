@@ -9,6 +9,8 @@
 		- each cell is drawn with one [MultiMesh] per level of detail, with the bounds of the cell, so cells are frustum and occlusion culled independently;
 		- the level of detail of each instance is chosen from its distance to the camera of the landscape (see [member Landscape3D.lod_camera_path]). Cells entirely within one level are drawn with that level as a whole and aren't updated until they leave it; cells crossing a level or cull distance are sorted per instance, with hysteresis ([member LandscapeFoliageType.lod_transition]), and only the levels whose instances changed are uploaded;
 		- cells beyond the cull distance have no rendering resources; the updates are limited to a time budget per frame, nearest cells first.
+		With [member gpu_indirect] (Forward+ and Mobile renderers), the instances around the camera are culled and sorted per level of detail on the GPU instead, straight into indirect [MultiMesh]es: no per-cell draw calls, per-instance frustum culling, no CPU work when the camera moves.
+		Instances can be saved to a [LandscapeFoliageData] file ([member data], [code].lfdata[/code]) instead of the scene: then only the cells within the cull distance of the camera and of the [StreamingSource3D]s are loaded (in the background, through [WorldStreaming]), and the others are released within a memory budget ([member ProjectSettings.rendering/landscape/streaming/foliage_cache_size_mb]).
 		The per-instance random value [code]INSTANCE_CUSTOM.x[/code] (between [code]0[/code] and [code]1[/code]) can be used by shaders for variations.
 		When the terrain is sculpted (in the editor or at runtime), instances follow it ([member follow_terrain]).
 		[b]Note:[/b] The transform of this node is ignored: instances are placed in the space of the landscape and move with it.
@@ -132,7 +134,9 @@
 		<method name="get_statistics" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
-				Returns statistics about the instances and their rendering: [code]types[/code], [code]instances[/code], [code]cells[/code], [code]cells_rendered[/code] (cells with rendering resources), [code]cells_mixed[/code] (cells sorted per instance), [code]batches[/code] (drawn multimeshes), [code]instances_drawn[/code], [code]update_usec[/code] and [code]updated_cells[/code] (last update of the levels of detail), [code]debug_bounds[/code] (cells whose bounds are drawn by [member debug_view]).
+				Returns statistics about the instances and their rendering: [code]types[/code], [code]instances[/code], [code]cells[/code], [code]cells_rendered[/code] (cells with rendering resources, or uploaded to the GPU), [code]cells_mixed[/code] (cells sorted per instance), [code]batches[/code] (drawn multimeshes), [code]instances_drawn[/code], [code]update_usec[/code] and [code]updated_cells[/code] (last update of the levels of detail), [code]debug_bounds[/code] (cells whose bounds are drawn by [member debug_view]).
+				GPU indirect rendering: [code skip-lint]gpu_indirect[/code] (whether it is active), [code]gpu_instances[/code] (instances uploaded to the GPU), [code]gpu_shadow_instances_drawn[/code], [code]gpu_dropped[/code] (instances not drawn because of [member gpu_max_instances]) and [code]gpu_memory[/code] (bytes). With the GPU, [code]instances_drawn[/code] counts the visible instances of the last culling (read back a few frames later).
+				Streaming: [code]streamed[/code], [code]cells_loaded[/code], [code]cells_loading[/code], [code]loaded_memory[/code] (bytes of the loaded cells) and [code]data_memory[/code] (bytes kept by [member data], see [method LandscapeFoliageData.get_memory_usage]).
 			</description>
 		</method>
 		<method name="get_type_data" qualifiers="const">
@@ -140,6 +144,24 @@
 			<param index="0" name="type_index" type="int" />
 			<description>
 				Returns the instances of the type [param type_index] compressed, as stored in [member instance_data].
+			</description>
+		</method>
+		<method name="is_gpu_indirect_active" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the instances are culled on the GPU: [member gpu_indirect] is enabled, the renderer supports it (see [method is_gpu_indirect_supported]) and the node is in the scene tree.
+			</description>
+		</method>
+		<method name="is_gpu_indirect_supported" qualifiers="static">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the renderer supports [member gpu_indirect] (Forward+ and Mobile, not Compatibility nor headless).
+			</description>
+		</method>
+		<method name="load_all_cells">
+			<return type="void" />
+			<description>
+				Loads every cell of the streamed [member data] now, e.g. before processing all the instances. The cells far from the camera are released again by the next streaming updates. Methods reading or editing instances load the cells they need by themselves.
 			</description>
 		</method>
 		<method name="move_foliage_type">
@@ -193,6 +215,14 @@
 				Removes the instances of the type [param type_index] in a horizontal circle (a negative type index removes all types). Returns the number of removed instances.
 			</description>
 		</method>
+		<method name="save_to_data_file">
+			<return type="int" enum="Error" />
+			<param index="0" name="path" type="String" />
+			<description>
+				Saves every instance to a [LandscapeFoliageData] file at [param path] ([code].lfdata[/code]) and streams the instances from it ([member data]): they aren't saved in the scene anymore. If [member data] is already set, it is saved to [param path] (like [method ResourceSaver.save]).
+				In the editor, this is the [b]Save to File[/b] button of the Foliage tab of the Landscape dock.
+			</description>
+		</method>
 		<method name="set_foliage_type">
 			<return type="void" />
 			<param index="0" name="index" type="int" />
@@ -233,6 +263,10 @@
 		<member name="chunk_size" type="float" setter="set_chunk_size" getter="get_chunk_size" default="32.0">
 			Size in meters of the cells (chunks) the instances are sorted into. Smaller cells are culled more precisely and switch levels of detail as a whole more often, at the cost of more draw calls.
 		</member>
+		<member name="data" type="LandscapeFoliageData" setter="set_data" getter="get_data">
+			The instances, when they aren't saved in the scene ([member instance_data]). A [LandscapeFoliageData] saved to a [code].lfdata[/code] file is streamed: only the cells needed around the camera and the streaming sources are loaded. Its layers are aligned with the foliage types (by index).
+			Setting an empty data moves the instances of the node into it; setting a data that has instances replaces those of the node. Clearing it puts every instance back in the node. Edits are kept in memory until the data is saved (in the editor, with the scene).
+		</member>
 		<member name="debug_view" type="int" setter="set_debug_view" getter="get_debug_view" enum="LandscapeFoliage3D.DebugView" default="0">
 			Colors the instances for debugging and draws the bounds of the drawn cells (like [member Landscape3D.debug_view]). When the LOD of the landscape is frozen ([member Landscape3D.freeze_lod]), the foliage keeps its levels of detail too, so that they can be inspected from another point of view.
 		</member>
@@ -241,6 +275,16 @@
 		</member>
 		<member name="follow_terrain" type="bool" setter="set_follow_terrain" getter="is_following_terrain" default="true">
 			If [code]true[/code], instances are put back on the terrain (keeping their offset from the ground and adjusting their alignment) when the heights of the landscape change under them.
+		</member>
+		<member name="gpu_frustum_culling" type="bool" setter="set_gpu_frustum_culling" getter="is_gpu_frustum_culling" default="true">
+			If [code]true[/code], the GPU culling also removes the instances outside of the view frustum of the camera of the landscape. Disable it when other cameras see the foliage at the same time (split screen, other viewports of the editor), as they would miss those instances. Shadows are always drawn from every instance within the cull distance.
+		</member>
+		<member name="gpu_indirect" type="bool" setter="set_gpu_indirect" getter="is_gpu_indirect" default="false">
+			If [code]true[/code], the instances of the cells within the cull distance of the camera are uploaded to the GPU (only the modified cells are uploaded again), where a compute shader chooses the level of detail of each instance (with the same distances, cull distances and hysteresis as the CPU), culls them against the view frustum ([member gpu_frustum_culling]) and writes the visible ones into one indirect [MultiMesh] per level of detail (and one per level for the shadows). This removes the draw calls per cell and the CPU work when the camera moves, which helps with dense foliage.
+			Requires the Forward+ or Mobile renderer: otherwise the instances are culled on the CPU (see [method is_gpu_indirect_supported]). The debug views are supported ([constant DEBUG_VIEW_CELL_STATE] draws the instances in green).
+		</member>
+		<member name="gpu_max_instances" type="int" setter="set_gpu_max_instances" getter="get_gpu_max_instances" default="262144">
+			The maximum number of instances drawn per level of detail of a foliage type with [member gpu_indirect] (the capacity of its indirect [MultiMesh]es, which adapts to the visible instances up to this limit). Instances beyond it aren't drawn (see [code]gpu_dropped[/code] in [method get_statistics]).
 		</member>
 		<member name="instance_data" type="Array" setter="set_instance_data" getter="get_instance_data" default="[]">
 			The instances of each foliage type, compressed (see [method get_type_data]).

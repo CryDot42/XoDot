@@ -31,10 +31,13 @@
 #include "landscape_foliage_3d.h"
 
 #include "landscape_3d.h"
+#include "landscape_foliage_gpu.h"
 
 #include "core/config/engine.h"
+#include "core/config/project_settings.h"
 #include "core/io/compression.h"
 #include "core/io/marshalls.h"
+#include "core/io/resource_saver.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/os/os.h"
@@ -46,10 +49,8 @@
 #include "scene/resources/shader.h"
 #include "servers/rendering/rendering_server.h"
 
-// Serialized instances: header, then the zstd-compressed byte planes of the instance floats.
-static constexpr uint32_t FOLIAGE_DATA_MAGIC = 0x494F464C; // "LFOI"
-static constexpr uint32_t FOLIAGE_DATA_VERSION = 1;
-static constexpr int FOLIAGE_DATA_HEADER = 16;
+#include "modules/streaming/world_streaming.h"
+
 // Level of an instance whose level is not known yet (per-instance sort).
 static constexpr uint8_t FOLIAGE_LOD_UNKNOWN = 254;
 // Candidates evaluated by a paint dab (the density is estimated from at least the minimum).
@@ -57,46 +58,12 @@ static constexpr int MIN_PAINT_CANDIDATES = 16;
 static constexpr int MAX_PAINT_CANDIDATES = 65536;
 // Camera move that triggers a new evaluation of the cells.
 static constexpr real_t MIN_CAMERA_STEP = 0.25;
+// Capacity of an indirect MultiMesh of the GPU culling (24 bits).
+static constexpr int FOLIAGE_GPU_MAX_OUTPUT = (1 << 24) - 1;
 
 Ref<Shader> LandscapeFoliage3D::debug_shader;
 Ref<ShaderMaterial> LandscapeFoliage3D::debug_material;
 Ref<StandardMaterial3D> LandscapeFoliage3D::debug_bounds_material;
-
-/* Instance */
-
-Transform3D LandscapeFoliage3D::Instance::get_transform() const {
-	return Transform3D(xform[0], xform[1], xform[2], xform[4], xform[5], xform[6], xform[8], xform[9], xform[10], xform[3], xform[7], xform[11]);
-}
-
-void LandscapeFoliage3D::Instance::set_transform(const Transform3D &p_transform) {
-	const Basis &b = p_transform.basis;
-	xform[0] = b.rows[0].x;
-	xform[1] = b.rows[0].y;
-	xform[2] = b.rows[0].z;
-	xform[3] = p_transform.origin.x;
-	xform[4] = b.rows[1].x;
-	xform[5] = b.rows[1].y;
-	xform[6] = b.rows[1].z;
-	xform[7] = p_transform.origin.y;
-	xform[8] = b.rows[2].x;
-	xform[9] = b.rows[2].y;
-	xform[10] = b.rows[2].z;
-	xform[11] = p_transform.origin.z;
-}
-
-Vector3 LandscapeFoliage3D::Instance::get_align_normal() const {
-	const float y2 = 1.0f - normal_x * normal_x - normal_z * normal_z;
-	return Vector3(normal_x, Math::sqrt(MAX(y2, 0.0f)), normal_z);
-}
-
-void LandscapeFoliage3D::Instance::set_align_normal(const Vector3 &p_normal) {
-	Vector3 n = p_normal.normalized();
-	if (n.y < 0.0) {
-		n = -n;
-	}
-	normal_x = n.x;
-	normal_z = n.z;
-}
 
 /* Helpers */
 
@@ -178,7 +145,10 @@ void LandscapeFoliage3D::_types_changed() {
 			_free_cell_rendering(kv.value);
 			kv.value.bounds_dirty = true;
 		}
+		_free_gpu_outputs(entry); // Other meshes or levels.
+		entry->gpu_dirty = true;
 		render_pending = true;
+		streaming_dirty = true; // Other cull distance.
 	}
 	update_configuration_warnings();
 }
@@ -214,9 +184,20 @@ int LandscapeFoliage3D::add_foliage_type(const Ref<LandscapeFoliageType> &p_type
 	Entry *entry = memnew(Entry);
 	entry->type = p_type;
 	entry->render_hash = p_type.is_valid() ? p_type->get_render_hash() : 0;
+	entry->gpu_id = next_gpu_id++;
 	_connect_type(entry, true);
 	_update_entry_lods(entry);
 	entries.push_back(entry);
+	if (data.is_valid()) {
+		// Layers are aligned with the types: the type takes the layer of its index, if any.
+		const int index = entries.size() - 1;
+		if (index < data->get_layer_count()) {
+			_populate_entry(entry, index);
+		} else {
+			data->set_layer_count(entries.size());
+			_mark_data_edited();
+		}
+	}
 	render_pending = true;
 	notify_property_list_changed();
 	update_configuration_warnings();
@@ -227,11 +208,21 @@ void LandscapeFoliage3D::remove_foliage_type(int p_index) {
 	Entry *entry = _get_entry(p_index);
 	ERR_FAIL_NULL(entry);
 	_connect_type(entry, false);
-	for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
-		_free_cell_rendering(kv.value);
+	if (data.is_valid()) {
+		_flush_data();
+		_cancel_requests(); // The loads are addressed by layer index.
 	}
+	_drop_cells(entry);
+	_free_gpu(entry);
 	memdelete(entry);
 	entries.remove_at(p_index);
+	if (data.is_valid() && p_index < data->get_layer_count()) {
+		data->remove_layer(p_index);
+		_mark_data_edited();
+		streaming_dirty = true;
+	}
+	render_pending = true;
+	debug_bounds_dirty = true;
 	notify_property_list_changed();
 	update_configuration_warnings();
 }
@@ -251,7 +242,10 @@ void LandscapeFoliage3D::set_foliage_type(int p_index, const Ref<LandscapeFoliag
 		_free_cell_rendering(kv.value);
 		kv.value.bounds_dirty = true;
 	}
+	_free_gpu_outputs(entry);
+	entry->gpu_dirty = true;
 	render_pending = true;
+	streaming_dirty = true;
 	notify_property_list_changed();
 	update_configuration_warnings();
 }
@@ -277,6 +271,14 @@ void LandscapeFoliage3D::move_foliage_type(int p_from, int p_to) {
 	if (p_from == p_to) {
 		return;
 	}
+	if (data.is_valid()) {
+		_flush_data();
+		_cancel_requests(); // The loads are addressed by layer index.
+		data->set_layer_count(MAX(data->get_layer_count(), int(entries.size())));
+		data->move_layer(p_from, p_to);
+		_mark_data_edited();
+		streaming_dirty = true;
+	}
 	Entry *entry = entries[p_from];
 	entries.remove_at(p_from);
 	entries.insert(p_to, entry);
@@ -298,6 +300,8 @@ LandscapeFoliage3D::Cell &LandscapeFoliage3D::_get_or_create_cell(Entry *p_entry
 	if (!cell) {
 		cell = &p_entry->cells.insert(p_key, Cell())->value;
 		cell->key = p_key;
+	} else if (!cell->loaded) {
+		_load_cell(p_entry, *cell); // Edited: its instances are needed.
 	}
 	return *cell;
 }
@@ -307,7 +311,12 @@ void LandscapeFoliage3D::_cell_changed(Entry *p_entry, Cell &r_cell) {
 	r_cell.bounds_dirty = true;
 	r_cell.state = STATE_NONE;
 	r_cell.instance_lods.clear();
+	r_cell.data_dirty = true;
+	r_cell.gpu_dirty = true;
 	p_entry->serialized_dirty = true;
+	p_entry->data_dirty = true;
+	p_entry->gpu_dirty = true;
+	data_dirty = true;
 	render_pending = true;
 }
 
@@ -323,6 +332,20 @@ void LandscapeFoliage3D::_update_cell_bounds(Entry *p_entry, Cell &r_cell) {
 		return;
 	}
 	r_cell.bounds_dirty = false;
+	if (!r_cell.loaded) {
+		// Only the positions are known: grown by the meshes at the largest scale of the type.
+		real_t reach = 1.0;
+		if (p_entry->mesh_bounds.has_volume() || p_entry->mesh_bounds.has_surface()) {
+			const AABB &mesh = p_entry->mesh_bounds;
+			reach = mesh.position.abs().max((mesh.position + mesh.size).abs()).length();
+		}
+		real_t scale = 1.0;
+		if (p_entry->type.is_valid()) {
+			scale = MAX(MAX(p_entry->type->get_scale_max(), p_entry->type->get_vertical_scale_max()), 1.0f);
+		}
+		r_cell.bounds = r_cell.stored_bounds.grow(reach * scale + 0.01);
+		return;
+	}
 	if (r_cell.instances.is_empty()) {
 		r_cell.bounds = AABB();
 		return;
@@ -354,6 +377,9 @@ void LandscapeFoliage3D::_for_each_cell_in_rect(Entry *p_entry, const Rect2 &p_r
 	if (keys > int64_t(p_entry->cells.size())) {
 		for (KeyValue<Vector2i, Cell> &kv : p_entry->cells) {
 			if (kv.key.x >= begin.x && kv.key.x <= end.x && kv.key.y >= begin.y && kv.key.y <= end.y) {
+				if (!kv.value.loaded) {
+					_load_cell(p_entry, kv.value);
+				}
 				p_function(kv.key, kv.value);
 			}
 		}
@@ -364,6 +390,9 @@ void LandscapeFoliage3D::_for_each_cell_in_rect(Entry *p_entry, const Rect2 &p_r
 			const Vector2i key(x, z);
 			Cell *cell = p_entry->cells.getptr(key);
 			if (cell) {
+				if (!cell->loaded) {
+					_load_cell(p_entry, *cell);
+				}
 				p_function(key, *cell);
 			}
 		}
@@ -373,17 +402,32 @@ void LandscapeFoliage3D::_for_each_cell_in_rect(Entry *p_entry, const Rect2 &p_r
 void LandscapeFoliage3D::_remove_empty_cells(Entry *p_entry) {
 	LocalVector<Vector2i> empty;
 	for (KeyValue<Vector2i, Cell> &kv : p_entry->cells) {
-		if (kv.value.instances.is_empty()) {
+		if (kv.value.loaded && kv.value.instances.is_empty()) {
 			_free_cell_rendering(kv.value);
 			empty.push_back(kv.key);
 		}
 	}
+	const int index = data.is_valid() ? _get_entry_index(p_entry) : -1;
 	for (const Vector2i &key : empty) {
 		p_entry->cells.erase(key);
+		if (index >= 0) {
+			data->write_cell(index, key, nullptr, 0);
+		}
+	}
+	if (index >= 0 && !empty.is_empty()) {
+		_mark_data_edited();
 	}
 }
 
 void LandscapeFoliage3D::_rebin_all() {
+	if (data.is_valid()) {
+		// The data sorts its instances into the new cells.
+		_flush_data();
+		data->set_chunk_size(chunk_size);
+		_mark_data_edited();
+		_reload_from_data();
+		return;
+	}
 	for (Entry *entry : entries) {
 		LocalVector<Instance> all;
 		all.reserve(entry->count);
@@ -493,6 +537,9 @@ void LandscapeFoliage3D::_snap_rect(const Rect2 &p_rect) {
 	const bool all = !p_rect.has_area();
 	for (Entry *entry : entries) {
 		const LandscapeFoliageType *type = entry->type.ptr();
+		if (all) {
+			_ensure_all_loaded(entry);
+		}
 		auto snap_cell = [&](const Vector2i &p_key, Cell &r_cell) {
 			bool changed = false;
 			for (Instance &instance : r_cell.instances) {
@@ -829,14 +876,14 @@ void LandscapeFoliage3D::clear(int p_type_index) {
 			continue;
 		}
 		Entry *entry = entries[i];
-		for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
-			_free_cell_rendering(kv.value);
+		_drop_cells(entry);
+		if (data.is_valid() && int(i) < data->get_layer_count()) {
+			data->clear_layer(i);
+			_mark_data_edited();
 		}
-		entry->cells.clear();
-		entry->count = 0;
-		entry->serialized_dirty = true;
 	}
 	render_pending = true;
+	debug_bounds_dirty = true;
 }
 
 /* Instances */
@@ -890,6 +937,7 @@ TypedArray<Transform3D> LandscapeFoliage3D::get_instance_transforms(int p_type_i
 	ERR_FAIL_NULL_V(entry, result);
 	const Transform3D space = _get_space_transform();
 	const bool filter = p_global_aabb.size != Vector3();
+	const_cast<LandscapeFoliage3D *>(this)->_ensure_all_loaded(const_cast<Entry *>(entry));
 	for (const KeyValue<Vector2i, Cell> &kv : entry->cells) {
 		for (const Instance &instance : kv.value.instances) {
 			const Transform3D xform = space * instance.get_transform();
@@ -980,66 +1028,11 @@ Vector<Rect2> LandscapeFoliage3D::get_cell_rects(const Rect2 &p_rect) const {
 
 /* Serialization */
 
-PackedByteArray LandscapeFoliage3D::_encode_instances(const LocalVector<Instance> &p_instances) {
-	PackedByteArray result;
-	if (p_instances.is_empty()) {
-		return result;
-	}
-	// Byte planes of the floats compress much better than interleaved floats.
-	const int64_t floats = int64_t(p_instances.size()) * INSTANCE_FLOATS;
-	Vector<uint8_t> shuffled;
-	shuffled.resize(floats * 4);
-	const uint8_t *src = reinterpret_cast<const uint8_t *>(p_instances.ptr());
-	uint8_t *dst = shuffled.ptrw();
-	for (int64_t i = 0; i < floats; i++) {
-		for (int b = 0; b < 4; b++) {
-			dst[b * floats + i] = src[i * 4 + b];
-		}
-	}
-	result.resize(FOLIAGE_DATA_HEADER + Compression::get_max_compressed_buffer_size(shuffled.size(), Compression::MODE_ZSTD));
-	uint8_t *w = result.ptrw();
-	encode_uint32(FOLIAGE_DATA_MAGIC, w);
-	encode_uint32(FOLIAGE_DATA_VERSION, w + 4);
-	encode_uint32(p_instances.size(), w + 8);
-	encode_uint32(INSTANCE_FLOATS, w + 12);
-	const int64_t written = Compression::compress(w + FOLIAGE_DATA_HEADER, shuffled.ptr(), shuffled.size(), Compression::MODE_ZSTD);
-	ERR_FAIL_COND_V(written < 0, PackedByteArray());
-	result.resize(FOLIAGE_DATA_HEADER + written);
-	return result;
-}
-
-bool LandscapeFoliage3D::_decode_instances(const PackedByteArray &p_data, LocalVector<Instance> &r_instances) {
-	r_instances.clear();
-	if (p_data.is_empty()) {
-		return true;
-	}
-	ERR_FAIL_COND_V_MSG(p_data.size() < FOLIAGE_DATA_HEADER, false, "Invalid foliage instance data.");
-	const uint8_t *r = p_data.ptr();
-	ERR_FAIL_COND_V_MSG(decode_uint32(r) != FOLIAGE_DATA_MAGIC, false, "Invalid foliage instance data.");
-	ERR_FAIL_COND_V_MSG(decode_uint32(r + 4) > FOLIAGE_DATA_VERSION, false, "The foliage instance data was saved by a newer version.");
-	const uint32_t count = decode_uint32(r + 8);
-	ERR_FAIL_COND_V_MSG(decode_uint32(r + 12) != uint32_t(INSTANCE_FLOATS), false, "Invalid foliage instance data.");
-	ERR_FAIL_COND_V_MSG(count > (1u << 27), false, "Corrupted foliage instance data.");
-	const int64_t floats = int64_t(count) * INSTANCE_FLOATS;
-	Vector<uint8_t> shuffled;
-	shuffled.resize(floats * 4);
-	const int64_t size = Compression::decompress(shuffled.ptrw(), shuffled.size(), r + FOLIAGE_DATA_HEADER, p_data.size() - FOLIAGE_DATA_HEADER, Compression::MODE_ZSTD);
-	ERR_FAIL_COND_V_MSG(size != shuffled.size(), false, "Corrupted foliage instance data.");
-	r_instances.resize(count);
-	uint8_t *dst = reinterpret_cast<uint8_t *>(r_instances.ptr());
-	const uint8_t *s = shuffled.ptr();
-	for (int64_t i = 0; i < floats; i++) {
-		for (int b = 0; b < 4; b++) {
-			dst[i * 4 + b] = s[b * floats + i];
-		}
-	}
-	return true;
-}
-
 PackedByteArray LandscapeFoliage3D::get_type_data(int p_type_index) const {
 	Entry *entry = _get_entry(p_type_index);
 	ERR_FAIL_NULL_V(entry, PackedByteArray());
 	if (entry->serialized_dirty) {
+		const_cast<LandscapeFoliage3D *>(this)->_ensure_all_loaded(entry);
 		// Sorted by cell, so that the same instances are always saved the same way.
 		LocalVector<Vector2i> keys;
 		for (const KeyValue<Vector2i, Cell> &kv : entry->cells) {
@@ -1053,7 +1046,7 @@ PackedByteArray LandscapeFoliage3D::get_type_data(int p_type_index) const {
 				all.push_back(instance);
 			}
 		}
-		entry->serialized = _encode_instances(all);
+		entry->serialized = LandscapeFoliageInstance::encode(all.ptr(), all.size());
 		entry->serialized_dirty = false;
 	}
 	return entry->serialized;
@@ -1063,19 +1056,21 @@ void LandscapeFoliage3D::set_type_data(int p_type_index, const PackedByteArray &
 	Entry *entry = _get_entry(p_type_index);
 	ERR_FAIL_NULL(entry);
 	LocalVector<Instance> instances;
-	if (!_decode_instances(p_data, instances)) {
+	if (!LandscapeFoliageInstance::decode(p_data, instances)) {
 		return;
 	}
-	for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
-		_free_cell_rendering(kv.value);
+	_drop_cells(entry);
+	if (data.is_valid() && p_type_index < data->get_layer_count()) {
+		data->clear_layer(p_type_index); // The new cells are written by the next flush.
+		_mark_data_edited();
 	}
-	entry->cells.clear();
-	entry->count = 0;
 	for (const Instance &instance : instances) {
 		_add_instance(entry, instance);
 	}
 	entry->serialized_dirty = true;
+	entry->gpu_dirty = true;
 	render_pending = true;
+	debug_bounds_dirty = true;
 }
 
 void LandscapeFoliage3D::_set_foliage_types_bind(const TypedArray<LandscapeFoliageType> &p_types) {
@@ -1111,6 +1106,9 @@ void LandscapeFoliage3D::_set_instance_data(const Array &p_data) {
 
 Array LandscapeFoliage3D::_get_instance_data() const {
 	Array instance_data;
+	if (data.is_valid()) {
+		return instance_data; // Saved in the data.
+	}
 	for (uint32_t i = 0; i < entries.size(); i++) {
 		instance_data.push_back(get_type_data(i));
 	}
@@ -1164,14 +1162,12 @@ Vector3 LandscapeFoliage3D::global_to_landscape(const Vector3 &p_global) const {
 	return _get_space_transform().affine_inverse().xform(p_global);
 }
 
-bool LandscapeFoliage3D::_get_camera(Vector3 &r_position) const {
-	Vector3 global;
+Camera3D *LandscapeFoliage3D::_get_view_camera() const {
+	// The camera of the LOD of the landscape.
+	Camera3D *camera = nullptr;
 	if (landscape) {
-		if (!landscape->get_view_position(global)) {
-			return false;
-		}
+		camera = landscape->get_lod_camera();
 	} else {
-		Camera3D *camera = nullptr;
 #ifdef TOOLS_ENABLED
 		if (Engine::get_singleton()->is_editor_hint() && Landscape3D::editor_camera_callback && is_part_of_edited_scene()) {
 			camera = Landscape3D::editor_camera_callback();
@@ -1180,12 +1176,16 @@ bool LandscapeFoliage3D::_get_camera(Vector3 &r_position) const {
 		if (!camera && get_viewport()) {
 			camera = get_viewport()->get_camera_3d();
 		}
-		if (!camera || !camera->is_inside_tree()) {
-			return false;
-		}
-		global = camera->get_camera_transform().origin;
 	}
-	r_position = global_to_landscape(global);
+	return (camera && camera->is_inside_tree()) ? camera : nullptr;
+}
+
+bool LandscapeFoliage3D::_get_camera(Vector3 &r_position) const {
+	const Camera3D *camera = _get_view_camera();
+	if (!camera) {
+		return false;
+	}
+	r_position = global_to_landscape(camera->get_camera_transform().origin);
 	return true;
 }
 
@@ -1217,6 +1217,7 @@ void LandscapeFoliage3D::_free_all_rendering() {
 		for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
 			_free_cell_rendering(kv.value);
 		}
+		_free_gpu(entry);
 	}
 	_free_debug_bounds();
 	render_pending = true;
@@ -1250,6 +1251,7 @@ void LandscapeFoliage3D::_update_all_batch_settings() {
 			}
 		}
 	}
+	_update_all_gpu_output_settings();
 	if (debug_bounds_instance.is_valid()) {
 		RenderingServer *rs = RenderingServer::get_singleton();
 		rs->instance_set_transform(debug_bounds_instance, _get_space_transform());
@@ -1277,17 +1279,41 @@ Color LandscapeFoliage3D::get_debug_state_color(bool p_sorted_per_instance) {
 	return p_sorted_per_instance ? Color(1.0, 0.55, 0.2) : Color(0.35, 0.65, 1.0);
 }
 
+Color LandscapeFoliage3D::get_debug_gpu_color() {
+	// Green: culled and sorted on the GPU (gpu_indirect).
+	return Color(0.45, 0.9, 0.4);
+}
+
+static _FORCE_INLINE_ int _foliage_debug_cell_index(const Vector2i &p_key) {
+	// Also computed by the GPU culling (custom data of the instances), in 16 bits.
+	return (p_key.x * 7919 + p_key.y * 104729) & 0xFFFF;
+}
+
 RID LandscapeFoliage3D::_get_debug_material() {
 	if (debug_material.is_null()) {
 		debug_shader.instantiate();
+		// The color is an instance uniform, or the color of the cell of the instance (GPU culling).
 		debug_shader->set_code(R"(
 shader_type spatial;
 render_mode cull_disabled;
 
 instance uniform vec3 foliage_debug_color = vec3(1.0);
+instance uniform int foliage_debug_source = 0;
+
+varying flat float cell;
+
+vec3 debug_color(int p_index) {
+	float h = fract(float(p_index) * 0.61803398875);
+	vec3 c = clamp(abs(fract(h + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+	return mix(vec3(1.0), c, 0.75);
+}
+
+void vertex() {
+	cell = INSTANCE_CUSTOM.y;
+}
 
 void fragment() {
-	ALBEDO = foliage_debug_color;
+	ALBEDO = foliage_debug_source == 1 ? debug_color(int(cell + 0.5)) : foliage_debug_color;
 	ROUGHNESS = 0.9;
 }
 )");
@@ -1302,7 +1328,7 @@ Color LandscapeFoliage3D::_get_debug_cell_color(const Cell &p_cell, int p_lod) c
 		case DEBUG_VIEW_LOD_LEVELS:
 			return get_debug_color(p_lod);
 		case DEBUG_VIEW_CELLS:
-			return get_debug_color(p_cell.key.x * 7919 + p_cell.key.y * 104729);
+			return get_debug_color(_foliage_debug_cell_index(p_cell.key));
 		case DEBUG_VIEW_CELL_STATE:
 			return get_debug_state_color(p_cell.state == STATE_MIXED);
 		default:
@@ -1345,18 +1371,26 @@ void LandscapeFoliage3D::_update_debug_bounds() {
 	PackedVector3Array lines;
 	PackedColorArray colors;
 	int count = 0;
+	const bool gpu_active = _is_gpu_active();
 	for (const Entry *entry : entries) {
 		for (const KeyValue<Vector2i, Cell> &kv : entry->cells) {
 			const Cell &cell = kv.value;
 			bool drawn = false;
-			for (const Batch &batch : cell.batches) {
-				drawn = drawn || batch.instance.is_valid();
+			if (gpu_active) {
+				// The cells uploaded to the GPU.
+				drawn = cell.loaded && entry->gpu_slots.has(kv.key);
+			} else {
+				for (const Batch &batch : cell.batches) {
+					drawn = drawn || batch.instance.is_valid();
+				}
 			}
 			if (!drawn) {
 				continue;
 			}
 			Color color = _get_debug_cell_color(cell, MAX(cell.state, 0));
-			if (debug_view == DEBUG_VIEW_LOD_LEVELS && cell.state == STATE_MIXED) {
+			if (gpu_active) {
+				color = debug_view == DEBUG_VIEW_CELLS ? color : (debug_view == DEBUG_VIEW_CELL_STATE ? get_debug_gpu_color() : Color(1, 1, 1));
+			} else if (debug_view == DEBUG_VIEW_LOD_LEVELS && cell.state == STATE_MIXED) {
 				color = Color(1, 1, 1);
 			}
 			for (int edge = 0; edge < 12; edge++) {
@@ -1590,6 +1624,12 @@ void LandscapeFoliage3D::_update_rendering() {
 	if (!has_camera) {
 		camera = Vector3(); // Without camera, everything is drawn at the first level.
 	}
+	if (_is_gpu_active()) {
+		_update_gpu(camera, has_camera);
+		last_camera = camera;
+		has_last_camera = has_camera;
+		return;
+	}
 	if (!render_pending && has_camera == has_last_camera && camera.distance_squared_to(last_camera) < MIN_CAMERA_STEP * MIN_CAMERA_STEP) {
 		return;
 	}
@@ -1609,6 +1649,9 @@ void LandscapeFoliage3D::_update_rendering() {
 		const real_t step = MAX(entry->transition * 0.5f, float(MIN_CAMERA_STEP));
 		for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
 			Cell &cell = kv.value;
+			if (!cell.loaded) {
+				continue; // Streamed out (no rendering resources).
+			}
 			_update_cell_bounds(entry, cell);
 			real_t min_distance = 0.0;
 			real_t max_distance = 0.0;
@@ -1651,6 +1694,958 @@ void LandscapeFoliage3D::_update_rendering() {
 	last_updated_cells = done;
 }
 
+/* Streaming */
+
+bool LandscapeFoliage3D::_is_streamed() const {
+	return data.is_valid() && data->is_streamed();
+}
+
+int LandscapeFoliage3D::_get_entry_index(const Entry *p_entry) const {
+	for (uint32_t i = 0; i < entries.size(); i++) {
+		if (entries[i] == p_entry) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+void LandscapeFoliage3D::_add_loaded_bytes(int64_t p_bytes) {
+	// Only the instances of a data are reported (with the memory of the data itself).
+	if (data.is_null() || p_bytes == 0) {
+		return;
+	}
+	loaded_bytes += p_bytes;
+	if (WorldStreaming::get_singleton()) {
+		WorldStreaming::get_singleton()->add_pool_usage(SNAME("Foliage CPU"), p_bytes);
+	}
+}
+
+void LandscapeFoliage3D::_cancel_requests(const Entry *p_entry) {
+	for (int64_t i = int64_t(requests.size()) - 1; i >= 0; i--) {
+		const CellRequest request = requests[i];
+		if (p_entry && request.entry != p_entry) {
+			continue;
+		}
+		Cell *cell = request.entry->cells.getptr(request.key);
+		if (cell) {
+			cell->requested = false;
+		}
+		const int index = _get_entry_index(request.entry);
+		if (data.is_valid() && index >= 0) {
+			data->cancel_request(index, request.key);
+		}
+		requests.remove_at_unordered(i);
+	}
+}
+
+void LandscapeFoliage3D::_drop_cells(Entry *p_entry) {
+	_cancel_requests(p_entry);
+	int64_t bytes = 0;
+	for (KeyValue<Vector2i, Cell> &kv : p_entry->cells) {
+		_free_cell_rendering(kv.value);
+		if (kv.value.loaded) {
+			bytes += int64_t(kv.value.instances.size()) * sizeof(Instance);
+			loaded_cells -= data.is_valid() ? 1 : 0;
+		}
+	}
+	_add_loaded_bytes(-bytes);
+	p_entry->cells.clear();
+	p_entry->count = 0;
+	p_entry->serialized_dirty = true;
+	p_entry->data_dirty = false;
+	p_entry->gpu_dirty = true;
+	render_pending = true;
+	debug_bounds_dirty = true;
+}
+
+void LandscapeFoliage3D::_populate_entry(Entry *p_entry, int p_index) {
+	// The cells of the layer, not loaded yet (only their instance count and bounds are known).
+	_drop_cells(p_entry);
+	const HashMap<Vector2i, LandscapeFoliageData::CellInfo> *infos = data.is_valid() ? data->get_cells(p_index) : nullptr;
+	if (infos) {
+		for (const KeyValue<Vector2i, LandscapeFoliageData::CellInfo> &kv : *infos) {
+			Cell &cell = p_entry->cells.insert(kv.key, Cell())->value;
+			cell.key = kv.key;
+			cell.loaded = false;
+			cell.stored_count = kv.value.count;
+			cell.stored_bounds = kv.value.bounds;
+			p_entry->count += kv.value.count;
+		}
+	}
+	streaming_dirty = true;
+}
+
+void LandscapeFoliage3D::_reload_from_data() {
+	_cancel_requests();
+	chunk_size = data->get_chunk_size();
+	for (uint32_t i = 0; i < entries.size(); i++) {
+		_populate_entry(entries[i], i);
+	}
+	data_dirty = false;
+	streaming_dirty = true;
+	render_pending = true;
+	debug_bounds_dirty = true;
+}
+
+void LandscapeFoliage3D::_adopt_loaded_cells() {
+	// The data holds the same instances as the loaded cells of the node.
+	int64_t bytes = 0;
+	loaded_cells = 0;
+	for (Entry *entry : entries) {
+		entry->data_dirty = false;
+		for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
+			kv.value.data_dirty = false;
+			if (kv.value.loaded) {
+				bytes += int64_t(kv.value.instances.size()) * sizeof(Instance);
+				loaded_cells++;
+			}
+		}
+	}
+	data_dirty = false;
+	_add_loaded_bytes(bytes - loaded_bytes);
+	streaming_dirty = true;
+}
+
+void LandscapeFoliage3D::_detach_data() {
+	// Every instance goes back to the node (saved in the scene).
+	_flush_data();
+	_cancel_requests();
+	for (Entry *entry : entries) {
+		_ensure_all_loaded(entry);
+		entry->serialized_dirty = true;
+		entry->data_dirty = false;
+		for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
+			kv.value.data_dirty = false;
+		}
+	}
+	data->remove_flush_callback(callable_mp(this, &LandscapeFoliage3D::_flush_data));
+	_add_loaded_bytes(-loaded_bytes);
+	loaded_bytes = 0;
+	loaded_cells = 0;
+	data_dirty = false;
+	data.unref();
+}
+
+void LandscapeFoliage3D::_install_cell(Entry *p_entry, Cell &r_cell, LocalVector<Instance> &r_instances) {
+	p_entry->count += int64_t(r_instances.size()) - int64_t(r_cell.stored_count);
+	r_cell.instances = std::move(r_instances);
+	r_cell.loaded = true;
+	r_cell.requested = false; // Its request is dropped by the next poll.
+	r_cell.data_dirty = false;
+	r_cell.stored_count = 0;
+	r_cell.bounds_dirty = true;
+	r_cell.render_dirty = true;
+	r_cell.state = STATE_NONE;
+	r_cell.instance_lods.clear();
+	r_cell.gpu_dirty = true;
+	p_entry->gpu_dirty = true;
+	render_pending = true;
+	debug_bounds_dirty = true;
+	loaded_cells++;
+	_add_loaded_bytes(int64_t(r_cell.instances.size()) * sizeof(Instance));
+}
+
+void LandscapeFoliage3D::_load_cell(Entry *p_entry, Cell &r_cell) {
+	// Now (edits and queries): waits for its load if it is in progress.
+	LocalVector<Instance> instances;
+	const int index = _get_entry_index(p_entry);
+	if (data.is_valid() && index >= 0) {
+		data->read_cell(index, r_cell.key, instances);
+	}
+	_install_cell(p_entry, r_cell, instances);
+}
+
+void LandscapeFoliage3D::_evict_cell(Entry *p_entry, Cell &r_cell) {
+	const int index = _get_entry_index(p_entry);
+	if (!r_cell.loaded || data.is_null() || index < 0) {
+		return;
+	}
+	if (r_cell.data_dirty) {
+		data->write_cell(index, r_cell.key, r_cell.instances.ptr(), r_cell.instances.size());
+		r_cell.data_dirty = false;
+		_mark_data_edited();
+	}
+	_free_cell_rendering(r_cell);
+	AABB positions;
+	for (uint32_t i = 0; i < r_cell.instances.size(); i++) {
+		if (i == 0) {
+			positions = AABB(r_cell.instances[i].get_position(), Vector3());
+		} else {
+			positions.expand_to(r_cell.instances[i].get_position());
+		}
+	}
+	_add_loaded_bytes(-int64_t(r_cell.instances.size()) * int64_t(sizeof(Instance)));
+	r_cell.stored_count = r_cell.instances.size();
+	r_cell.stored_bounds = positions;
+	r_cell.instances.reset();
+	r_cell.instance_lods.reset();
+	r_cell.loaded = false;
+	r_cell.bounds_dirty = true;
+	p_entry->gpu_dirty = true;
+	loaded_cells--;
+}
+
+void LandscapeFoliage3D::_ensure_all_loaded(Entry *p_entry) {
+	for (KeyValue<Vector2i, Cell> &kv : p_entry->cells) {
+		if (!kv.value.loaded) {
+			_load_cell(p_entry, kv.value);
+		}
+	}
+}
+
+void LandscapeFoliage3D::load_all_cells() {
+	for (Entry *entry : entries) {
+		_ensure_all_loaded(entry);
+	}
+}
+
+void LandscapeFoliage3D::_flush_data() {
+	// The edited cells are written to the data (in memory until it is saved).
+	if (data.is_null() || !data_dirty) {
+		return;
+	}
+	for (uint32_t i = 0; i < entries.size(); i++) {
+		Entry *entry = entries[i];
+		if (!entry->data_dirty) {
+			continue;
+		}
+		for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
+			Cell &cell = kv.value;
+			if (cell.loaded && cell.data_dirty) {
+				data->write_cell(i, kv.key, cell.instances.ptr(), cell.instances.size());
+				cell.data_dirty = false;
+			}
+		}
+		entry->data_dirty = false;
+	}
+	data_dirty = false;
+}
+
+void LandscapeFoliage3D::_mark_data_edited() {
+#ifdef TOOLS_ENABLED
+	// Saved with the scene.
+	if (data.is_valid() && Engine::get_singleton()->is_editor_hint()) {
+		data->set_edited(true);
+	}
+#endif
+}
+
+void LandscapeFoliage3D::set_data(const Ref<LandscapeFoliageData> &p_data) {
+	if (data == p_data) {
+		return;
+	}
+	if (data.is_valid()) {
+		_detach_data();
+	}
+	data = p_data;
+	if (data.is_valid()) {
+		data->add_flush_callback(callable_mp(this, &LandscapeFoliage3D::_flush_data));
+		if (data->get_cell_count() == 0) {
+			// An empty data takes the instances of the node.
+			data->set_chunk_size(chunk_size);
+			data->set_layer_count(MAX(data->get_layer_count(), int(entries.size())));
+			for (uint32_t i = 0; i < entries.size(); i++) {
+				for (const KeyValue<Vector2i, Cell> &kv : entries[i]->cells) {
+					if (!kv.value.instances.is_empty()) {
+						data->write_cell(i, kv.key, kv.value.instances.ptr(), kv.value.instances.size());
+					}
+				}
+			}
+			_adopt_loaded_cells();
+			if (get_instance_count() > 0) {
+				_mark_data_edited();
+			}
+		} else {
+			if (data->get_layer_count() < int(entries.size())) {
+				data->set_layer_count(entries.size());
+				_mark_data_edited();
+			}
+			_reload_from_data();
+		}
+	}
+	streaming_dirty = true;
+	render_pending = true;
+	update_configuration_warnings();
+}
+
+Error LandscapeFoliage3D::save_to_data_file(const String &p_path) {
+	ERR_FAIL_COND_V(p_path.is_empty(), ERR_INVALID_PARAMETER);
+	Ref<LandscapeFoliageData> target = data;
+	if (target.is_null()) {
+		target.instantiate();
+		target->set_chunk_size(chunk_size);
+		target->set_layer_count(entries.size());
+		for (uint32_t i = 0; i < entries.size(); i++) {
+			for (const KeyValue<Vector2i, Cell> &kv : entries[i]->cells) {
+				if (!kv.value.instances.is_empty()) {
+					target->write_cell(i, kv.key, kv.value.instances.ptr(), kv.value.instances.size());
+				}
+			}
+		}
+	}
+	const String path = ProjectSettings::get_singleton()->localize_path(p_path);
+	const Error err = ResourceSaver::save(target, path);
+	ERR_FAIL_COND_V_MSG(err != OK, err, vformat("Can't save the foliage data to '%s'.", path));
+	if (target->get_path() != path) {
+		target->set_path(path, true); // Loaded from this path from now on.
+	}
+	if (target != data) {
+		// The loaded cells are kept: the far ones are released by the streaming.
+		data = target;
+		data->add_flush_callback(callable_mp(this, &LandscapeFoliage3D::_flush_data));
+		_adopt_loaded_cells();
+		update_configuration_warnings();
+	}
+	return OK;
+}
+
+void LandscapeFoliage3D::_process_streaming() {
+	if (data.is_null()) {
+		return;
+	}
+	if (WorldStreaming::get_singleton()) {
+		WorldStreaming::get_singleton()->process(); // Finishes the loads.
+	}
+	if (data_dirty) {
+		_flush_data();
+		_mark_data_edited();
+	}
+
+	// Finished loads.
+	for (int64_t i = int64_t(requests.size()) - 1; i >= 0; i--) {
+		const CellRequest request = requests[i];
+		Cell *cell = request.entry->cells.getptr(request.key);
+		if (!cell || cell->loaded || !cell->requested) {
+			requests.remove_at_unordered(i);
+			continue;
+		}
+		LocalVector<Instance> instances;
+		if (data->request_cell(_get_entry_index(request.entry), request.key, cell->request_priority, instances)) {
+			_install_cell(request.entry, *cell, instances);
+			requests.remove_at_unordered(i);
+		}
+	}
+
+	// What is needed: the cells within the cull distance of the camera and of the streaming
+	// sources (scaled by their range), every cell without camera or cull distance.
+	LocalVector<Vector3> centers;
+	LocalVector<real_t> scales;
+	Vector3 camera;
+	if (_get_camera(camera)) {
+		centers.push_back(camera);
+		scales.push_back(1.0);
+	}
+	if (WorldStreaming::get_singleton() && is_inside_tree() && get_world_3d().is_valid()) {
+		for (const WorldStreaming::Source &source : WorldStreaming::get_singleton()->get_sources(get_world_3d()->get_scenario())) {
+			centers.push_back(global_to_landscape(source.position));
+			scales.push_back(MAX(source.range_scale, real_t(0.0)));
+		}
+	}
+	bool moved = streaming_dirty || centers.size() != stream_centers.size();
+	const real_t step = chunk_size * 0.25f;
+	for (uint32_t i = 0; i < centers.size() && !moved; i++) {
+		moved = centers[i].distance_squared_to(stream_centers[i]) > step * step || !Math::is_equal_approx(scales[i], stream_scales[i]);
+	}
+	if (!moved) {
+		return;
+	}
+	streaming_dirty = false;
+	stream_centers = centers;
+	stream_scales = scales;
+
+	struct Candidate {
+		real_t distance;
+		Entry *entry;
+		Cell *cell;
+		bool operator<(const Candidate &p_other) const { return distance > p_other.distance; } // Farthest first.
+	};
+	LocalVector<Candidate> evictable;
+	int64_t bytes = 0;
+	int cells = 0;
+	for (uint32_t index = 0; index < entries.size(); index++) {
+		Entry *entry = entries[index];
+		const bool all = centers.is_empty() || entry->cull_end <= 0.0f;
+		const real_t radius = entry->cull_end + entry->transition * 0.5f + chunk_size * 0.5f;
+		const real_t keep = radius * 1.25f + chunk_size; // Hysteresis.
+		for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
+			Cell &cell = kv.value;
+			real_t distance = 0.0;
+			if (!all) {
+				_update_cell_bounds(entry, cell);
+				const Vector3 begin = cell.bounds.position;
+				const Vector3 end = cell.bounds.position + cell.bounds.size;
+				distance = Math::INF;
+				for (uint32_t i = 0; i < centers.size(); i++) {
+					if (scales[i] > 0.0) {
+						distance = MIN(distance, centers[i].distance_to(centers[i].clamp(begin, end)) / scales[i]);
+					}
+				}
+			}
+			const bool needed = entry->type.is_valid() && distance <= radius;
+			if (needed) {
+				if (!cell.loaded) {
+					cell.request_priority = -float(MIN(distance, real_t(1e9)));
+					if (!cell.requested) {
+						LocalVector<Instance> instances;
+						if (data->request_cell(index, kv.key, cell.request_priority, instances)) {
+							_install_cell(entry, cell, instances);
+						} else {
+							cell.requested = true;
+							requests.push_back({ entry, kv.key });
+						}
+					}
+				}
+			} else if (cell.requested) {
+				if (entry->type.is_null() || distance > keep) {
+					data->cancel_request(index, kv.key);
+					cell.requested = false; // Its request is dropped by the next poll.
+				}
+			} else if (cell.loaded && !cell.data_dirty) {
+				if (entry->type.is_null() || distance > keep) {
+					_evict_cell(entry, cell);
+				} else {
+					evictable.push_back({ distance, entry, &cell });
+				}
+			}
+			if (cell.loaded) {
+				bytes += int64_t(cell.instances.size()) * sizeof(Instance);
+				cells++;
+			}
+		}
+	}
+	// Fixes the drift of the edits.
+	_add_loaded_bytes(bytes - loaded_bytes);
+	loaded_cells = cells;
+
+	// Over the budget: the farthest cells that aren't needed are released first.
+	const int64_t budget = int64_t(GLOBAL_GET("rendering/landscape/streaming/foliage_cache_size_mb")) * 1024 * 1024;
+	if (loaded_bytes > budget && !evictable.is_empty()) {
+		evictable.sort();
+		for (const Candidate &candidate : evictable) {
+			if (loaded_bytes <= budget) {
+				break;
+			}
+			_evict_cell(candidate.entry, *candidate.cell);
+		}
+	}
+}
+
+/* GPU indirect rendering */
+
+bool LandscapeFoliage3D::is_gpu_indirect_supported() {
+#ifdef RD_ENABLED
+	return RenderingServer::get_singleton() && RenderingServer::get_singleton()->get_rendering_device() != nullptr;
+#else
+	return false;
+#endif
+}
+
+bool LandscapeFoliage3D::_is_gpu_active() const {
+	return gpu_indirect && gpu != nullptr && is_inside_tree();
+}
+
+void LandscapeFoliage3D::_gpu_call(const Callable &p_callable) {
+	RenderingServer::get_singleton()->call_on_render_thread(p_callable);
+}
+
+void LandscapeFoliage3D::_free_gpu_outputs(Entry *p_entry) {
+	RenderingServer *rs = RenderingServer::get_singleton();
+	for (int list = 0; list < 2; list++) {
+		for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
+			Entry::GPUOutput &output = p_entry->gpu_outputs[list][lod];
+			if (output.instance.is_valid()) {
+				rs->free_rid(output.instance);
+			}
+			if (output.multimesh.is_valid()) {
+				rs->free_rid(output.multimesh);
+			}
+			output = Entry::GPUOutput();
+		}
+	}
+	p_entry->gpu_outputs_dirty = true;
+	p_entry->gpu_run = true;
+	p_entry->gpu_dropped = 0;
+}
+
+void LandscapeFoliage3D::_free_gpu(Entry *p_entry) {
+	_free_gpu_outputs(p_entry);
+#ifdef RD_ENABLED
+	if (gpu && p_entry->gpu_capacity > 0) {
+		_gpu_call(callable_mp(gpu, &LandscapeFoliageGPU::free_entry).bind(p_entry->gpu_id));
+	}
+#endif
+	p_entry->gpu_slots.clear();
+	p_entry->gpu_free.clear();
+	p_entry->gpu_capacity = 0;
+	p_entry->gpu_used = 0;
+	p_entry->gpu_count = 0;
+	p_entry->gpu_bounds = AABB();
+	p_entry->gpu_dirty = true;
+	for (KeyValue<Vector2i, Cell> &kv : p_entry->cells) {
+		kv.value.gpu_dirty = true;
+	}
+	debug_bounds_dirty = true;
+}
+
+void LandscapeFoliage3D::_update_gpu_output_settings(Entry *p_entry, int p_list, int p_lod) {
+	const Entry::GPUOutput &output = p_entry->gpu_outputs[p_list][p_lod];
+	if (output.instance.is_null()) {
+		return;
+	}
+	RenderingServer *rs = RenderingServer::get_singleton();
+	rs->instance_set_transform(output.instance, _get_space_transform());
+	rs->instance_set_layer_mask(output.instance, render_layers);
+	rs->instance_set_visible(output.instance, is_visible_in_tree());
+	// The shadows of a level are drawn by its shadow list: every instance within the cull
+	// distance, also out of the view.
+	rs->instance_geometry_set_cast_shadows_setting(output.instance, p_list == 1 ? RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY : RSE::SHADOW_CASTING_SETTING_OFF);
+	if (debug_view != DEBUG_VIEW_DISABLED) {
+		// Cells: the color of the cell of each instance (custom data).
+		rs->instance_geometry_set_material_override(output.instance, _get_debug_material());
+		const Color color = debug_view == DEBUG_VIEW_LOD_LEVELS ? get_debug_color(p_lod) : get_debug_gpu_color();
+		rs->instance_geometry_set_shader_parameter(output.instance, SNAME("foliage_debug_color"), color);
+		rs->instance_geometry_set_shader_parameter(output.instance, SNAME("foliage_debug_source"), debug_view == DEBUG_VIEW_CELLS ? 1 : 0);
+		return;
+	}
+	const Ref<Material> material = p_entry->type.is_valid() ? p_entry->type->get_material_override() : Ref<Material>();
+	rs->instance_geometry_set_material_override(output.instance, material.is_valid() ? material->get_rid() : RID());
+}
+
+void LandscapeFoliage3D::_update_all_gpu_output_settings() {
+	for (Entry *entry : entries) {
+		for (int list = 0; list < 2; list++) {
+			for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
+				_update_gpu_output_settings(entry, list, lod);
+			}
+		}
+	}
+}
+
+bool LandscapeFoliage3D::_allocate_gpu_slot(Entry *p_entry, uint32_t p_capacity, uint32_t &r_offset) {
+	// First fit among the released slots, then after the last slot.
+	for (uint32_t i = 0; i < p_entry->gpu_free.size(); i++) {
+		Entry::GPUSlot &range = p_entry->gpu_free[i];
+		if (range.capacity >= p_capacity) {
+			r_offset = range.offset;
+			range.offset += p_capacity;
+			range.capacity -= p_capacity;
+			if (range.capacity == 0) {
+				p_entry->gpu_free.remove_at_unordered(i);
+			}
+			return true;
+		}
+	}
+	if (uint64_t(p_entry->gpu_used) + p_capacity <= p_entry->gpu_capacity) {
+		r_offset = p_entry->gpu_used;
+		p_entry->gpu_used += p_capacity;
+		return true;
+	}
+	return false;
+}
+
+void LandscapeFoliage3D::_release_gpu_slot(Entry *p_entry, const Vector2i &p_key) {
+	const Entry::GPUSlot *slot = p_entry->gpu_slots.getptr(p_key);
+	if (!slot) {
+		return;
+	}
+#ifdef RD_ENABLED
+	// Its instances become holes.
+	Vector<float> holes;
+	holes.resize(int64_t(slot->capacity) * INSTANCE_FLOATS);
+	memset(holes.ptrw(), 0, holes.size() * sizeof(float));
+	_gpu_call(callable_mp(gpu, &LandscapeFoliageGPU::update_instances).bind(p_entry->gpu_id, slot->offset, holes));
+#endif
+	if (slot->offset + slot->capacity == p_entry->gpu_used) {
+		p_entry->gpu_used = slot->offset;
+	} else {
+		p_entry->gpu_free.push_back(*slot);
+	}
+	p_entry->gpu_slots.erase(p_key);
+}
+
+void LandscapeFoliage3D::_write_gpu_slot(const Cell &p_cell, const Entry::GPUSlot &p_slot, float *r_buffer) {
+	// Transform, random value, cell (debug view) and 1 per instance, then holes (zeros).
+	const float cell_index = float(_foliage_debug_cell_index(p_cell.key));
+	float *w = r_buffer;
+	for (const Instance &instance : p_cell.instances) {
+		memcpy(w, instance.xform, sizeof(instance.xform));
+		w[12] = instance.random;
+		w[13] = cell_index;
+		w[14] = 0.0f;
+		w[15] = 1.0f;
+		w += INSTANCE_FLOATS;
+	}
+	memset(w, 0, int64_t(p_slot.capacity - p_cell.instances.size()) * INSTANCE_FLOATS * sizeof(float));
+}
+
+void LandscapeFoliage3D::_update_gpu_slots(Entry *p_entry, const Vector3 &p_camera, bool p_has_camera) {
+#ifdef RD_ENABLED
+	// The loaded cells within the cull distance of the camera (all without camera or cull
+	// distance) have a slot. Slots are released beyond a margin, so that small camera moves
+	// don't upload anything.
+	const bool all = !p_has_camera || p_entry->cull_end <= 0.0f;
+	const real_t range = p_entry->cull_end + p_entry->transition * 0.5f + chunk_size * 0.5f;
+	const real_t keep = range + chunk_size;
+	auto distance_to = [&](Cell &r_cell) -> real_t {
+		_update_cell_bounds(p_entry, r_cell);
+		return p_camera.distance_to(p_camera.clamp(r_cell.bounds.position, r_cell.bounds.position + r_cell.bounds.size));
+	};
+
+	bool changed = false;
+	LocalVector<Vector2i> released;
+	for (const KeyValue<Vector2i, Entry::GPUSlot> &kv : p_entry->gpu_slots) {
+		Cell *cell = p_entry->cells.getptr(kv.key);
+		if (!cell || !cell->loaded || cell->instances.is_empty() || p_entry->type.is_null() || (!all && distance_to(*cell) > keep)) {
+			released.push_back(kv.key);
+		}
+	}
+	for (const Vector2i &key : released) {
+		_release_gpu_slot(p_entry, key);
+		changed = true;
+	}
+
+	LocalVector<Cell *> uploads;
+	if (p_entry->type.is_valid()) {
+		for (KeyValue<Vector2i, Cell> &kv : p_entry->cells) {
+			Cell &cell = kv.value;
+			if (!cell.loaded || cell.instances.is_empty()) {
+				continue;
+			}
+			const bool has_slot = p_entry->gpu_slots.has(kv.key);
+			if (has_slot ? !cell.gpu_dirty : (!all && distance_to(cell) > range)) {
+				continue;
+			}
+			uploads.push_back(&cell);
+		}
+	}
+	changed = changed || !uploads.is_empty();
+
+	// Modified cells are written in place when they fit, with room to grow (painting).
+	bool repack = false;
+	for (Cell *cell : uploads) {
+		const uint32_t count = cell->instances.size();
+		Entry::GPUSlot *slot = p_entry->gpu_slots.getptr(cell->key);
+		if (slot && count > slot->capacity) {
+			_release_gpu_slot(p_entry, cell->key);
+			slot = nullptr;
+		}
+		if (!slot) {
+			Entry::GPUSlot new_slot;
+			new_slot.capacity = count + count / 4 + 16;
+			if (!_allocate_gpu_slot(p_entry, new_slot.capacity, new_slot.offset)) {
+				repack = true;
+				break;
+			}
+			slot = &p_entry->gpu_slots.insert(cell->key, new_slot)->value;
+		}
+		Vector<float> buffer;
+		buffer.resize(int64_t(slot->capacity) * INSTANCE_FLOATS);
+		_write_gpu_slot(*cell, *slot, buffer.ptrw());
+		_gpu_call(callable_mp(gpu, &LandscapeFoliageGPU::update_instances).bind(p_entry->gpu_id, slot->offset, buffer));
+		cell->gpu_dirty = false;
+	}
+
+	uint64_t slotted = 0;
+	for (const KeyValue<Vector2i, Entry::GPUSlot> &kv : p_entry->gpu_slots) {
+		slotted += kv.value.capacity;
+	}
+	// Also packed again when fragmented or much larger than needed.
+	repack = repack || p_entry->gpu_used > slotted * 2 + 65536 || p_entry->gpu_capacity > slotted * 4 + 65536;
+	if (repack) {
+		LocalVector<Cell *> cells;
+		for (const KeyValue<Vector2i, Entry::GPUSlot> &kv : p_entry->gpu_slots) {
+			cells.push_back(p_entry->cells.getptr(kv.key));
+		}
+		for (Cell *cell : uploads) {
+			if (!p_entry->gpu_slots.has(cell->key)) {
+				cells.push_back(cell);
+			}
+		}
+		p_entry->gpu_slots.clear();
+		p_entry->gpu_free.clear();
+		uint64_t total = 0;
+		for (Cell *cell : cells) {
+			total += cell->instances.size() + cell->instances.size() / 4 + 16;
+		}
+		ERR_FAIL_COND_MSG(total > uint64_t(UINT32_MAX / (INSTANCE_FLOATS * sizeof(float))), "Too many foliage instances for GPU indirect rendering.");
+		const uint32_t capacity = uint32_t(MIN(MAX(total + total / 2, uint64_t(4096)), uint64_t(UINT32_MAX / (INSTANCE_FLOATS * sizeof(float)))));
+		Vector<float> buffer;
+		buffer.resize(int64_t(total) * INSTANCE_FLOATS);
+		uint32_t offset = 0;
+		for (Cell *cell : cells) {
+			Entry::GPUSlot slot;
+			slot.offset = offset;
+			slot.capacity = cell->instances.size() + cell->instances.size() / 4 + 16;
+			_write_gpu_slot(*cell, slot, buffer.ptrw() + int64_t(offset) * INSTANCE_FLOATS);
+			p_entry->gpu_slots.insert(cell->key, slot);
+			cell->gpu_dirty = false;
+			offset += slot.capacity;
+		}
+		p_entry->gpu_capacity = capacity;
+		p_entry->gpu_used = offset;
+		_gpu_call(callable_mp(gpu, &LandscapeFoliageGPU::set_capacity).bind(p_entry->gpu_id, capacity));
+		_gpu_call(callable_mp(gpu, &LandscapeFoliageGPU::update_instances).bind(p_entry->gpu_id, 0, buffer));
+	}
+
+	// Also when only the bounds changed (other meshes).
+	uint32_t count = 0;
+	AABB bounds;
+	bool first = true;
+	for (const KeyValue<Vector2i, Entry::GPUSlot> &kv : p_entry->gpu_slots) {
+		Cell *cell = p_entry->cells.getptr(kv.key);
+		_update_cell_bounds(p_entry, *cell);
+		count += cell->instances.size();
+		bounds = first ? cell->bounds : bounds.merge(cell->bounds);
+		first = false;
+	}
+	changed = changed || count != p_entry->gpu_count || bounds != p_entry->gpu_bounds;
+	if (!changed) {
+		return;
+	}
+	p_entry->gpu_count = count;
+	p_entry->gpu_bounds = bounds;
+	p_entry->gpu_outputs_dirty = true;
+	p_entry->gpu_run = true;
+	debug_bounds_dirty = true;
+#endif
+}
+
+void LandscapeFoliage3D::_update_gpu_outputs(Entry *p_entry) {
+#ifdef RD_ENABLED
+	// The capacity of each output follows the instances it received in the last runs: it starts
+	// large enough for every instance (up to gpu_max_instances), shrinks when mostly unused and
+	// grows before it overflows.
+	const LandscapeFoliageGPU::Stats stats = gpu->get_stats(p_entry->gpu_id);
+	const bool new_stats = stats.serial > p_entry->gpu_outputs_serial;
+	if (!p_entry->gpu_outputs_dirty && !new_stats) {
+		return;
+	}
+	RenderingServer *rs = RenderingServer::get_singleton();
+	const uint32_t limit = CLAMP(MIN(p_entry->gpu_count, uint32_t(gpu_max_instances)), 1u, uint32_t(FOLIAGE_GPU_MAX_OUTPUT));
+	constexpr uint32_t min_capacity = 4096;
+	uint32_t dropped = 0;
+	bool changed = false;
+	for (int list = 0; list < 2; list++) {
+		for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
+			Entry::GPUOutput &output = p_entry->gpu_outputs[list][lod];
+			const bool wanted = p_entry->gpu_count > 0 && lod < p_entry->lod_count && p_entry->lod_meshes[lod].is_valid() && (list == 0 || (cast_shadows && p_entry->lod_shadows[lod]));
+			if (!wanted) {
+				if (output.multimesh.is_valid()) {
+					rs->free_rid(output.instance);
+					rs->free_rid(output.multimesh);
+					output = Entry::GPUOutput();
+					changed = true;
+				}
+				continue;
+			}
+			const uint32_t emitted = new_stats ? stats.counts[list * LandscapeFoliageType::MAX_LODS + lod] : 0;
+			uint32_t capacity = output.capacity;
+			if (new_stats && output.multimesh.is_valid()) {
+				dropped += emitted > output.capacity ? emitted - output.capacity : 0;
+				if (uint64_t(emitted) * 10 >= uint64_t(capacity) * 9) {
+					capacity = MAX(capacity * 2, emitted * 2);
+				} else if (emitted * 8 < capacity && capacity > min_capacity) {
+					capacity = MAX(emitted * 2, min_capacity);
+				}
+			}
+			if (capacity == 0) {
+				capacity = limit;
+			}
+			capacity = CLAMP(capacity, 1u, limit);
+			if (output.multimesh.is_null()) {
+				output.multimesh = rs->multimesh_create();
+				rs->multimesh_allocate_data(output.multimesh, capacity, RSE::MULTIMESH_TRANSFORM_3D, false, true, true);
+				rs->multimesh_set_mesh(output.multimesh, p_entry->lod_meshes[lod]);
+				output.surfaces = MIN(rs->mesh_get_surface_count(p_entry->lod_meshes[lod]), 255);
+				output.capacity = capacity;
+				output.instance = rs->instance_create2(output.multimesh, get_world_3d()->get_scenario());
+				rs->instance_attach_object_instance_id(output.instance, get_instance_id());
+				_update_gpu_output_settings(p_entry, list, lod);
+				rs->multimesh_set_custom_aabb(output.multimesh, p_entry->gpu_bounds);
+				changed = true;
+			} else {
+				if (capacity != output.capacity) {
+					rs->multimesh_allocate_data(output.multimesh, capacity, RSE::MULTIMESH_TRANSFORM_3D, false, true, true);
+					output.capacity = capacity;
+					changed = true;
+				}
+				if (p_entry->gpu_outputs_dirty) {
+					rs->multimesh_set_custom_aabb(output.multimesh, p_entry->gpu_bounds);
+				}
+			}
+		}
+	}
+	if (new_stats) {
+		p_entry->gpu_dropped = dropped;
+	}
+	// Statistics of the runs before a change describe the previous capacities.
+	p_entry->gpu_outputs_serial = changed ? p_entry->gpu_serial : MAX(p_entry->gpu_outputs_serial, stats.serial);
+	p_entry->gpu_run = p_entry->gpu_run || changed || p_entry->gpu_outputs_dirty;
+	p_entry->gpu_outputs_dirty = false;
+#endif
+}
+
+void LandscapeFoliage3D::_update_gpu(const Vector3 &p_camera, bool p_has_camera) {
+	const real_t step = chunk_size * 0.25f;
+	for (Entry *entry : entries) {
+		const bool moved = p_has_camera != has_last_camera || (p_has_camera && entry->gpu_slots_camera.distance_squared_to(p_camera) > step * step);
+		if (entry->gpu_dirty || moved) {
+			entry->gpu_dirty = false;
+			entry->gpu_slots_camera = p_camera;
+			_update_gpu_slots(entry, p_camera, p_has_camera);
+		}
+		_update_gpu_outputs(entry);
+	}
+	if (debug_bounds_dirty && debug_view != DEBUG_VIEW_DISABLED) {
+		_update_debug_bounds();
+	}
+	render_pending = false;
+}
+
+void LandscapeFoliage3D::_frame_pre_draw() {
+#ifdef RD_ENABLED
+	if (!_is_gpu_active() || !is_visible_in_tree()) {
+		return;
+	}
+	// The view of this frame (after the scripts moved the camera), frozen with the LOD of the
+	// landscape to inspect the culling.
+	bool valid = false;
+	bool frustum = false;
+	Vector3 camera;
+	Plane planes[6];
+	if (landscape && landscape->is_lod_frozen() && gpu_view_valid) {
+		valid = true;
+		frustum = gpu_view_frustum;
+		camera = gpu_view_camera;
+		for (int i = 0; i < 6; i++) {
+			planes[i] = gpu_view_planes[i];
+		}
+	} else {
+		const Camera3D *view = _get_view_camera();
+		if (view) {
+			valid = true;
+			const Transform3D to_landscape = _get_space_transform().affine_inverse();
+			camera = to_landscape.xform(view->get_camera_transform().origin);
+			const Vector<Plane> view_planes = view->get_frustum();
+			frustum = gpu_frustum_culling && view_planes.size() == 6;
+			for (int i = 0; i < 6 && frustum; i++) {
+				planes[i] = to_landscape.xform(view_planes[i]);
+			}
+		}
+	}
+	bool view_changed = valid != gpu_view_valid || frustum != gpu_view_frustum || camera != gpu_view_camera;
+	for (int i = 0; i < 6 && frustum && !view_changed; i++) {
+		view_changed = planes[i] != gpu_view_planes[i];
+	}
+	gpu_view_valid = valid;
+	gpu_view_frustum = frustum;
+	gpu_view_camera = camera;
+	for (int i = 0; i < 6; i++) {
+		gpu_view_planes[i] = planes[i];
+	}
+
+	for (Entry *entry : entries) {
+		if (!view_changed && !entry->gpu_run) {
+			continue;
+		}
+		entry->gpu_run = false;
+		Array outputs;
+		outputs.resize(LandscapeFoliageGPU::OUTPUT_COUNT);
+		Vector<int32_t> layout;
+		layout.resize(LandscapeFoliageGPU::OUTPUT_COUNT);
+		bool any = false;
+		for (int list = 0; list < 2; list++) {
+			for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
+				const Entry::GPUOutput &output = entry->gpu_outputs[list][lod];
+				const int index = list * LandscapeFoliageType::MAX_LODS + lod;
+				layout.write[index] = 0;
+				if (output.multimesh.is_valid()) {
+					outputs[index] = output.multimesh;
+					layout.write[index] = int32_t(output.capacity | (uint32_t(output.surfaces) << 24));
+					any = true;
+				}
+			}
+		}
+		if (!any) {
+			continue;
+		}
+		LandscapeFoliageCullParams params;
+		for (int i = 0; i < 6; i++) {
+			params.planes[i][0] = planes[i].normal.x;
+			params.planes[i][1] = planes[i].normal.y;
+			params.planes[i][2] = planes[i].normal.z;
+			params.planes[i][3] = planes[i].d;
+		}
+		params.camera[0] = camera.x;
+		params.camera[1] = camera.y;
+		params.camera[2] = camera.z;
+		for (int lod = 0; lod < entry->lod_count; lod++) {
+			params.lod_starts[lod] = entry->lod_starts[lod];
+		}
+		if (valid) {
+			params.cull[0] = entry->cull_end;
+			params.cull[1] = entry->cull_begin;
+			params.cull[2] = entry->transition * 0.5f;
+			params.counts[1] = MAX(entry->lod_count, 1);
+		} else {
+			params.counts[1] = 1; // Without camera, everything is drawn at the first level.
+		}
+		const AABB &mesh = entry->mesh_bounds;
+		const Vector3 center = mesh.get_center();
+		params.sphere[0] = center.x;
+		params.sphere[1] = center.y;
+		params.sphere[2] = center.z;
+		params.sphere[3] = mesh.size.length() * 0.5f;
+		params.counts[0] = entry->gpu_used;
+		params.counts[3] = frustum ? 1 : 0;
+		Vector<uint8_t> bytes;
+		bytes.resize(sizeof(params));
+		memcpy(bytes.ptrw(), &params, sizeof(params));
+		entry->gpu_serial++;
+		_gpu_call(callable_mp(gpu, &LandscapeFoliageGPU::run).bind(entry->gpu_id, bytes, outputs, layout, entry->gpu_serial));
+	}
+#endif
+}
+
+void LandscapeFoliage3D::set_gpu_indirect(bool p_enable) {
+	if (gpu_indirect == p_enable) {
+		return;
+	}
+	const bool was_active = _is_gpu_active();
+	gpu_indirect = p_enable;
+#ifdef RD_ENABLED
+	if (gpu_indirect && !gpu && is_gpu_indirect_supported()) {
+		gpu = memnew(LandscapeFoliageGPU);
+		if (is_inside_tree()) {
+			RenderingServer::get_singleton()->connect(SNAME("frame_pre_draw"), callable_mp(this, &LandscapeFoliage3D::_frame_pre_draw));
+		}
+	}
+#endif
+	if (was_active != _is_gpu_active()) {
+		// Switches between the CPU and the GPU paths.
+		for (Entry *entry : entries) {
+			for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
+				_free_cell_rendering(kv.value);
+			}
+			_free_gpu(entry);
+		}
+		_free_debug_bounds();
+		render_pending = true;
+	}
+	update_configuration_warnings();
+}
+
+void LandscapeFoliage3D::set_gpu_frustum_culling(bool p_enable) {
+	gpu_frustum_culling = p_enable;
+}
+
+void LandscapeFoliage3D::set_gpu_max_instances(int p_count) {
+	gpu_max_instances = CLAMP(p_count, 1024, FOLIAGE_GPU_MAX_OUTPUT);
+	for (Entry *entry : entries) {
+		entry->gpu_outputs_dirty = true;
+	}
+}
+
 /* Settings */
 
 void LandscapeFoliage3D::set_chunk_size(float p_size) {
@@ -1669,8 +2664,11 @@ void LandscapeFoliage3D::set_lod_distance_scale(float p_scale) {
 		for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
 			kv.value.render_dirty = true;
 		}
+		entry->gpu_dirty = true; // Other cull distance.
+		entry->gpu_run = true;
 	}
 	render_pending = true;
+	streaming_dirty = true;
 }
 
 void LandscapeFoliage3D::set_follow_terrain(bool p_enable) {
@@ -1687,6 +2685,9 @@ void LandscapeFoliage3D::set_render_layers(uint32_t p_layers) {
 
 void LandscapeFoliage3D::set_cast_shadows(bool p_enable) {
 	cast_shadows = p_enable;
+	for (Entry *entry : entries) {
+		entry->gpu_outputs_dirty = true; // Shadow lists.
+	}
 	_update_all_batch_settings();
 }
 
@@ -1697,8 +2698,10 @@ void LandscapeFoliage3D::force_update() {
 			_free_cell_rendering(kv.value);
 			kv.value.bounds_dirty = true;
 		}
+		_free_gpu(entry);
 	}
 	render_pending = true;
+	streaming_dirty = true;
 }
 
 Dictionary LandscapeFoliage3D::get_statistics() const {
@@ -1722,17 +2725,62 @@ Dictionary LandscapeFoliage3D::get_statistics() const {
 			cells_mixed += kv.value.state == STATE_MIXED ? 1 : 0;
 		}
 	}
+	// GPU indirect rendering: instances in the GPU buffers, drawn (read back from the last run).
+	const bool gpu_active = _is_gpu_active();
+	int64_t gpu_instances = 0;
+	int64_t gpu_cells = 0;
+	int64_t gpu_shadow_drawn = 0;
+	int64_t gpu_dropped = 0;
+	int64_t gpu_memory = 0;
+#ifdef RD_ENABLED
+	if (gpu_active) {
+		drawn = 0;
+		for (const Entry *entry : entries) {
+			gpu_instances += entry->gpu_count;
+			gpu_cells += entry->gpu_slots.size();
+			gpu_dropped += entry->gpu_dropped;
+			gpu_memory += int64_t(entry->gpu_capacity) * (INSTANCE_FLOATS * sizeof(float) + sizeof(uint32_t));
+			const LandscapeFoliageGPU::Stats gpu_stats = gpu->get_stats(entry->gpu_id);
+			for (int list = 0; list < 2; list++) {
+				for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
+					const Entry::GPUOutput &output = entry->gpu_outputs[list][lod];
+					if (output.multimesh.is_null()) {
+						continue;
+					}
+					batches++;
+					gpu_memory += int64_t(output.capacity) * INSTANCE_FLOATS * sizeof(float);
+					const int64_t count = MIN(gpu_stats.counts[list * LandscapeFoliageType::MAX_LODS + lod], output.capacity);
+					if (list == 0) {
+						drawn += count;
+					} else {
+						gpu_shadow_drawn += count;
+					}
+				}
+			}
+		}
+	}
+#endif
 	Dictionary stats;
 	stats["types"] = int(entries.size());
 	stats["instances"] = get_instance_count();
 	stats["cells"] = cells;
-	stats["cells_rendered"] = cells_rendered;
+	stats["cells_rendered"] = gpu_active ? gpu_cells : cells_rendered;
 	stats["cells_mixed"] = cells_mixed;
 	stats["batches"] = batches;
 	stats["instances_drawn"] = drawn;
 	stats["update_usec"] = int64_t(last_update_usec);
 	stats["updated_cells"] = last_updated_cells;
 	stats["debug_bounds"] = debug_bounds_count;
+	stats["gpu_indirect"] = gpu_active;
+	stats["gpu_instances"] = gpu_instances;
+	stats["gpu_shadow_instances_drawn"] = gpu_shadow_drawn;
+	stats["gpu_dropped"] = gpu_dropped;
+	stats["gpu_memory"] = gpu_memory;
+	stats["streamed"] = _is_streamed();
+	stats["cells_loaded"] = data.is_valid() ? int64_t(loaded_cells) : cells;
+	stats["cells_loading"] = int64_t(requests.size());
+	stats["loaded_memory"] = loaded_bytes;
+	stats["data_memory"] = data.is_valid() ? data->get_memory_usage() : int64_t(0);
 	return stats;
 }
 
@@ -1763,6 +2811,12 @@ PackedStringArray LandscapeFoliage3D::get_configuration_warnings() const {
 			warnings.push_back(vformat(RTR("Foliage type %d has no mesh."), i));
 		}
 	}
+	if (gpu_indirect && !is_gpu_indirect_supported()) {
+		warnings.push_back(RTR("GPU indirect rendering requires the Forward+ or Mobile renderer: the foliage is culled on the CPU."));
+	}
+	if ((data.is_null() || !data->get_path().is_resource_file()) && get_instance_count() > 100000) {
+		warnings.push_back(RTR("Many instances are saved in the scene: save them to a .lfdata file (Foliage tab of the Landscape dock) to stream them."));
+	}
 	return warnings;
 }
 
@@ -1773,12 +2827,20 @@ void LandscapeFoliage3D::_notification(int p_what) {
 			if (landscape) {
 				landscape->_register_foliage(this);
 			}
+			if (gpu) {
+				RenderingServer::get_singleton()->connect(SNAME("frame_pre_draw"), callable_mp(this, &LandscapeFoliage3D::_frame_pre_draw));
+			}
 			render_pending = true;
+			streaming_dirty = true;
+			gpu_view_valid = false;
 			set_process_internal(true);
 		} break;
 
 		case NOTIFICATION_EXIT_TREE: {
 			_free_all_rendering();
+			if (gpu && RenderingServer::get_singleton()->is_connected(SNAME("frame_pre_draw"), callable_mp(this, &LandscapeFoliage3D::_frame_pre_draw))) {
+				RenderingServer::get_singleton()->disconnect(SNAME("frame_pre_draw"), callable_mp(this, &LandscapeFoliage3D::_frame_pre_draw));
+			}
 			if (landscape) {
 				landscape->_unregister_foliage(this);
 				landscape = nullptr;
@@ -1807,6 +2869,13 @@ void LandscapeFoliage3D::_notification(int p_what) {
 						}
 					}
 				}
+				for (int list = 0; list < 2; list++) {
+					for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
+						if (entry->gpu_outputs[list][lod].instance.is_valid()) {
+							rs->instance_set_transform(entry->gpu_outputs[list][lod].instance, space);
+						}
+					}
+				}
 			}
 			if (debug_bounds_instance.is_valid()) {
 				rs->instance_set_transform(debug_bounds_instance, space);
@@ -1821,6 +2890,7 @@ void LandscapeFoliage3D::_notification(int p_what) {
 
 		case NOTIFICATION_INTERNAL_PROCESS: {
 			_process_snapping();
+			_process_streaming();
 			_update_rendering();
 		} break;
 	}
@@ -1849,6 +2919,19 @@ void LandscapeFoliage3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_render_layers"), &LandscapeFoliage3D::get_render_layers);
 	ClassDB::bind_method(D_METHOD("set_cast_shadows", "enable"), &LandscapeFoliage3D::set_cast_shadows);
 	ClassDB::bind_method(D_METHOD("is_casting_shadows"), &LandscapeFoliage3D::is_casting_shadows);
+	ClassDB::bind_method(D_METHOD("set_gpu_indirect", "enable"), &LandscapeFoliage3D::set_gpu_indirect);
+	ClassDB::bind_method(D_METHOD("is_gpu_indirect"), &LandscapeFoliage3D::is_gpu_indirect);
+	ClassDB::bind_method(D_METHOD("set_gpu_frustum_culling", "enable"), &LandscapeFoliage3D::set_gpu_frustum_culling);
+	ClassDB::bind_method(D_METHOD("is_gpu_frustum_culling"), &LandscapeFoliage3D::is_gpu_frustum_culling);
+	ClassDB::bind_method(D_METHOD("set_gpu_max_instances", "count"), &LandscapeFoliage3D::set_gpu_max_instances);
+	ClassDB::bind_method(D_METHOD("get_gpu_max_instances"), &LandscapeFoliage3D::get_gpu_max_instances);
+	ClassDB::bind_method(D_METHOD("is_gpu_indirect_active"), &LandscapeFoliage3D::is_gpu_indirect_active);
+	ClassDB::bind_static_method("LandscapeFoliage3D", D_METHOD("is_gpu_indirect_supported"), &LandscapeFoliage3D::is_gpu_indirect_supported);
+
+	ClassDB::bind_method(D_METHOD("set_data", "data"), &LandscapeFoliage3D::set_data);
+	ClassDB::bind_method(D_METHOD("get_data"), &LandscapeFoliage3D::get_data);
+	ClassDB::bind_method(D_METHOD("save_to_data_file", "path"), &LandscapeFoliage3D::save_to_data_file);
+	ClassDB::bind_method(D_METHOD("load_all_cells"), &LandscapeFoliage3D::load_all_cells);
 
 	ClassDB::bind_method(D_METHOD("paint", "type_index", "global_center", "radius", "density_scale"), &LandscapeFoliage3D::paint, DEFVAL(1.0));
 	ClassDB::bind_method(D_METHOD("erase", "type_index", "global_center", "radius", "density_scale"), &LandscapeFoliage3D::erase, DEFVAL(0.0));
@@ -1885,6 +2968,15 @@ void LandscapeFoliage3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "render_layers", PROPERTY_HINT_LAYERS_3D_RENDER), "set_render_layers", "get_render_layers");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "cast_shadows"), "set_cast_shadows", "is_casting_shadows");
 
+	ADD_GROUP("GPU", "gpu_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "gpu_indirect"), "set_gpu_indirect", "is_gpu_indirect");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "gpu_frustum_culling"), "set_gpu_frustum_culling", "is_gpu_frustum_culling");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "gpu_max_instances", PROPERTY_HINT_RANGE, "1024,16777215,1"), "set_gpu_max_instances", "get_gpu_max_instances");
+
+	// After the types (the layers of the data are aligned with them) and the chunk size.
+	ADD_GROUP("Streaming", "");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "data", PROPERTY_HINT_RESOURCE_TYPE, LandscapeFoliageData::get_class_static()), "set_data", "get_data");
+
 	ADD_GROUP("Debug", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_view", PROPERTY_HINT_ENUM, "Disabled,LOD Levels,Cells,Cell State"), "set_debug_view", "get_debug_view");
 
@@ -1902,13 +2994,28 @@ LandscapeFoliage3D::LandscapeFoliage3D() {
 }
 
 LandscapeFoliage3D::~LandscapeFoliage3D() {
+	if (data.is_valid()) {
+		// The data may outlive the node.
+		_flush_data();
+		_cancel_requests();
+		data->remove_flush_callback(callable_mp(this, &LandscapeFoliage3D::_flush_data));
+		_add_loaded_bytes(-loaded_bytes);
+	}
 	for (Entry *entry : entries) {
 		_connect_type(entry, false);
 		for (KeyValue<Vector2i, Cell> &kv : entry->cells) {
 			_free_cell_rendering(kv.value);
 		}
+		_free_gpu_outputs(entry);
 		memdelete(entry);
 	}
 	entries.clear();
 	_free_debug_bounds();
+#ifdef RD_ENABLED
+	if (gpu) {
+		// After the pending calls of the node, on the rendering thread.
+		RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&LandscapeFoliageGPU::destroy).bind(gpu));
+		gpu = nullptr;
+	}
+#endif
 }
