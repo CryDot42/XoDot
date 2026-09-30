@@ -6072,7 +6072,10 @@
 		<constant name="INSTANCE_FLAG_IGNORE_OCCLUSION_CULLING" value="3" enum="InstanceFlags">
 			Always draw, even if the instance would be culled by occlusion culling. Does not affect view frustum culling.
 		</constant>
-		<constant name="INSTANCE_FLAG_MAX" value="4" enum="InstanceFlags">
+		<constant name="INSTANCE_FLAG_HZB_STABLE_CONTENT" value="4" enum="InstanceFlags">
+			When set, the changes of what the instance draws that don't move it, resize its bounds or hide it (for example, the instances of a [MultiMesh] switching levels of detail) don't make the depth buffers rendered before unreliable for HZB occlusion culling (see [method viewport_set_use_hzb_occlusion_culling]) where the instance is. Otherwise, any change of the instance (its mesh, material, instance count...) disables HZB occlusion culling behind it for a few frames. Use it for instances that change often but stay in place, such as foliage.
+		</constant>
+		<constant name="INSTANCE_FLAG_MAX" value="5" enum="InstanceFlags">
 			Represents the size of the [enum InstanceFlags] enum.
 		</constant>
 		<constant name="SHADOW_CASTING_SETTING_OFF" value="0" enum="ShadowCastingSetting">

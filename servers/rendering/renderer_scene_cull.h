@@ -442,6 +442,7 @@ public:
 
 		bool ignore_occlusion_culling;
 		bool ignore_all_culling;
+		bool hzb_stable_content; // Only moving, resizing or hiding it invalidates the depth buffers for HZB occlusion culling.
 
 		Vector<RID> materials;
 
@@ -603,6 +604,7 @@ public:
 			lod_bias = 1.0;
 			ignore_occlusion_culling = false;
 			ignore_all_culling = false;
+			hzb_stable_content = false;
 
 			scenario = nullptr;
 

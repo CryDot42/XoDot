@@ -1336,6 +1336,9 @@ void RendererSceneCull::instance_geometry_set_flag(RID p_instance, RSE::Instance
 				}
 			}
 		} break;
+		case RSE::INSTANCE_FLAG_HZB_STABLE_CONTENT: {
+			instance->hzb_stable_content = p_enabled;
+		} break;
 		default: {
 		}
 	}
@@ -1728,13 +1731,15 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 		}
 	}
 
-	if (p_instance->indexer_id.is_valid()) {
-		// Depth buffers rendered before this update can't be trusted where this instance was.
+	AABB new_aabb;
+	new_aabb = instance_xform->xform(p_instance->aabb);
+
+	if (p_instance->indexer_id.is_valid() && (!p_instance->hzb_stable_content || new_aabb != p_instance->transformed_aabb)) {
+		// Depth buffers rendered before this update can't be trusted where this instance was
+		// (unless it declared that only moving or resizing it matters).
 		_hzb_occlusion_record_change(p_instance);
 	}
 
-	AABB new_aabb;
-	new_aabb = instance_xform->xform(p_instance->aabb);
 	p_instance->transformed_aabb = new_aabb;
 
 	if ((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) {

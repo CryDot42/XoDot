@@ -1418,7 +1418,7 @@ void LandscapeFoliage3D::_update_debug_bounds() {
 				drawn = cell.loaded && entry->gpu_slots.has(kv.key);
 			} else {
 				for (const Batch &batch : cell.batches) {
-					drawn = drawn || batch.instance.is_valid();
+					drawn = drawn || (batch.instance.is_valid() && batch.count > 0);
 				}
 				drawn = drawn && !cell.out_of_view;
 			}
@@ -1498,11 +1498,20 @@ void LandscapeFoliage3D::cleanup_shared_resources() {
 void LandscapeFoliage3D::_set_batch(Entry *p_entry, Cell &r_cell, int p_lod, const LocalVector<uint32_t> *p_indices) {
 	Batch &batch = r_cell.batches[p_lod];
 	const int count = p_indices ? int(p_indices->size()) : int(r_cell.instances.size());
-	if (count == 0 || p_lod >= p_entry->lod_count || p_entry->lod_meshes[p_lod].is_null() || !is_inside_tree() || get_world_3d().is_null()) {
+	if (p_lod >= p_entry->lod_count || p_entry->lod_meshes[p_lod].is_null() || !is_inside_tree() || get_world_3d().is_null()) {
 		_free_batch(batch);
 		return;
 	}
 	RenderingServer *rs = RenderingServer::get_singleton();
+	if (count == 0) {
+		// Its instances use other levels of the cell: emptied, not freed, as the renderer would stop
+		// trusting the depth buffer where the batch was for HZB occlusion culling (it draws nothing).
+		if (batch.multimesh.is_valid() && batch.count > 0) {
+			rs->multimesh_allocate_data(batch.multimesh, 0, RSE::MULTIMESH_TRANSFORM_3D, false, true);
+		}
+		batch.count = 0;
+		return;
+	}
 	if (batch.multimesh.is_null()) {
 		batch.multimesh = rs->multimesh_create();
 		rs->multimesh_set_mesh(batch.multimesh, p_entry->lod_meshes[p_lod]);
@@ -1527,6 +1536,9 @@ void LandscapeFoliage3D::_set_batch(Entry *p_entry, Cell &r_cell, int p_lod, con
 	if (batch.instance.is_null()) {
 		batch.instance = rs->instance_create2(batch.multimesh, get_world_3d()->get_scenario());
 		rs->instance_attach_object_instance_id(batch.instance, get_instance_id());
+		// Instances switching levels of detail stay in place: the renderer keeps trusting the depth
+		// buffer there for HZB occlusion culling (only hiding the batch or changing its bounds doesn't).
+		rs->instance_geometry_set_flag(batch.instance, RSE::INSTANCE_FLAG_HZB_STABLE_CONTENT, true);
 		_update_batch_settings(p_entry, r_cell, p_lod, batch);
 	}
 	batch.count = count;
@@ -1600,11 +1612,12 @@ bool LandscapeFoliage3D::_update_cell(Entry *p_entry, Cell &r_cell, int p_state,
 	}
 	if (p_state >= 0) {
 		r_cell.state = p_state; // Colors of the debug views.
+		const LocalVector<uint32_t> empty;
 		for (int lod = 0; lod < LandscapeFoliageType::MAX_LODS; lod++) {
 			if (lod == p_state) {
 				_set_batch(p_entry, r_cell, lod, nullptr);
 			} else {
-				_free_batch(r_cell.batches[lod]);
+				_set_batch(p_entry, r_cell, lod, &empty); // Emptied (see _set_batch()).
 			}
 		}
 		r_cell.state = p_state;
@@ -2585,6 +2598,8 @@ void LandscapeFoliage3D::_update_gpu_outputs(Entry *p_entry) {
 				output.window_start = now;
 				output.instance = rs->instance_create2(output.multimesh, get_world_3d()->get_scenario());
 				rs->instance_attach_object_instance_id(output.instance, get_instance_id());
+				// The instances drawn change every frame, but stay in place (see the batches of the cells).
+				rs->instance_geometry_set_flag(output.instance, RSE::INSTANCE_FLAG_HZB_STABLE_CONTENT, true);
 				_update_gpu_output_settings(p_entry, list, lod);
 				changed = true;
 			} else {
@@ -2834,7 +2849,7 @@ Dictionary LandscapeFoliage3D::get_statistics() const {
 		for (const KeyValue<Vector2i, Cell> &kv : entry->cells) {
 			bool rendered = false;
 			for (const Batch &batch : kv.value.batches) {
-				if (batch.instance.is_valid()) {
+				if (batch.instance.is_valid() && batch.count > 0) {
 					batches++;
 					drawn += kv.value.out_of_view ? 0 : batch.count;
 					rendered = true;
